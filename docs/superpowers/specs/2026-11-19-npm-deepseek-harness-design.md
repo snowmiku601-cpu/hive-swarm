@@ -8,11 +8,11 @@
 
 ## 1. Điều cần đạt
 
-Người mới có thể cài Hive Swarm theo hướng dẫn ngắn, biết mình đang dùng bản nào và cập nhật/gỡ mà không mất dữ liệu. Người dùng Codex tiếp tục dùng như hiện tại. Người dùng DeepSeek Harness (DSH) có một mục **Hive Swarm** thật trong giao diện DSH và các worker chạy bằng session/model của DSH.
+Người mới có thể cài Hive Swarm theo hướng dẫn ngắn, biết mình đang dùng bản nào và cập nhật/gỡ mà không mất dữ liệu. Người dùng Codex tiếp tục dùng như hiện tại. Người dùng DeepSeek Harness (DSH) có một **ô Swarm kèm icon ong trong danh sách Start bên phải**, mở Swarm native, và các worker chạy bằng session/model của DSH.
 
 Tên sản phẩm, ong chúa, bốn góc nhìn và ý nghĩa các trạng thái nhất quán giữa hai host. Bản DSH dùng giao diện, font, light/dark và cơ chế quyền của DSH; không thay thế shell của DSH hoặc các plugin khác.
 
-Người dùng đã đồng ý hướng phát hành npm và yêu cầu xem bản thiết kế trước khi triển khai. Các lựa chọn kỹ thuật dưới đây là đề xuất của người thiết kế, chưa phải các chi tiết đã được người dùng duyệt.
+Người dùng đã đồng ý hướng phát hành npm và yêu cầu xem bản thiết kế trước khi triển khai. Ngày 20/11, ảnh tham chiếu bổ sung đã chốt yêu cầu ô Swarm/icon ong trong list Start, cùng hàng kiểu Workspace files/Browser/Wallpaper Engine. Các lựa chọn kỹ thuật dưới đây là đề xuất của người thiết kế, chưa phải các chi tiết đã được người dùng duyệt.
 
 ## 2. Những gì đã xác minh
 
@@ -130,7 +130,20 @@ Empty state chỉ dẫn điểm vào chat và workspace cần chọn; mở panel
 
 ## 6. Trải nghiệm giao diện
 
-### Vị trí trong DSH
+### Điểm vào bắt buộc: ô Swarm trong Start
+
+Đây là yêu cầu hình ảnh mới của người dùng, **thuộc bản native đầu tiên**, không phải tùy chọn đợt sau:
+
+- Label **Swarm**, dùng icon ong chúa SVG đang có của Hive, không dùng emoji phụ thuộc font và không nhận icon placeholder hình khối.
+- Đăng ký tab type bằng `ctx.sidebarRightTabs.register`: ID riêng của gói `dsh-hive-swarm`, kind `hive-swarm`, title `Swarm`, một phần tử `guide[]` có ID ổn định, title/icon và order. Body đăng ký dưới `sidebar.right.pane.tab` với key là ID definition.
+- Dùng **standard guide card renderer** của DSH. Host quyết định capsule, border radius, padding, gap, hàng icon/title, hover/focus và độ rộng cùng list; không tạo một nút absolute theo tọa độ ô đỏ trong ảnh, không chèn DOM vào sau một nút cụ thể.
+- Order ứng viên 900, qualify trên cấu hình đang cài để Swarm nằm sau các tool cards hiện có. **Chi tiết cần người dùng duyệt:** rc.5 luôn render More tools sau mọi guide card, nên vị trí native sẽ là **Wallpaper Engine → Swarm → More tools**, không phải một ô nằm ngoài list dưới More tools. Không override toàn bộ guide chỉ để đổi quy tắc này.
+- Khi bundle npm được cài qua DSH plugin manager và Client entry được activate, registry tự thêm card vào Start. Không yêu cầu người dùng tự sửa profile hay pin một entry bằng tay. Tôn trọng lựa chọn ẩn/pin do host quản lý sau đó.
+- Chọn card dùng navigation mặc định của guide: mở tab `hive-swarm` trong chính pane đó, thay Start theo lifecycle host. Tab Swarm dùng native React view responsive, cùng dữ liệu/controller với full panel; người dùng có thể dùng expand/fullscreen/docking của DSH. Không mở cửa sổ trình duyệt ngoài hoặc một trang iframe khác.
+- Không có team liên kết thì hiện empty state/selector trong đúng workspace; không tự khởi chạy model, tạo team hay chọn team gần nhất toàn máy. Team liên kết phải đến từ parent session hoặc thao tác chọn rõ ràng của người dùng.
+- Enable/reload nhiều lần chỉ có một card; disable/gỡ rút đăng ký của Hive và không làm mất những card khác. Khi tab type/slot chưa có, doctor báo capability thiếu, không gây lỗi toàn shell.
+
+### Full panel bổ sung trong DSH
 
 Thêm một entry **Hive Swarm** kèm icon ong vào `sidebar.panellist` và một keyed page riêng trong `main`; chọn bằng layout API. Entry có ID riêng, đăng ký/dispose theo lifecycle plugin, không ghi đè Task Board. Order 30 là ứng viên, sau Task Board order 20, nhưng giữ cơ chế sắp xếp của host.
 
@@ -141,7 +154,7 @@ Panel chính có cấu trúc dự kiến:
 3. Nội dung đầy đủ của view đang chọn; Members mở Journal và session tương ứng khi host cho phép.
 4. Các lỗi kết nối/quyền/model có hành động khắc phục rõ, không chỉ toast biến mất.
 
-Không tự chiếm `conversation.input.dock` (Git Graph đang dùng), không thay composer/chat. **Right dock không thuộc bản native đầu tiên**; main panel đáp ứng mục tiêu tích hợp trực tiếp UI. Nếu triển khai đợt sau, dùng tab type riêng gắn đúng session, có trạng thái “no linked swarm” thay vì tự gán team theo lịch sử gần nhất.
+Không tự chiếm `conversation.input.dock` (Git Graph đang dùng), không thay composer/chat. Right tab từ card Start và main panel dùng chung một native Swarm view/controller; nút **Open full view** mang theo đúng team/workspace sang main panel. Hai chỗ hiển thị không được tạo hai scheduler hay hai lượt worker cho cùng thao tác. Right tab giữ đúng session context khi đổi chat hoặc đổi workspace.
 
 ### Dùng chung và phối hợp theme
 
@@ -209,7 +222,7 @@ Không tự chuyển các tệp hiện có sang `src/`/`tests/` trong cùng đ�
 | G1 — Codex/npm | Toàn bộ 121 test nền tiếp tục pass, test mới cho CLI/tarball/install lifecycle, MCP executable handshake và resources từ gói thật |
 | G2 — Tính di động | CI sạch Windows/macOS/Linux; minimum Node + các LTS được quảng cáo; đường dẫn có khoảng trắng/non-ASCII, quyền truy cập thất bại, rollback, no data loss |
 | G3 — DSH Host | Bundle load/dispose rc.5; fake Gateway/session fixtures kiểm chứng create/resume/model/prompt/settle/cancel, reader/writer permissions, ownership, duplicate/reordered events và restart recovery |
-| G4 — DSH UI | Panel/sidebar native mount/unmount, auth refusal, stream reconnect, theme/keyboard/dialog; test với Task Board/Git Graph/Wallpaper Engine đã nhận diện và không có các plugin đó |
+| G4 — DSH UI | Card Swarm/icon ong xuất hiện tự động trong native Start list sau activation; đúng padding/width và thứ tự đã duyệt, mở đúng native tab; không duplicate khi reload, gỡ không ảnh hưởng các card khác. Panel/sidebar, auth refusal, stream reconnect, theme/keyboard/dialog; test với Task Board/Git Graph/Wallpaper Engine đã nhận diện và không có các plugin đó |
 | G5 — Hành vi thật | Smoke tối thiểu trong DSH Desktop: khởi tạo team, worker gửi kết quả, worker phụ thuộc thức đúng lúc, xem Journal và mở đúng session; cần người dùng đồng ý trước nếu phát sinh lượt model/API |
 | G6 — Publish | Exact tarballs, allowlist, version integrity, license, npm owner/name/auth, changelog/tag; quyết định release cuối dựa trên bằng chứng đã lưu |
 
@@ -221,7 +234,7 @@ Thứ tự thực hiện đề xuất sau khi duyệt: **npm/Codex không hồi 
 
 1. Hai gói, một engine; bản DSH có mục Hive Swarm native và dùng model/session của DSH.
 2. Mỗi team thuộc một host; đợt này không chuyển hội thoại hoặc trộn worker giữa hai app.
-3. UI giữ cấu trúc Hive hiện tại, theo theme/font DSH và cùng tồn tại với các enhancements; right dock là bổ sung sau main panel.
+3. Có card **Swarm + icon ong** trong Start ngay từ bản đầu, mở native right tab và có full panel; theo theme/font DSH, giữ cùng list renderer với các tool khác. Thứ tự native đề xuất là **Wallpaper Engine → Swarm → More tools** vì host giữ More tools cuối list.
 4. Giữ dữ liệu khi update/uninstall; publish và model-backed smoke cần bước xác nhận cụ thể khi đến nơi.
 
 Các chi tiết triển khai nhỏ còn lại giao cho builder sau khi duyệt. Nếu gate API native thất bại hoặc phải thay đổi một trong bốn điểm trên, quay lại cập nhật thiết kế, không tự giảm phạm vi.
@@ -236,6 +249,7 @@ Fresh builder check ở báo cáo #47 nêu 5 câu hỏi. Bản rà soát ngày 2
 - [DSH rc.5 — API Gateway](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/docs/api-gateway.md).
 - [DSH rc.5 — Connection/auth và Desktop carrier](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/packages/client/connection/README.md), [public Fetch types](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/packages/client/connection/src/rpc.ts), [registry/admission implementation](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/packages/client/connection/src/rpc-host.ts).
 - [DSH rc.5 — Layout](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/packages/client/ui-layout/README.md), [Slots](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/docs/subsystems/slots.md), [Right Sidebar](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/docs/subsystems/sidebar-right.md).
+- [DSH rc.5 — Start guide cards / More tools](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/packages/client/ui-sidebar-right/README.md#the-guide), [public guide entry/tab registry types](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/packages/client/ui-sidebar-right/src/client/tab-registry.ts). Ảnh người dùng chỉ dùng để xác định vùng UI; không đưa nội dung chat riêng trong ảnh vào repo/artifact phát hành.
 - [DSH rc.5 — Plugin publishing/profile ownership](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/docs/user/develop/basic/publish.md), [Desktop launcher](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/apps/desktop/README.md), [ACP limitations](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/packages/acp/acp/README.md).
 - Installed Task Board source: `src/client/native-panel.tsx`, `src/host-runner.ts`, `src/host-routes.ts`; đây là tiền lệ để kiểm chứng, không phải mã được sao chép vào Hive.
 - [Node ESM/import.meta.main](https://nodejs.org/api/esm.html#importmetamain), [npm package content/bin](https://docs.npmjs.com/cli/v11/configuring-npm/package-json), [GitHub Releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases).

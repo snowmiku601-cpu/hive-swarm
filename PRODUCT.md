@@ -23,6 +23,7 @@ Hive Swarm combines a persistent coordination engine, per-member host sessions, 
 - Current shipped repository: Node.js ESM, built-in SQLite, zero third-party runtime dependencies, Codex adapter, standalone/MCP App UI and local installers.
 - Current UI: Overview, Board, Members, Graph and worker Journal; representative demo screenshots are labeled as demo evidence.
 - Requested next capabilities: npm distribution and a native DeepSeek Harness integration, with compatible existing UI enhancements. These are requested work, not shipped functionality.
+- The user identified the DSH right-side Start launcher list as a required entry point: a native `Swarm` card with the existing bee icon, registered when the DSH npm bundle activates.
 - The maintainer explicitly requested a design for approval before implementation on November 19, 2026.
 
 ## Capabilities and Constraints
