@@ -840,6 +840,14 @@ export class TeamBoard {
     return team;
   }
 
+  pauseAll() {
+    this.dispatchSuspended = true;
+    for (const {value} of this.db.prepare('SELECT value FROM teams').all()) {
+      const team = restore(JSON.parse(value));
+      if (!team.paused && team.members.some(member => member.status === 'working' || member.status === 'queued')) this.pause(team.id);
+    }
+  }
+
   resume(id, extraTurns = 0) {
     const team = this.get(id);
     team.turnLimit += integer(extraTurns, 0, 100, 'Extra turns');
@@ -860,7 +868,7 @@ export class TeamBoard {
   }
 
   dispatch(id) {
-    if (this.removingWorktrees.has(id)) return;
+    if (this.closed || this.dispatchSuspended || this.removingWorktrees.has(id)) return;
     const team = this.get(id);
     if (team.paused || team.turns >= team.turnLimit) {
       this.monitor(team);
