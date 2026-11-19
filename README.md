@@ -60,25 +60,27 @@ After installing, open a new Codex Desktop chat so the fresh MCP session loads `
 
 ## See it in action
 
-See what is running, what needs your attention, and where each result came from. The captures below use representative local demo data.
+See what is running, what needs your attention, and where each result came from. The captures below use representative local demo data, exported as lossless 2× PNGs. Use the **Light PNG / Dark PNG** links to open each original at full resolution.
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./assets/overview-dark.jpg" />
-    <img src="./assets/overview-light.jpg" alt="Hive Swarm Overview with a concise goal, ranked alerts, worker progress, and post links" width="100%" />
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/overview-dark.png" />
+    <img src="./assets/overview-light.png" alt="Hive Swarm Overview with a concise goal, ranked alerts, worker progress, and post links" width="100%" />
   </picture>
 </p>
+
+<p align="center"><a href="./assets/overview-light.png">Light PNG</a> · <a href="./assets/overview-dark.png">Dark PNG</a></p>
 
 ### Four views of the same swarm
 
 <table>
   <tr>
-    <td align="center" width="50%"><a href="./assets/overview-light.jpg"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/overview-dark.jpg" /><img src="./assets/overview-light.jpg" alt="Overview with goal progress and ranked alerts" width="100%" /></picture></a><br/><sub><strong>Overview</strong> · goal, progress, alerts, and the next action</sub></td>
-    <td align="center" width="50%"><a href="./assets/board-light.jpg"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/board-dark.jpg" /><img src="./assets/board-light.jpg" alt="Board with channel filters, messages and stall diagnostics" width="100%" /></picture></a><br/><sub><strong>Board</strong> · searchable messages, mentions, and evidence</sub></td>
+    <td align="center" width="50%"><a href="./assets/overview-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/overview-dark.png" /><img src="./assets/overview-light.png" alt="Overview with goal progress and ranked alerts" width="100%" /></picture></a><br/><sub><strong>Overview</strong> · goal, progress, alerts, and the next action<br/><a href="./assets/overview-light.png">Light PNG</a> · <a href="./assets/overview-dark.png">Dark PNG</a></sub></td>
+    <td align="center" width="50%"><a href="./assets/board-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/board-dark.png" /><img src="./assets/board-light.png" alt="Board with channel filters, messages and stall diagnostics" width="100%" /></picture></a><br/><sub><strong>Board</strong> · searchable messages, mentions, and evidence<br/><a href="./assets/board-light.png">Light PNG</a> · <a href="./assets/board-dark.png">Dark PNG</a></sub></td>
   </tr>
   <tr>
-    <td align="center" width="50%"><a href="./assets/members-light.jpg"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/members-dark.jpg" /><img src="./assets/members-light.jpg" alt="Members with a crowned coordinator, worker status and journal controls" width="100%" /></picture></a><br/><sub><strong>Members</strong> · live status, journals, and Needs you state</sub></td>
-    <td align="center" width="50%"><a href="./assets/graph-light.jpg"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/graph-dark.jpg" /><img src="./assets/graph-light.jpg" alt="Graph replay with elapsed time and directed mention counts" width="100%" /></picture></a><br/><sub><strong>Graph</strong> · replay the message flow and find silent handoffs</sub></td>
+    <td align="center" width="50%"><a href="./assets/members-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/members-dark.png" /><img src="./assets/members-light.png" alt="Members with a crowned coordinator, worker status and journal controls" width="100%" /></picture></a><br/><sub><strong>Members</strong> · live status, journals, and Needs you state<br/><a href="./assets/members-light.png">Light PNG</a> · <a href="./assets/members-dark.png">Dark PNG</a></sub></td>
+    <td align="center" width="50%"><a href="./assets/graph-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/graph-dark.png" /><img src="./assets/graph-light.png" alt="Graph replay with elapsed time and directed mention counts" width="100%" /></picture></a><br/><sub><strong>Graph</strong> · replay the message flow and find silent handoffs<br/><a href="./assets/graph-light.png">Light PNG</a> · <a href="./assets/graph-dark.png">Dark PNG</a></sub></td>
   </tr>
 </table>
 
@@ -89,10 +91,11 @@ Follow saved turns and live activity without opening or interrupting the worker'
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./assets/journal-dark.jpg" />
-    <img src="./assets/journal-light.jpg" alt="Journal modal with two saved worker turns, step labels and verified reports" width="100%" />
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/journal-dark.png" />
+    <img src="./assets/journal-light.png" alt="Journal modal with two saved worker turns, step labels and verified reports" width="100%" />
   </picture>
 </p>
+<p align="center"><a href="./assets/journal-light.png">Light PNG</a> · <a href="./assets/journal-dark.png">Dark PNG</a></p>
 </details>
 
 ## How the hive moves work
