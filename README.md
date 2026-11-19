@@ -1,102 +1,173 @@
-# Hive Swarm (`v1.7.4`)
+<div align="center">
+  <img src="./assets/hive-swarm-banner.svg" alt="Hive Swarm — multi-agent coordination for AI agents" width="100%" />
 
-A lightweight, single-folder **multi-agent Swarm engine & UI** built around an MCP server and SQLite WAL message board (`engine.mjs`, `server.mjs`, `board.html`/`board.js`, `worktrees.mjs`). It currently ships with a Codex Desktop / CLI runtime adapter (`codex.mjs`) and a clean plugin layout ready to integrate across harnesses (**Codex**, **Claude Code**, **DeepSeek Harness**, and future MCP-capable agent runners).
+  <p><strong>One goal. A team of agents. A shared board for every handoff.</strong></p>
 
----
+  <p>
+    <img src="https://img.shields.io/badge/runtime-Node.js%20%E2%89%A522.5-75baef?style=flat-square" alt="Node.js 22.5 or newer" />
+    <img src="https://img.shields.io/badge/dependencies-0-55cbb2?style=flat-square" alt="Zero dependencies" />
+    <img src="https://img.shields.io/badge/tests-121%20passing-91d4a2?style=flat-square" alt="121 tests passing" />
+    <img src="https://img.shields.io/badge/version-1.7.4-f6bc55?style=flat-square" alt="Version 1.7.4" />
+    <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-b3ce64?style=flat-square" alt="MIT license" /></a>
+  </p>
 
-## Key Features
-
-- **Cross-Harness MCP Core + Swappable Runtime:**
-  - `engine.mjs`: SQLite WAL board scheduler, `@mention` / `@group` / `@all` / `@#channel` routing, dependency tracking (`waitFor`), zero-token `wait_for_board`, shared-checkout single-writer lock, and turn budgets.
-  - `server.mjs`: Standard MCP stdio + HTTP/SSE board server (`0` extra model turns for UI, transcript reads, or waiting).
-  - `worktrees.mjs`: Isolated detached Git worktrees per writable worker (`HEAD` base) with uncommitted-change protection.
-  - `codex.mjs`: Codex `app-server` worker adapter (thread persistence, warm `thread/fork` on model/provider changes, auto-archival, live SSE step streaming, and Windows MSIX `package identity` isolation).
-- **Windows MSIX Sandbox Fix (`v1.7.3`):** Strips inherited host/MSIX environment variables (`CODEX_WINDOWS_REGISTERED_CORE`, `CODEX_WINDOWS_SANDBOX_PACKAGE_FAMILY`, parent session markers, etc.) when spawning the daemon and worker `app-server`s, and sets `features.prefer_mxc=false` on Windows so workers execute shell commands and `node_repl` cleanly.
-- **Four-Tab Hive UI:**
-  1. **Overview:** Concise goal with an expandable full brief, worker/turn progress, one-line member activity, ranked alerts with post/mention/budget shortcuts, milestones, and coordinator summary.
-  2. **Board:** Channel & member filters, safe Markdown, clickable `#seq` references, and live `@mention` composer.
-  3. **Members:** Crowned coordinator and tinted pixel workers grouped by Coordinator / Working / Standing by & done / Retired; a **Needs you** reason for stall/budget stops; inline **View journal**, **Open chat**, **@mention**, **Switch model & effort**, **Retire**, and **Clean worktree**.
-  4. **Graph:** Step-by-step chronological replay (`0.5×–4×`, Even/Real-time pacing), elapsed span, distinct rings for members who posted without outgoing mentions, responsive small/dense layouts, inactive-member and `@all` toggles, directed counts and selected posts.
-- **Stall Diagnostics:** One `[stall]` system post per stalled episode identifies unaddressed results by `#seq`, unanswered mentions, quota/failure stops, dependency root blockers and circular waits. Overview attention stays current from saved board facts without extra model turns. Alerts rank quota/failure and turn limits first, then unaddressed posts, blocked waits and worktree cleanup.
-- **Zero-Dependency Runtime:** Pure Node.js ESM (`>= 22.5`, built-in `node:sqlite`) — no `npm install`, no `node_modules`.
-
----
-
-## Requirements
-
-- **Codex Desktop** or **Codex CLI**
-- **Node.js >= 22.5** (built-in `node:sqlite`)
-  - *Windows tip:* Even if Node 22+ is not on your global `PATH`, `install.ps1` automatically detects the **Node v24 (`cua_node`)** runtime bundled with Codex Desktop.
+  <p>
+    <a href="#quick-start">🚀 Quick Start</a> ·
+    <a href="#see-it-in-action">🖼️ See It in Action</a> ·
+    <a href="#how-the-hive-moves-work">🧭 How It Works</a> ·
+    <a href="#key-features">💡 Features</a> ·
+    <a href="#running-tests">✅ Tests</a>
+  </p>
+</div>
 
 ---
 
-## Quick Install
+Hive Swarm is a lightweight, single-folder **coordination engine and UI for AI agents**. Split a goal across workers, coordinate dependencies, inspect live activity, and trace each result back to its handoff on a shared board.
+
+The MCP core is independent of the worker harness. **The current runtime adapter supports Codex Desktop and Codex CLI.** Future adapters can connect the same board to Claude Code, DeepSeek Harness, OpenCode, Pi, ZCode, Kimi Code, and other agent harnesses.
+
+The runtime stays deliberately small: pure Node.js ESM, built-in `node:sqlite`, and no third-party packages or `npm install` step.
+
+## Quick Start
+
+Requires **Codex Desktop or Codex CLI** and **Node.js >= 22.5** with built-in `node:sqlite`. The Windows installer can also find the Node runtime bundled with Codex Desktop.
 
 ### Windows (PowerShell)
 
-Clone this repository (or extract `hive-swarm-v1.7.4.zip`) and run:
-
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1
+git clone https://github.com/snowmiku601-cpu/hive-swarm.git
+cd hive-swarm
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-Options:
-- `-RunTests`: Run the full unit/integration suite with mocked runners before installing.
-- `-NodePath "C:\path\to\node.exe"`: Force a specific Node 22.5+ binary.
+Useful options:
+
+- `-RunTests` runs the complete unit/integration suite with mocked runners before installing.
+- `-NodePath "C:\path\to\node.exe"` selects a specific Node 22.5+ binary.
 
 ### macOS / Linux
 
 ```bash
+git clone https://github.com/snowmiku601-cpu/hive-swarm.git
+cd hive-swarm
 chmod +x ./install.sh
 ./install.sh
 ```
 
-Pass `--test` to run the test suite first (`./install.sh --test`).
+Pass `--test` to run the suite first: `./install.sh --test`.
 
-> After installing, **open a new chat** in Codex Desktop so the fresh MCP server session loads `v1.7.4`. An older daemon with active turns refuses shutdown; let those turns finish before opening the updated board.
+After installing, open a new Codex Desktop chat so the fresh MCP session loads `v1.7.4`. An older daemon with active turns refuses shutdown; let those turns finish before upgrading.
 
----
+## See it in action
+
+See what is running, what needs your attention, and where each result came from. The captures below use representative local demo data.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/overview-dark.jpg" />
+    <img src="./assets/overview-light.jpg" alt="Hive Swarm Overview with a concise goal, ranked alerts, worker progress, and post links" width="100%" />
+  </picture>
+</p>
+
+### Four views of the same swarm
+
+<table>
+  <tr>
+    <td align="center" width="50%"><a href="./assets/overview-light.jpg"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/overview-dark.jpg" /><img src="./assets/overview-light.jpg" alt="Overview with goal progress and ranked alerts" width="100%" /></picture></a><br/><sub><strong>Overview</strong> · goal, progress, alerts, and the next action</sub></td>
+    <td align="center" width="50%"><a href="./assets/board-light.jpg"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/board-dark.jpg" /><img src="./assets/board-light.jpg" alt="Board with channel filters, messages and stall diagnostics" width="100%" /></picture></a><br/><sub><strong>Board</strong> · searchable messages, mentions, and evidence</sub></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><a href="./assets/members-light.jpg"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/members-dark.jpg" /><img src="./assets/members-light.jpg" alt="Members with a crowned coordinator, worker status and journal controls" width="100%" /></picture></a><br/><sub><strong>Members</strong> · live status, journals, and Needs you state</sub></td>
+    <td align="center" width="50%"><a href="./assets/graph-light.jpg"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/graph-dark.jpg" /><img src="./assets/graph-light.jpg" alt="Graph replay with elapsed time and directed mention counts" width="100%" /></picture></a><br/><sub><strong>Graph</strong> · replay the message flow and find silent handoffs</sub></td>
+  </tr>
+</table>
+
+<details>
+<summary><strong>Look inside a worker journal</strong></summary>
+
+Follow saved turns and live activity without opening or interrupting the worker's chat.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/journal-dark.jpg" />
+    <img src="./assets/journal-light.jpg" alt="Journal modal with two saved worker turns, step labels and verified reports" width="100%" />
+  </picture>
+</p>
+</details>
+
+## How the hive moves work
+
+<p align="center"><img src="./assets/hive-swarm-flow.svg" alt="Goal to coordinator to workers to verified board handoff flow" width="100%" /></p>
+
+## Key features
+
+| What you need | What Hive Swarm provides |
+| --- | --- |
+| Coordinate independent work | Roles, dependencies, up to 12 workers, and per-member chats |
+| Keep handoffs moving | Direct, group, channel and broadcast mentions |
+| Understand a stalled run | Ranked alerts with post references and root blockers |
+| Follow progress | Live steps, saved journals, Overview and graph replay |
+| Control the run | Turn budgets, model selection, pause, retire and worktree cleanup |
+
+<details>
+<summary><strong>Runtime and implementation details</strong></summary>
+
+- **Cross-harness MCP core:** `engine.mjs` provides the SQLite WAL scheduler, `@mention` / `@group` / `@all` / `@#channel` routing, dependency tracking through `waitFor`, zero-token `wait_for_board`, shared-checkout locking, and turn budgets.
+- **Swappable runtime:** `codex.mjs` runs each member in its own Codex `app-server` chat with thread persistence, warm forks for model changes, automatic archival, and live SSE activity.
+- **Actionable Overview:** a concise goal header, expandable full brief, one-line “now” summaries, ranked attention items, post links, mention shortcuts, budget actions, milestones, and coordinator summary.
+- **Root-cause stall diagnostics:** one `[stall]` system post per stalled episode identifies unaddressed results by `#seq`, unanswered mentions, quota/failure stops, dependency roots, and circular waits without starting a diagnostic model turn.
+- **Four-tab Hive UI:** Overview, Board, Members, and Graph share the same saved events, with safe Markdown, channels, journals, model controls, worktree actions, and responsive light/dark themes.
+- **Graph replay:** elapsed span, direct/group mentions, collapsed or expanded broadcasts, dashed rings for members who posted without outgoing mentions, and layouts tuned for small teams and dense swarms.
+- **Isolated Git worktrees:** writable workers can work in separate detached checkouts from a shared committed base, with cleanup that protects uncommitted changes.
+- **Pixel bee roster:** a gold crowned coordinator, tinted workers, and crisp sleeping `Zzz` poses make responsibility and state readable at a glance.
+- **Windows portability:** preserves the v1.7.3 MSIX fixes, including `childEnvironment()`, Windows `features.prefer_mxc=false`, portable `.mcp.json` `cwd: "."`, legacy `CodexTeamBoard` / `codex-team-board` identity, port `17943`, `/ready`, `/shutdown`, and both installers.
+
+</details>
 
 ## Usage
 
 In a local project chat in Codex Desktop:
 
-1. Type `/swarm` (or `$hive-swarm:swarm`) followed by your task:
+1. Type `/swarm` or `$hive-swarm:swarm` followed by the task:
+
    ```text
    $hive-swarm:swarm Review this repository, fix edge-case bugs, and run verification tests.
    ```
-2. Specify a model when needed (`Use <model> ...`), or omit it for your default model.
-3. In **Goal** runs, `coordinator: false` keeps your main Goal chat as the sole coordinator polling with zero-token `wait_for_board`. In single-turn chats, set `coordinator: true` for a background `@coordinator` round summarizer.
-4. Click **🐝 Open Swarm UI** (or switch to the right-side **Swarm** tab) to watch live steps, inspect member **Journals** safely mid-turn, switch models/efforts, or steer directly with `@mentions`.
 
----
+2. Specify a model when needed (`Use <model> ...`), or omit it for the runtime default.
+3. In a Goal run, use `coordinator: false` so the main Goal chat remains the sole coordinator polling with zero-token `wait_for_board`.
+4. In a regular single-turn chat, set `coordinator: true` when a background `@coordinator` should summarize completed worker rounds.
+5. Open **🐝 Open Swarm UI** to watch live steps, inspect member Journals, switch models, clean completed worktrees, or steer directly with `@mentions`.
 
-## Repository Layout
+## Repository layout
 
-Single flat plugin + marketplace root (no nested package wrapper):
+The plugin stays in one unified repository root:
 
-- `.agents/plugins/marketplace.json` & `.codex-plugin/plugin.json` — Codex plugin & marketplace metadata
-- `.mcp.json` — Portable `"cwd": "."` MCP config (`node ./server.mjs`)
-- `skills/swarm/` — `/swarm` skill prompt & agent metadata
-- `engine.mjs`, `server.mjs`, `codex.mjs`, `worktrees.mjs` — Core MCP/board engine & runtime adapter
-- `board.html`, `board.css`, `board.js`, `hive-bees.js`, `hive-graph.js` — Standalone & MCP App Hive UI
-- `install.ps1`, `install.sh` — Cross-platform installers
-- `*.test.mjs` — Full `node:test` suite, including stall diagnosis, UI actions, graph replay/layout and sprite pixel coverage
+- `.agents/plugins/marketplace.json` and `.codex-plugin/plugin.json` — plugin metadata
+- `.mcp.json` — portable MCP configuration (`node ./server.mjs`)
+- `engine.mjs`, `server.mjs`, `codex.mjs`, `worktrees.mjs` — board engine and runtime adapter
+- `board.html`, `board.css`, `board.js`, `hive-bees.js`, `hive-graph.js` — standalone and MCP App UI
+- `assets/` — README banner, coordination diagram, and verified UI captures
+- `LICENSE` — MIT license
+- `skills/swarm/` — `/swarm` skill prompt and agent metadata
+- `install.ps1`, `install.sh` — cross-platform installers
+- `*.test.mjs` — the complete `node:test` suite
 
----
-
-## Running Tests
+## Running tests
 
 ```bash
 node --test ./*.test.mjs
 ```
 
-Tests use mocked runners and make no paid API calls. The UI, graph, transcript reader and stall monitor do not schedule diagnostic model turns. Adding turns or sending an `@mention` remains an explicit user action.
+The suite uses mocked runners and makes no paid API calls. The UI, graph, transcript reader, and stall monitor do not schedule diagnostic model turns. Adding turns or sending an `@mention` remains an explicit user action.
 
----
+## Troubleshooting notes
 
-## Troubleshooting Notes
+- **Windows sandbox process errors:** the installer and runtime strip inherited MSIX/session markers and set `features.prefer_mxc=false` on Windows so workers can run shell commands and `node_repl` cleanly.
+- **Vitest `spawn EPERM` in Windows worker sandboxes:** for Vitest projects, use `--configLoader native --pool threads` to avoid child-process pool restrictions.
+- **Opening a live worker chat:** Codex Desktop may hold one writer lock per active thread. Use **View journal** in the Hive UI to follow progress without interrupting the turn.
+- **State and upgrades:** board state lives in SQLite WAL under `%LOCALAPPDATA%\CodexTeamBoard` on Windows or `~/CodexTeamBoard` on macOS/Linux. Override with `HIVE_SWARM_DATA` or `TEAM_BOARD_DATA`. The default loopback port is `17943` (`HIVE_SWARM_PORT` / `TEAM_BOARD_PORT`). Older compatible daemons shut down for upgrade only after active turns settle.
 
-- **Vitest `spawn EPERM` inside Windows read-only/workspace-write worker sandboxes:** Codex's unelevated Windows sandbox restricts spawning certain child/network helpers (`net use` / `pool: forks`). Pass `--configLoader native --pool threads` when invoking Vitest inside worker sandboxes.
-- **"Open chat" while a worker is actively running a turn:** Codex Desktop holds one writer lock per active thread, so opening a live worker thread mid-turn may wait until that turn finishes. Use **View journal** in the Hive UI anytime to follow progress live with 0 interruptions.
-- **State & Upgrades:** Board state lives in SQLite WAL under `%LOCALAPPDATA%\CodexTeamBoard` on Windows (or `~/CodexTeamBoard` on macOS/Linux; overridable via `HIVE_SWARM_DATA` / `TEAM_BOARD_DATA`). Default loopback port is `17943` (`HIVE_SWARM_PORT` / `TEAM_BOARD_PORT`). Older compatible daemons shut down cleanly on upgrade once active turns settle.
+## License
+
+Licensed under the [MIT License](./LICENSE). Copyright © 2026 snowmiku601-cpu.
