@@ -205,6 +205,7 @@ function numberPosts(team) {
 
 function restore(team) {
   numberPosts(team);
+  team.host ??= 'codex';
   team.channels ??= [{...main}];
   for (const member of team.members) member.channels ??= [];
   delete team.overview;
@@ -361,7 +362,11 @@ export function stallIssues(team) {
 }
 
 export class TeamBoard {
-  constructor(filename, runTurn) {
+  constructor(filename, runTurn, {host = 'codex', recovery = host === 'codex' ? 'legacy' : 'preserve'} = {}) {
+    if (!['codex', 'deepseek-harness'].includes(host)) throw Error('Unrecognized worker host.');
+    if (!['legacy', 'preserve'].includes(recovery)) throw Error('Unrecognized recovery policy.');
+    this.host = host;
+    this.recovery = recovery;
     this.db = new DatabaseSync(filename);
     this.db.exec(`
       PRAGMA journal_mode = WAL;
@@ -386,7 +391,12 @@ export class TeamBoard {
     this.activity = new Map();
     this.closed = false;
 
-    for (const { value } of this.db.prepare('SELECT value FROM teams').all()) {
+    const savedTeams = this.db.prepare('SELECT value FROM teams').all();
+    if (savedTeams.some(({value}) => (JSON.parse(value).host ?? 'codex') !== host)) {
+      this.db.close();
+      throw Error('This storage belongs to a different worker host. Use a separate data directory.');
+    }
+    for (const { value } of savedTeams) {
       const team = JSON.parse(value);
       const count = team.members.length;
       const hadOverview = Object.hasOwn(team,'overview');
@@ -399,6 +409,13 @@ export class TeamBoard {
       }
       team.paused = true;
       for (const member of team.members.filter(m => m.status === 'working')) {
+        if (this.recovery === 'preserve') {
+          member.status = 'failed';
+          member.recoveryRequired = true;
+          member.waitFor = [];
+          this.record(team, 'system', '@' + member.name + ': outcome unconfirmed after service shutdown. Inspect the owned session before continuing.');
+          continue;
+        }
         member.status = 'failed';
         member.waitFor = [];
         member.inbox = [...(member.inFlight ?? []), ...member.inbox].slice(-24);
@@ -416,6 +433,7 @@ export class TeamBoard {
   }
 
   create(input, worktreeSource) {
+    if (input.host != null && input.host !== this.host) throw Error('A team cannot change its worker host.');
     const cwd = realpathSync(text(input.cwd, 'Workspace', 1024));
     if (!statSync(cwd).isDirectory()) throw Error('Workspace must be a directory.');
     if (!Array.isArray(input.members) || input.members.length < 1 || input.members.length > workerLimit) {
@@ -429,7 +447,7 @@ export class TeamBoard {
 
     const task = text(input.task, 'Task', 8000);
     const team = {
-      id: randomUUID(), cwd, task, title: text(input.title ?? task.slice(0, 95), 'Title', 95),
+      id: randomUUID(), host: this.host, cwd, task, title: text(input.title ?? task.slice(0, 95), 'Title', 95),
       ...(input.model ? {model: text(input.model, 'Model', 100)} : {}),
       effort: reasoningEffort(input.effort),
       concurrency: integer(input.concurrency ?? 2, 1, 4, 'Concurrency'),
@@ -776,6 +794,7 @@ export class TeamBoard {
   }
 
   wakeForMessage(member, addressed) {
+    if (member.recoveryRequired) return;
     if (member.status === 'working' || (member.waitFor.length && !addressed)) return;
     if ((member.status === 'quota' || !isWorker(member)) && !addressed) return;
     member.waitFor = [];
@@ -849,7 +868,7 @@ export class TeamBoard {
     const active = team.members.filter(m => m.status === 'working');
     if (active.length >= team.concurrency) return;
     const sharedWriterActive = active.some(member => member.writable && !member.worktree);
-    const member = team.members.filter(m => m.status === 'queued' && (!m.writable || m.worktree || !sharedWriterActive))
+    const member = team.members.filter(m => m.status === 'queued' && !m.recoveryRequired && (!m.writable || m.worktree || !sharedWriterActive))
       .sort((a, b) => (a.lastTurn ?? 0) - (b.lastTurn ?? 0))[0];
     if (!member) {
       this.monitor(team);
