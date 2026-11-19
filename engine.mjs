@@ -156,6 +156,13 @@ function pendingDependency(member, dependency) {
     (dependency.completed ?? 0) <= (member.waitAfter?.[dependency.name] ?? 0);
 }
 
+export function pendingWaitFor(team,member) {
+  return (member.waitFor??[]).filter(name=>{
+    const dependency=team.members.find(entry=>entry.name===name);
+    return !dependency||pendingDependency(member,dependency);
+  });
+}
+
 function validateRoster(members) {
   const names = new Set(members.map(member => member.name));
   if (names.size !== members.length) throw Error('Member names must be unique, including retired members.');
@@ -246,6 +253,111 @@ export function teamPhase(team) {
   if (team.turns >= team.turnLimit) return 'budget';
   if (members.some(member => member.status === 'queued')) return 'queued';
   return 'stalled';
+}
+
+// Board diagnostics are derived from saved facts, never from another model turn.
+export function stallIssues(team) {
+  const events=team.events??[];
+  const members=team.members.filter(activeMember);
+  const roster=new Map(team.members.map(member=>[member.name,member]));
+  const issues=[];
+  const isMessage=event=>event.author!=='system' && (event.kind==='message'||!event.kind);
+  const addressed=name=>events.findLast(event=>isMessage(event) &&
+    (event.targets?.includes(name)||(name==='coordinator'&&event.coordinatorMention)));
+  let boundary=team.lastDispatchSeq??0;
+  for (const event of events) {
+    if ((event.author==='system'&&/^@[a-z][a-z0-9_-]* started turn \d+\./i.test(event.text)) ||
+      (isMessage(event)&&(event.targets?.length||event.coordinatorMention||event.broadcast))) {
+      boundary=Math.max(boundary,event.seq);
+    }
+  }
+  for (const member of members) {
+    const pending=member.inbox?.findLast(event=>event.author!=='system');
+    const mention=pending??addressed(member.name);
+    if (['quota','failed'].includes(member.status)) {
+      issues.push({kind:member.status,member:member.name,...(mention?{seq:mention.seq}:{}),
+        text:'@'+member.name+(member.status==='quota'?' hit model quota limit':' failed')+
+          '. '+(pending?'Post #'+pending.seq+' is still pending. ':mention?'Addressed in post #'+mention.seq+'. ':'')+(member.status==='quota'
+            ? 'Switch model or mention @'+member.name+' when quota is available.'
+            : 'Mention @'+member.name+' to retry.')});
+    } else if (member.status==='waiting'&&mention) {
+      const settled=member.lastSettledSeq??events.findLast(event=>event.author===member.name&&event.kind!=='brief')?.seq??0;
+      if (pending||mention.seq>settled) issues.push({kind:'mention',member:member.name,seq:mention.seq,
+        text:'Post #'+mention.seq+' addressed @'+member.name+', who has not settled'+
+          (member.waitFor?.length?' and is blocked by a dependency.':'. Send a direct @mention to continue.')});
+    }
+  }
+  for (const event of events.filter(event=>event.seq>boundary&&isMessage(event)&&!event.targets?.length&&
+    !event.broadcast&&!event.coordinatorMention).slice(-6).reverse()) {
+    issues.push({kind:'unaddressed',member:event.author,seq:event.seq,
+      text:'Unaddressed post #'+event.seq+' by @'+event.author+'. No member was @mentioned.'});
+  }
+  const dependencies=member=>(member.waitFor??[]).filter(name=>{
+    const dependency=roster.get(name);
+    return !dependency||pendingDependency(member,dependency);
+  });
+  const waiting=members.filter(member=>member.status==='waiting'&&dependencies(member).length);
+  const referenced=new Set(waiting.flatMap(dependencies));
+  const covered=new Set(),cyclic=new Set();
+  const nextFor=name=>roster.get(name)?.status==='waiting'?dependencies(roster.get(name)):[];
+  const reason=member=>!member?'missing from the roster':member.status==='done'?'needs a new report':
+    member.status==='waiting'?'waiting for an @mention':member.status==='quota'?'model quota limit':member.status;
+  // Collapse strongly connected waits first; enumerating every path is factorial
+  // for a dense swarm. Each component gets one representative cycle.
+  const indices=new Map(),low=new Map(),stack=[],onStack=new Set();
+  let index=0;
+  function component(name) {
+    indices.set(name,index);low.set(name,index++);stack.push(name);onStack.add(name);
+    for (const next of nextFor(name)) {
+      if (!indices.has(next)) {component(next);low.set(name,Math.min(low.get(name),low.get(next)));}
+      else if (onStack.has(next)) low.set(name,Math.min(low.get(name),indices.get(next)));
+    }
+    if (low.get(name)!==indices.get(name)) return;
+    const names=new Set();
+    let last;
+    do {last=stack.pop();onStack.delete(last);names.add(last);} while(last!==name);
+    if (names.size===1&&!nextFor(name).includes(name)) return;
+    for (const entry of names) cyclic.add(entry);
+    const visited=new Set();
+    function cyclePath(current,path) {
+      const loop=path.indexOf(current);
+      if (loop!==-1) return [...path.slice(loop),current];
+      if (visited.has(current)) return;
+      visited.add(current);
+      for (const next of nextFor(current).filter(next=>names.has(next))) {
+        const found=cyclePath(next,[...path,current]);
+        if (found) return found;
+      }
+    }
+    const chain=cyclePath(waiting.find(member=>names.has(member.name)).name,[]);
+    issues.push({kind:'cycle',member:chain[0],chain,
+      text:'Circular wait: '+chain.map(name=>'@'+name).join(' -> ')+'. Mention one member to break the wait.'});
+  }
+  for (const member of waiting) if (!indices.has(member.name)) component(member.name);
+  function chains(root) {
+    const queue=[[root]],seen=new Set([root]);
+    for (let i=0;i<queue.length;i++) {
+      const path=queue[i],name=path.at(-1);
+      covered.add(name);
+      const next=cyclic.has(name)?[]:nextFor(name);
+      if (!next.length&&path.length>1) {
+        issues.push({kind:'dependency',member:name,chain:path,
+          text:'Dependency wait: '+path.map(name=>'@'+name).join(' -> ')+'. Root blocker: @'+name+
+            ' ('+(cyclic.has(name)?'circular wait':reason(roster.get(name)))+').'});
+      }
+      for (const dependency of next) if (!seen.has(dependency)) {
+        seen.add(dependency);queue.push([...path,dependency]);
+      }
+    }
+  }
+  for (const member of waiting.filter(member=>!referenced.has(member.name))) chains(member.name);
+  for (const member of waiting) if (!covered.has(member.name)&&!cyclic.has(member.name)) chains(member.name);
+  if (!issues.length) {
+    const member=members.find(member=>member.status==='waiting');
+    issues.push({kind:'waiting',...(member?{member:member.name}:{}),
+      text:member?'@'+member.name+' is waiting for an @mention.':'No member can start work. Send an @mention to continue.'});
+  }
+  return issues;
 }
 
 export class TeamBoard {
@@ -754,7 +866,7 @@ export class TeamBoard {
     const completions = Object.fromEntries(team.members.map(m => [m.name, m.completed ?? 0]));
     member.inFlight = member.inbox;
     member.inbox = [];
-    this.record(team, 'system', '@' + member.name + ' started turn ' + team.turns + '.');
+    team.lastDispatchSeq=this.record(team, 'system', '@' + member.name + ' started turn ' + team.turns + '.').seq;
     const live=this.activity.get(id)??new Map();
     const activity={steps:[],draft:''};
     live.set(member.name,activity);
@@ -824,15 +936,9 @@ export class TeamBoard {
     const phase = teamPhase(team);
     if ((phase !== 'stalled' && phase !== 'budget') || team.monitorPhase === phase) return;
     team.monitorPhase = phase;
-    const blockers = team.members.filter(member => activeMember(member) && member.status !== 'done').map(member => {
-      if (member.status === 'quota') return '@' + member.name + ' hit model quota limit';
-      if (member.status === 'failed') return '@' + member.name + ' failed';
-      if (member.waitFor.length) return '@' + member.name + ' is waiting on ' + member.waitFor.map(name => '@' + name).join(', ');
-      return '@' + member.name + ' is waiting for work';
-    });
     const message = phase === 'budget'
       ? 'Team reached its turn limit. Add extra turns to continue.'
-      : 'Team waiting. ' + blockers.join('. ') + '. Send an @mention to continue a member.';
+      : '[stall] '+stallIssues(team).map(issue=>issue.text).join(' ');
     this.record(team, 'system', message, [], 'monitor');
     this.save(team);
   }
@@ -871,6 +977,7 @@ export class TeamBoard {
       const report = this.deliver(team, name, message, result.notify, postingChannel(team,member));
       if (result.state === 'done') member.lastReport = report;
     }
+    member.lastSettledSeq=team.events.at(-1).seq;
     this.unblockDependencies(team);
     this.save(team);
     this.signals.emit('activity:'+id);

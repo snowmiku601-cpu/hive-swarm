@@ -6,6 +6,17 @@
       (!event.kind && event.author !== 'system');
   }
 
+  function elapsedSpan(posts,{live=false,now=Date.now()}={}) {
+    const times=posts.map(post=>Date.parse(post.time)).filter(Number.isFinite);
+    if (!times.length) return '<1m';
+    const minutes=Math.max(0,Math.floor(((live?now:times.at(-1))-times[0])/60000));
+    if (!minutes) return '<1m';
+    if (minutes<60) return minutes+'m';
+    return Math.floor(minutes/60)+'h'+(minutes%60?' '+minutes%60+'m':'');
+  }
+
+  function unmentionedNode(node) {return Boolean(node.unmentioned&&!node.mentions&&!node.broadcasts);}
+
   function project(posts, members, cursor, {hideInactive=false,expandBroadcast=false}={}) {
     const names = new Map([['coordinator',{name:'coordinator',role:'coordinator',status:'waiting'}]]);
     for (const member of members) names.set(member.name,member);
@@ -19,9 +30,10 @@
     }
     for (const event of posts) {
       if (event.seq > cursor || !isPost(event)) continue;
-      const {author,targets=[]} = event;
+      const {author} = event;
+      const targets=[...new Set([...(event.targets??[]),...(event.coordinatorMention?['coordinator']:[])])];
       addName(author);
-      const outgoing = counts.get(author) ?? {posts:0,mentions:0,broadcasts:0,lastSeq:0};
+      const outgoing = counts.get(author) ?? {posts:0,mentions:0,broadcasts:0,unmentioned:0,lastSeq:0};
       outgoing.posts++;
       outgoing.lastSeq=event.seq;
       counts.set(author,outgoing);
@@ -30,6 +42,7 @@
         outgoing.broadcasts++;
         broadcasts++;
       }
+      if (!all&&!event.coordinatorMention&&!targets.some(to=>to!==author)) outgoing.unmentioned++;
       for (const to of new Set(targets)) {
         if (to === author) continue;
         addName(to);
@@ -50,28 +63,35 @@
     };
   }
 
+  function gridLayout(count,width) {return count>6||(count>3&&width<440);}
+  function columns(width) {return Math.max(1,Math.floor(width/112));}
+  function minimumHeight(count,width) {
+    return gridLayout(count,width)?Math.max(328,Math.ceil(count/columns(width))*104+24):0;
+  }
+
   function layout(nodes,width,height) {
     const result=new Map();
-    if (nodes.length>11) {
-      const columns=Math.max(2,Math.floor(width/112));
-      const rows=Math.ceil(nodes.length/columns);
-      const rowHeight=height/(rows+1);
-      const columnWidth=width/(columns+1);
+    if (gridLayout(nodes.length,width)) {
+      const count=columns(width);
+      const rows=Math.ceil(nodes.length/count);
+      const rowHeight=height/rows;
+      const columnWidth=width/count;
       nodes.forEach((node,index) => {
-        const row=Math.floor(index/columns);
-        result.set(node.name,{x:columnWidth*(1+index%columns)+(row%2 ? columnWidth*0.24 : 0),
-          y:rowHeight*(row+1)});
+        const row=Math.floor(index/count);
+        const inRow=Math.min(count,nodes.length-row*count);
+        result.set(node.name,{x:columnWidth*(index%count+0.5+(count-inRow)/2),
+          y:rowHeight*(row+0.5)-14});
       });
       return result;
     }
     const center=nodes.find(node=>node.role==='coordinator') ?? nodes[0];
     if (!center) return result;
     const outer=nodes.filter(node=>node!==center);
-    result.set(center.name,{x:width/2,y:height/2});
+    result.set(center.name,{x:width/2,y:height/2-10});
     outer.forEach((node,index)=>{
       const angle=-Math.PI/2+index*Math.PI*2/outer.length;
-      const radiusX=Math.max(40,Math.min(width*0.38,(width-92)/2));
-      result.set(node.name,{x:width/2+Math.cos(angle)*radiusX,y:height/2+Math.sin(angle)*(height-100)/2});
+      const radiusX=Math.max(40,Math.min(width*0.38,(width-112)/2));
+      result.set(node.name,{x:width/2+Math.cos(angle)*radiusX,y:height/2-10+Math.sin(angle)*(height-136)/2});
     });
     return result;
   }
@@ -111,6 +131,18 @@
     ctx.setTransform(scale,0,0,scale,0,0);
     ctx.clearRect(0,0,width,height);
     drawGrid(ctx,width,height,color.grid);
+    ctx.strokeStyle=color.accent;
+    ctx.lineWidth=1.4;
+    ctx.setLineDash([3,3]);
+    for (const node of projection.nodes) {
+      const point=points.get(node.name);
+      if (!point||!unmentionedNode(node)) continue;
+      ctx.globalAlpha=!focus||focus===node.name?0.85:0.2;
+      ctx.beginPath();
+      ctx.arc(point.x,point.y,31,0,Math.PI*2);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
     ctx.font='600 10px ui-monospace, monospace';
     ctx.textAlign='center';
     ctx.textBaseline='middle';
@@ -155,5 +187,5 @@
     ctx.globalAlpha=1;
   }
 
-  globalThis.HiveGraph=Object.freeze({isPost,project,layout,draw});
+  globalThis.HiveGraph=Object.freeze({isPost,project,elapsedSpan,unmentionedNode,minimumHeight,layout,draw});
 })();

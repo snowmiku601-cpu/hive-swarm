@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { TeamBoard, boardWaitTimeout, childEnvironment, configuredEffort, teamPhase, visibleChannels } from './engine.mjs';
+import { TeamBoard, boardWaitTimeout, childEnvironment, configuredEffort, pendingWaitFor, stallIssues, teamPhase, visibleChannels } from './engine.mjs';
 import { openWorktree, removeWorktree, worktreeSource } from './worktrees.mjs';
 
 const boardUri = 'ui://hive-swarm/board.html';
@@ -172,14 +172,21 @@ function panelLink(team, origin) {
 
 function present(team, origin, activity, actor) {
   const {id,title,cwd,task,model,effort,paused,turns,turnLimit,channels} = team;
+  const phase=teamPhase(team);
+  const issues=stallIssues(team);
+  const blockers=issues.filter(issue=>['quota','failed','cycle'].includes(issue.kind)||
+    (issue.kind==='dependency'&&!team.members.some(member=>member.name===issue.member&&['working','queued'].includes(member.status))));
   const visible=visibleChannels(actor&&team.members.find(member=>member.name===actor));
   const events=visible?team.events.filter(event=>visible.includes(event.channel??'main')):team.events;
   return {
-    id,title,cwd,task,model,effort,paused,turns,turnLimit,channels,activity,phase:teamPhase(team),
+    id,title,cwd,task,model,effort,paused,turns,turnLimit,channels,activity,phase,
+    attention:phase==='stalled'?issues:phase==='budget'?
+      [{kind:'budget',text:'Turn limit reached ('+turns+'/'+turnLimit+'). Add 8 turns to continue.'},...blockers]:blockers,
     ...panelLink(team, origin),
     members: team.members.map(member => {
-      const {name,role,group,brief,threadId,status,writable,waitFor,retireAfterTurn,worktree,workspace,addedBy,channels} = member;
-      return {name,role,group,brief,threadId,status,writable,waitFor,retireAfterTurn,worktree,workspace,addedBy,channels,
+      const {name,role,group,brief,threadId,status,writable,waitFor,retireAfterTurn,worktree,workspace,addedBy,channels,lastTurn} = member;
+      return {name,role,group,brief,threadId,status,writable,waitFor,retireAfterTurn,worktree,workspace,addedBy,channels,lastTurn,
+        pendingWaitFor:pendingWaitFor(team,member),
         model:member.model ?? member.activeModel ?? model, effort:member.effort ?? member.activeEffort ?? configuredEffort(team, member)};
     }),
     events: events.slice(-60),

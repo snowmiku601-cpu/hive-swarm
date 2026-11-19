@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { TeamBoard, childEnvironment, teamPhase } from './engine.mjs';
+import * as engine from './engine.mjs';
 
 const until = async (condition) => {
   for (let i = 0; i < 100; i++) {
@@ -13,6 +14,163 @@ const until = async (condition) => {
   }
   assert.fail('Team did not reach the expected state');
 };
+
+test('stall diagnostics cite an unaddressed result once without dispatching a diagnostic turn', async t => {
+  let runs=0;
+  const board=new TeamBoard(':memory:',async()=>{
+    runs++;
+    return {state:'waiting',message:'[done] The patch is ready for review.',notify:[],waitFor:[]};
+  });
+  t.after(()=>board.close());
+  const {id}=board.create({cwd:process.cwd(),task:'Inspect the handoff',members:[{name:'builder',brief:'Build'}]});
+  await until(()=>board.get(id).monitorPhase==='stalled');
+  const team=board.get(id);
+  const result=team.events.find(event=>event.author==='builder');
+  const diagnostic=team.events.find(event=>event.kind==='monitor');
+  assert.match(diagnostic.text,/^\[stall\]/);
+  assert.ok(diagnostic.text.includes('#'+result.seq));
+  assert.match(diagnostic.text,/unaddressed|no member was @mentioned/i);
+  assert.equal(team.members[0].lastSettledSeq,result.seq);
+  assert.ok(team.lastDispatchSeq<result.seq);
+  for (let i=0;i<4;i++) board.monitor(board.get(id));
+  board.post(id,'A public note without a recipient.');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(board.get(id).events.filter(event=>event.kind==='monitor').length,1);
+  assert.equal(runs,1);
+  assert.equal(board.get(id).turns,1);
+});
+
+test('stall issues exclude old unaddressed posts and name an unanswered mention blocked by a dependency', t => {
+  const board=new TeamBoard(':memory:',()=>assert.fail('Diagnostics must not dispatch work'));
+  t.after(()=>board.close());
+  const team={id:'diagnostic',members:[
+    {name:'builder',status:'waiting',waitFor:[],completed:0},
+    {name:'reviewer',status:'waiting',waitFor:['builder'],completed:0},
+  ],events:[],channels:[{name:'main'}],turns:1,turnLimit:8};
+  board.record(team,'builder','An old result without a recipient.',[],'message');
+  team.lastDispatchSeq=board.record(team,'system','@builder started turn 1.').seq;
+  const mention=board.record(team,'user','@reviewers Please review.', ['reviewer'],'message');
+  const issues=engine.stallIssues(team);
+  assert.ok(!issues.some(issue=>issue.kind==='unaddressed'));
+  const unanswered=issues.find(issue=>issue.kind==='mention');
+  assert.equal(unanswered.member,'reviewer');
+  assert.equal(unanswered.seq,mention.seq);
+  assert.match(unanswered.text,/@reviewer.*not settled/i);
+  team.members[1].lastSettledSeq=board.record(team,'reviewer','Waiting for the next build.',[],'message').seq;
+  assert.ok(!engine.stallIssues(team).some(issue=>issue.kind==='mention'));
+});
+
+test('stall issues follow pending wait chains to the root and identify circular waits', () => {
+  const team={members:[
+    {name:'reviewer',status:'waiting',waitFor:['builder'],completed:0},
+    {name:'builder',status:'waiting',waitFor:['researcher'],completed:0},
+    {name:'researcher',status:'quota',waitFor:[],completed:0},
+  ],events:[],turns:3,turnLimit:8};
+  const issues=engine.stallIssues(team);
+  const chain=issues.find(issue=>issue.kind==='dependency'&&issue.chain.length===3);
+  assert.deepEqual(chain.chain,['reviewer','builder','researcher']);
+  assert.equal(chain.member,'researcher');
+  assert.match(chain.text,/Root blocker: @researcher.*quota/i);
+  team.members[2]={name:'researcher',status:'waiting',waitFor:['reviewer'],completed:0};
+  const cycles=engine.stallIssues(team).filter(issue=>issue.kind==='cycle');
+  assert.equal(cycles.length,1);
+  assert.deepEqual(cycles[0].chain,['reviewer','builder','researcher','reviewer']);
+});
+
+test('satisfied waits do not become blockers and an old completion explains a new-report wait', () => {
+  const team={members:[
+    {name:'reviewer',status:'waiting',waitFor:['builder'],waitAfter:{builder:1},completed:0},
+    {name:'builder',status:'done',waitFor:[],completed:2},
+  ],events:[],turns:2,turnLimit:8};
+  assert.deepEqual(engine.pendingWaitFor(team,team.members[0]),[]);
+  assert.ok(!engine.stallIssues(team).some(issue=>issue.kind==='dependency'));
+  team.members[1].completed=1;
+  assert.deepEqual(engine.pendingWaitFor(team,team.members[0]),['builder']);
+  assert.match(engine.stallIssues(team).find(issue=>issue.kind==='dependency').text,/new report/i);
+});
+
+test('quota and failed blockers retain mention evidence without mislabeling error posts as unaddressed results', () => {
+  const team={members:[
+    {name:'alpha',status:'failed',waitFor:[],lastSettledSeq:4},
+    {name:'beta',status:'quota',waitFor:[],lastSettledSeq:5},
+  ],events:[
+    {seq:1,kind:'message',author:'user',targets:['alpha','beta'],text:'@all Inspect'},
+    {seq:2,kind:'status',author:'system',text:'@alpha started turn 1.'},
+    {seq:3,kind:'status',author:'system',text:'@beta started turn 2.'},
+    {seq:4,kind:'status',author:'alpha',targets:[],text:'The tool failed.'},
+    {seq:5,kind:'status',author:'beta',targets:[],text:'429 Too Many Requests'},
+  ],turns:2,turnLimit:8};
+  const issues=engine.stallIssues(team);
+  assert.equal(issues.find(issue=>issue.kind==='failed').member,'alpha');
+  assert.equal(issues.find(issue=>issue.kind==='quota').member,'beta');
+  assert.equal(issues.find(issue=>issue.kind==='quota').seq,1);
+  assert.ok(!issues.some(issue=>issue.kind==='unaddressed'));
+});
+
+test('legacy stall markers survive a restart without duplicate diagnostic posts', t => {
+  const dir=mkdtempSync(join(tmpdir(),'hive-stall-'));
+  const file=join(dir,'test.sqlite');
+  let board=new TeamBoard(file,()=>assert.fail('A stalled board dispatched work'));
+  t.after(()=>{board.close();rmSync(dir,{recursive:true,force:true});});
+  board.save({id:'legacy-stall',members:[{name:'worker',status:'waiting',waitFor:[],channels:[]}],
+    channels:[{name:'main'}],turns:1,turnLimit:8,events:[
+      {seq:1,kind:'message',author:'worker',text:'Old result.',targets:[]},
+      {seq:2,kind:'status',author:'system',text:'@worker started turn 1.',targets:[]},
+      {seq:3,kind:'message',author:'worker',text:'Latest result.',targets:[]},
+    ]});
+  board.monitor(board.get('legacy-stall'));
+  assert.match(board.get('legacy-stall').events.at(-1).text,/#3/);
+  assert.doesNotMatch(board.get('legacy-stall').events.at(-1).text,/#1\b/);
+  board.close();
+  board=new TeamBoard(file,()=>assert.fail('A restored stall dispatched work'));
+  board.monitor(board.get('legacy-stall'));
+  assert.equal(board.readHistory('legacy-stall').posts.filter(event=>event.kind==='monitor').length,1);
+});
+
+test('dense dependency cycles produce one bounded diagnostic component',()=>{
+  for (const count of [9,13]) {
+    const names=Array.from({length:count},(_,i)=>'worker-'+i);
+    const team={members:names.map(name=>({name,status:'waiting',completed:0,
+      waitFor:names.filter(other=>other!==name)})),events:[],turns:count,turnLimit:24};
+    const issues=engine.stallIssues(team);
+    assert.equal(issues.filter(issue=>issue.kind==='cycle').length,1);
+    assert.ok(issues.length<=names.length);
+  }
+});
+
+test('an in-turn broadcast retained behind a new dependency remains an unanswered mention',async t=>{
+  let release;
+  const waiting=new Promise(resolve=>{release=resolve;});
+  const board=new TeamBoard(':memory:',async({member})=>{
+    if(member.name==='reviewer')await waiting;
+    return {state:'waiting',message:'Waiting for the next report.',notify:[],
+      waitFor:member.name==='reviewer'?['builder']:[]};
+  });
+  t.after(()=>{release();board.close();});
+  const {id}=board.create({cwd:process.cwd(),task:'Preserve pending handoffs',members:[
+    {name:'builder',brief:'Build'},{name:'reviewer',brief:'Review'}]});
+  await until(()=>board.get(id).members[0].status==='waiting');
+  const broadcast=board.post(id,'@all Review the next build.').events.at(-1);
+  release();
+  await until(()=>board.get(id).members.every(member=>member.status==='waiting'));
+  const team=board.get(id);
+  const reviewer=team.members[1];
+  assert.ok(reviewer.lastSettledSeq>broadcast.seq);
+  assert.ok(reviewer.inbox.some(event=>event.seq===broadcast.seq));
+  assert.ok(engine.stallIssues(team).some(issue=>issue.kind==='mention'&&issue.member==='reviewer'&&issue.seq===broadcast.seq));
+});
+
+test('a new mention after a quota failure is described as pending without reversing cause and effect',()=>{
+  const team={members:[{name:'worker',status:'quota',waitFor:[],lastSettledSeq:4,
+    inbox:[{seq:6,author:'user',text:'@all Resume later.'}]}],events:[
+      {seq:4,kind:'status',author:'worker',targets:[],text:'429 Too Many Requests'},
+      {seq:6,kind:'message',author:'user',targets:['worker'],broadcast:true,text:'@all Resume later.'},
+    ],turns:1,turnLimit:8};
+  const issue=engine.stallIssues(team).find(issue=>issue.kind==='quota');
+  assert.equal(issue.seq,6);
+  assert.match(issue.text,/#6 is still pending/);
+  assert.doesNotMatch(issue.text,/limit after/);
+});
 
 test('a waiting member uses no turns and wakes in its existing thread when mentioned', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'team-board-test-'));

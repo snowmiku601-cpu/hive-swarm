@@ -8,7 +8,10 @@ const read = name => readFileSync(new URL(name,import.meta.url),'utf8');
 class ViewNode {
   children=[];
   dataset={};
+  style={};
   attributes={};
+  clientWidth=420;
+  clientHeight=350;
   value='';
   scrollTop=0;
   scrollHeight=0;
@@ -24,6 +27,7 @@ class ViewNode {
   focus() {this.focused=true;}
   showModal() {this.open=true;}
   close() {this.open=false;}
+  getContext() {return new Proxy({}, {get:(target,key)=>target[key]??(()=>{}),set:(target,key,value)=>(target[key]=value,true)});}
   scrollIntoView() {this.scrolled=true;}
   querySelector(selector) {
     const sequence=/^\[data-seq="(\d+)"\]$/.exec(selector)?.[1];
@@ -60,6 +64,7 @@ async function boardView(initial,{path='/board/'+initial.id,request,live=false}=
     Option:class {constructor(text,value) {Object.assign(this,{text,value});}},
     HiveBee:{sprite:()=>new ViewNode('svg')},
     ResizeObserver:class {observe(){}},
+    devicePixelRatio:1,getComputedStyle:()=>({getPropertyValue:()=>'#d1a76a'}),
     URL,URLSearchParams,Intl,AbortController,clearTimeout,setTimeout,EventSource:live?EventSource:undefined,matchMedia:()=>({matches:false}),
     requestAnimationFrame:callback=>{queueMicrotask(callback);return 1;},
     setInterval:callback=>{poll=callback;return 1;},
@@ -95,6 +100,152 @@ test('polling member status preserves each displayed post node and its text sele
 });
 
 const childrenOf=node=>[node,...(node.children??[]).flatMap(childrenOf)];
+
+test('overview keeps a long brief collapsed while live one-line summaries and journal links stay useful',async()=>{
+  const state={id:'team',title:'Verify the release',task:'A long release brief.\n\n'+'Check each contract. '.repeat(35),
+    cwd:'fixture',phase:'working',turns:3,turnLimit:8,members:[
+      {name:'builder',status:'working',lastTurn:3,threadId:'saved-builder-thread'},
+      {name:'reviewer',status:'waiting',waitFor:['builder']},
+      {name:'verifier',status:'done'},
+      {name:'broken',status:'failed'},
+    ],activity:{builder:{steps:[{label:'Checking the release artifacts'}]}},events:[
+      {seq:1,kind:'message',author:'verifier',text:'[done] All mocked checks pass.\nDetailed evidence follows.',targets:[]},
+      {seq:2,kind:'status',author:'broken',text:'The local tool exited with code 2.',targets:[]},
+    ]};
+  const view=await boardView(state,{live:true});
+  view.element('tab-overview').onclick();
+  assert.equal(view.element('overview-goal').textContent,'Verify the release');
+  assert.equal(view.element('overview-brief-details').hidden,false);
+  assert.equal(Boolean(view.element('overview-brief-details').open),false);
+  assert.equal(view.element('overview-brief').hidden,true);
+  assert.equal(view.element('overview-brief-full').textContent,state.task.trim());
+  const summaries=()=>childrenOf(view.element('overview-members')).filter(item=>item.className==='now-summary');
+  assert.deepEqual(summaries().map(item=>item.textContent),[
+    'Checking the release artifacts','Waiting on @builder','All mocked checks pass.','The local tool exited with code 2.',
+  ]);
+  assert.ok(childrenOf(view.element('overview-members')).some(item=>item.textContent==='View journal'));
+  assert.ok(childrenOf(view.element('overview-members')).some(item=>item.className==='post-reference'&&item.textContent==='#1'));
+  const builder=summaries()[0];
+  view.element('overview-brief-details').open=true;
+  view.streams[0].publish('activity',{builder:{steps:[{label:'Inspecting the final diff'}]}});
+  assert.equal(builder.textContent,'Inspecting the final diff');
+  assert.equal(view.element('overview-brief-details').open,true);
+  await view.update({...state,activity:{builder:{steps:[]}}});
+  assert.equal(summaries()[0].textContent,'Working on turn 3');
+});
+
+test('overview ranks attention and its quick links draft mentions or add exactly eight turns on a trusted click',async()=>{
+  const state={id:'team',title:'Release',cwd:'fixture',phase:'stalled',turns:4,turnLimit:8,
+    members:[{name:'builder',status:'waiting'},{name:'quota',status:'quota'},
+      {name:'retired',status:'retired',workspace:{cwd:'fixture/worktree'}},
+      {name:'coordinator',role:'coordinator',status:'waiting'}],events:[
+        {seq:8,kind:'message',author:'builder',text:'[done] The patch is ready.',targets:[]},
+      ],attention:[
+        {kind:'dependency',member:'builder',chain:['reviewer','builder'],text:'Dependency wait: @reviewer -> @builder.'},
+        {kind:'unaddressed',member:'builder',seq:8,text:'Unaddressed post #8. No member was @mentioned.'},
+        {kind:'quota',member:'quota',text:'@quota hit model quota limit.'},
+      ]};
+  const mutations=[];
+  const view=await boardView(state,{request:(url,options)=>{
+    if (options?.method==='POST') mutations.push([url,JSON.parse(options.body)]);
+  }});
+  view.element('tab-overview').onclick();
+  const rows=view.element('overview-alerts').children;
+  assert.deepEqual(rows.map(row=>row.dataset.kind),['quota','unaddressed','dependency','worktree']);
+  assert.ok(childrenOf(rows[1]).some(item=>item.className==='post-reference'&&item.textContent==='#8'));
+  view.element('message').value='Please review the result.';
+  childrenOf(rows[1]).find(item=>item.tagName==='button'&&item.textContent==='Mention @coordinator').onclick();
+  assert.equal(view.element('message').value,'@coordinator Please review the result.');
+  assert.equal(view.element('panel-board').hidden,false);
+  assert.equal(view.element('message').focused,true);
+  assert.deepEqual(mutations,[]);
+  await view.update({...state,phase:'budget',turnLimit:4,attention:[{kind:'budget',text:'Turn limit reached (4/4).'}]});
+  view.element('tab-overview').onclick();
+  const add=childrenOf(view.element('overview-alerts')).find(item=>item.tagName==='button'&&item.textContent==='+8 turns');
+  await add.onclick({isTrusted:false});
+  assert.deepEqual(mutations,[]);
+  await add.onclick({isTrusted:true});
+  assert.deepEqual(mutations,[['/board/team/resume',{extraTurns:8}]]);
+});
+
+test('the coordinator Needs you state explains current stall or budget and clears after resuming',async()=>{
+  const state={id:'team',title:'Release',cwd:'fixture',phase:'stalled',turns:2,turnLimit:4,events:[],
+    members:[{name:'worker',status:'waiting'}],
+    attention:[{kind:'unaddressed',member:'worker',seq:7,text:'Unaddressed post #7. No member was @mentioned.'}]};
+  const view=await boardView(state);
+  view.element('tab-members').onclick();
+  let card=view.element('coordinator-list');
+  assert.match(card.textContent,/Needs you/);
+  assert.match(card.textContent,/Unaddressed post #7/);
+  await view.update({...state,phase:'budget',turnLimit:2,attention:[{kind:'budget',text:'Turn limit reached (2/2).'}]});
+  assert.match(card.textContent,/Needs you.*Turn limit reached \(2\/2\)/);
+  await view.update({...state,phase:'working',attention:[],members:[{name:'worker',status:'working'}]});
+  assert.doesNotMatch(card.textContent,/Needs you|Unaddressed post|Turn limit reached/);
+});
+
+test('active Overview retains blocked waits and shows only pending dependencies in now summaries',async()=>{
+  const state={id:'team',title:'Active review',cwd:'fixture',phase:'working',turns:3,turnLimit:8,events:[],
+    members:[{name:'reviewer',status:'waiting',waitFor:['alpha','beta'],pendingWaitFor:['beta']},
+      {name:'alpha',status:'done'},{name:'beta',status:'quota'},{name:'observer',status:'working'}],
+    attention:[{kind:'quota',member:'beta',text:'@beta hit model quota limit.'},
+      {kind:'dependency',member:'beta',chain:['reviewer','beta'],text:'Dependency wait: @reviewer -> @beta.'},
+      {kind:'cycle',member:'a',chain:['a','b','a'],text:'Circular wait: @a -> @b -> @a.'},
+      {kind:'unaddressed',seq:1,text:'An old stall detail.'}]};
+  const view=await boardView(state);
+  view.element('tab-overview').onclick();
+  assert.match(view.element('overview-alerts').textContent,/Dependency wait|Circular wait/);
+  assert.doesNotMatch(view.element('overview-alerts').textContent,/old stall/);
+  const summary=childrenOf(view.element('overview-members')).find(item=>item.className==='now-summary');
+  assert.equal(summary.textContent,'Waiting on @beta');
+});
+
+test('graph shows elapsed time and distinguishes an unmentioned poster from a silent node',async()=>{
+  const state={id:'team',title:'Replay',cwd:'fixture',phase:'done',turns:2,turnLimit:4,
+    members:[{name:'builder',status:'done'},{name:'silent',status:'waiting'}],events:[
+      {seq:1,kind:'brief',author:'coordinator',targets:['builder'],text:'Build',time:'2026-11-19T00:00:00Z'},
+      {seq:2,kind:'message',author:'builder',targets:[],text:'[done] Built.',time:'2026-11-19T01:12:00Z'},
+    ]};
+  const view=await boardView(state);
+  view.element('tab-graph').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(view.element('graph-total').textContent,'2 posts · 1h 12m');
+  const nodes=view.element('graph-nodes').children;
+  assert.equal(nodes.find(node=>node.dataset.graphName==='builder').dataset.unmentioned,'true');
+  assert.equal(nodes.find(node=>node.dataset.graphName==='silent').dataset.unmentioned,'false');
+  assert.equal(nodes.find(node=>node.dataset.graphName==='silent').dataset.muted,'true');
+  view.element('first').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(view.element('graph-total').textContent,'2 posts · <1m · 1/2');
+});
+
+test('queen bee pixels add a gold crown in awake and sleeping poses while worker tints and Zzz stay crisp',()=>{
+  const screen={document:{createElement:tag=>{
+    const canvas=new ViewNode(tag);
+    const pixels=new Map();
+    canvas.pixels=pixels;
+    const ctx={fillStyle:'',fillRect(x,y,w,h){
+      assert.ok([x,y,w,h].every(Number.isInteger));
+      assert.ok(x>=0&&y>=0&&x+w<=canvas.width&&y+h<=canvas.height);
+      for(let dx=0;dx<w;dx++)for(let dy=0;dy<h;dy++)pixels.set((x+dx)+','+(y+dy),this.fillStyle);
+    }};
+    canvas.getContext=()=>ctx;
+    return canvas;
+  }}};
+  runInNewContext(read('hive-bees.js'),screen);
+  for(const status of ['working','waiting','quota','done','retired']) {
+    const queen=screen.HiveBee.sprite('coordinator',{coordinator:true,status});
+    const worker=screen.HiveBee.sprite('worker',{status,tint:0});
+    assert.equal(queen.pixels.get('5,0'),'#ffd86b','central crown point is gold in '+status);
+    assert.equal(queen.pixels.get('5,3'),'#fff3bf','crown jewel stays visible in '+status);
+    assert.notEqual(worker.pixels.get('5,0'),'#ffd86b');
+    assert.equal(worker.pixels.get('6,10'),'#75baef','worker tint remains blue');
+    if(status!=='working') {
+      assert.equal(queen.dataset.pose,'sleeping');
+      assert.equal(queen.pixels.get('17,0'),'#d7dcff');
+      assert.equal(worker.pixels.get('2,2'),'#d7dcff');
+    }
+  }
+});
 
 test('posts render safe Markdown and jump to a filtered-out older sequence',async()=>{
   const fence=String.fromCharCode(96).repeat(3);
@@ -196,7 +347,8 @@ test('overview derives progress and the latest coordinator summary while live up
   assert.equal(view.element('feed').firstElementChild,post);
   assert.match(view.element('board-live-list').textContent,/Kiểm tra console/);
   view.element('tab-overview').onclick();
-  assert.equal(view.element('overview-goal').textContent,state.task);
+  assert.equal(view.element('overview-goal').textContent,state.title);
+  assert.equal(view.element('overview-brief').textContent,state.task);
   assert.equal(view.element('worker-progress').textContent,'1/2');
   assert.equal(view.element('turn-progress').textContent,'2/8');
   assert.match(view.element('overview-milestones').textContent,/Xong verify/);

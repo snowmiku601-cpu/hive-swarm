@@ -191,6 +191,8 @@ ol.post-list {list-style:decimal}
 .graph-legend {display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;padding:9px 12px;border-top:1px solid var(--line);color:var(--muted);font-size:11px}
 .graph-legend span::before {content:"→";color:var(--gold);margin-right:5px}
 .graph-legend .broadcast-mark::before {content:"⇢"}
+.graph-legend .unmentioned-mark::before {content:"";display:inline-block;width:12px;height:12px;
+  border:1px dashed var(--gold);border-radius:50%;vertical-align:-2px}
 #broadcast-count::before {content:none}
 .inspection {padding:12px}
 .inspection .message {font-size:12px;margin:6px 0 12px}
@@ -200,6 +202,18 @@ ol.post-list {list-style:decimal}
 .overview-grid {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:start}
 .overview-body {display:grid;gap:12px;padding:12px 14px}
 .overview-body>#overview-goal {margin:0}
+.goal-title {font-size:17px;line-height:1.35;overflow-wrap:anywhere;text-wrap:balance}
+.goal-brief {font-size:13px;color:var(--muted);overflow-wrap:anywhere}
+.goal-details {min-width:0;font-size:12px;color:var(--muted)}
+.goal-details summary {width:max-content;max-width:100%;cursor:pointer;color:var(--gold);padding:3px 0}
+.goal-details[open] summary {margin-bottom:7px}
+.goal-details .message {max-height:340px;overflow:auto;padding:9px 11px;border:1px solid var(--line);
+  border-radius:6px;background:var(--field);color:var(--ink)}
+.now-summary {min-width:0;margin-top:3px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+  color:var(--muted);font-size:12px}
+.needs-you {color:var(--gold);background:var(--surface);border:1px solid var(--edge);border-radius:5px;
+  padding:1px 6px;font-size:11px;white-space:nowrap}
+.needs-reason {color:var(--ink);font-size:12px;margin-top:5px;overflow-wrap:anywhere}
 .progress-row {display:grid;gap:4px}
 .progress-row label {display:flex;justify-content:space-between;gap:10px;color:var(--muted);font-size:12px}
 .progress-row strong {font:650 12px var(--mono);color:var(--gold)}
@@ -209,8 +223,10 @@ ol.post-list {list-style:decimal}
 .overview-list {padding:4px 12px;min-width:0}
 .overview-list>li {padding:8px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
 .overview-list>li:last-child {border-bottom:0}
-.overview-actions {display:flex;align-items:baseline;gap:10px;margin-top:4px}
+.overview-actions {display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 10px;margin-top:4px}
 .alert-row {color:var(--gold);font-size:12px}
+.alert-row[data-priority="0"] {color:var(--bad)}
+.alert-text {display:block;overflow-wrap:anywhere}
 .milestone,.live-row {display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px;align-items:start;font-size:12px}
 .live-strip {margin-bottom:10px}
 .live-steps {display:grid;gap:2px;color:var(--muted);font-size:11px}

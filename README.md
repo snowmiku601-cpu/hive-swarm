@@ -1,4 +1,4 @@
-# Hive Swarm (`v1.7.3`)
+# Hive Swarm (`v1.7.4`)
 
 A lightweight, single-folder **multi-agent Swarm engine & UI** built around an MCP server and SQLite WAL message board (`engine.mjs`, `server.mjs`, `board.html`/`board.js`, `worktrees.mjs`). It currently ships with a Codex Desktop / CLI runtime adapter (`codex.mjs`) and a clean plugin layout ready to integrate across harnesses (**Codex**, **Claude Code**, **DeepSeek Harness**, and future MCP-capable agent runners).
 
@@ -13,10 +13,11 @@ A lightweight, single-folder **multi-agent Swarm engine & UI** built around an M
   - `codex.mjs`: Codex `app-server` worker adapter (thread persistence, warm `thread/fork` on model/provider changes, auto-archival, live SSE step streaming, and Windows MSIX `package identity` isolation).
 - **Windows MSIX Sandbox Fix (`v1.7.3`):** Strips inherited host/MSIX environment variables (`CODEX_WINDOWS_REGISTERED_CORE`, `CODEX_WINDOWS_SANDBOX_PACKAGE_FAMILY`, parent session markers, etc.) when spawning the daemon and worker `app-server`s, and sets `features.prefer_mxc=false` on Windows so workers execute shell commands and `node_repl` cleanly.
 - **Four-Tab Hive UI:**
-  1. **Overview:** Goal, worker/turn progress bars, live worker activity, alerts, milestones, and coordinator summary.
+  1. **Overview:** Concise goal with an expandable full brief, worker/turn progress, one-line member activity, ranked alerts with post/mention/budget shortcuts, milestones, and coordinator summary.
   2. **Board:** Channel & member filters, safe Markdown, clickable `#seq` references, and live `@mention` composer.
-  3. **Members:** Pixel bee roster grouped by Coordinator / Working / Standing by & done / Retired, inline **View journal**, **Open chat**, **@mention**, **Switch model & effort**, **Retire**, and **Clean worktree**.
-  4. **Graph:** Step-by-step chronological replay (`0.5×–4×`, Even/Real-time pacing), toggle inactive members or expand `@all`, inspect directed counts and selected posts.
+  3. **Members:** Crowned coordinator and tinted pixel workers grouped by Coordinator / Working / Standing by & done / Retired; a **Needs you** reason for stall/budget stops; inline **View journal**, **Open chat**, **@mention**, **Switch model & effort**, **Retire**, and **Clean worktree**.
+  4. **Graph:** Step-by-step chronological replay (`0.5×–4×`, Even/Real-time pacing), elapsed span, distinct rings for members who posted without outgoing mentions, responsive small/dense layouts, inactive-member and `@all` toggles, directed counts and selected posts.
+- **Stall Diagnostics:** One `[stall]` system post per stalled episode identifies unaddressed results by `#seq`, unanswered mentions, quota/failure stops, dependency root blockers and circular waits. Overview attention stays current from saved board facts without extra model turns. Alerts rank quota/failure and turn limits first, then unaddressed posts, blocked waits and worktree cleanup.
 - **Zero-Dependency Runtime:** Pure Node.js ESM (`>= 22.5`, built-in `node:sqlite`) — no `npm install`, no `node_modules`.
 
 ---
@@ -33,14 +34,14 @@ A lightweight, single-folder **multi-agent Swarm engine & UI** built around an M
 
 ### Windows (PowerShell)
 
-Clone this repository (or extract `hive-swarm-v1.7.3.zip`) and run:
+Clone this repository (or extract `hive-swarm-v1.7.4.zip`) and run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 Options:
-- `-RunTests`: Run all 99 unit/integration tests before installing.
+- `-RunTests`: Run the full unit/integration suite with mocked runners before installing.
 - `-NodePath "C:\path\to\node.exe"`: Force a specific Node 22.5+ binary.
 
 ### macOS / Linux
@@ -52,7 +53,7 @@ chmod +x ./install.sh
 
 Pass `--test` to run the test suite first (`./install.sh --test`).
 
-> After installing, **open a new chat** in Codex Desktop (or restart Codex Desktop) so the fresh MCP server session loads `v1.7.3`.
+> After installing, **open a new chat** in Codex Desktop so the fresh MCP server session loads `v1.7.4`. An older daemon with active turns refuses shutdown; let those turns finish before opening the updated board.
 
 ---
 
@@ -80,7 +81,7 @@ Single flat plugin + marketplace root (no nested package wrapper):
 - `engine.mjs`, `server.mjs`, `codex.mjs`, `worktrees.mjs` — Core MCP/board engine & runtime adapter
 - `board.html`, `board.css`, `board.js`, `hive-bees.js`, `hive-graph.js` — Standalone & MCP App Hive UI
 - `install.ps1`, `install.sh` — Cross-platform installers
-- `*.test.mjs` — Full 99-test `node:test` suite
+- `*.test.mjs` — Full `node:test` suite, including stall diagnosis, UI actions, graph replay/layout and sprite pixel coverage
 
 ---
 
@@ -89,6 +90,8 @@ Single flat plugin + marketplace root (no nested package wrapper):
 ```bash
 node --test ./*.test.mjs
 ```
+
+Tests use mocked runners and make no paid API calls. The UI, graph, transcript reader and stall monitor do not schedule diagnostic model turns. Adding turns or sending an `@mention` remains an explicit user action.
 
 ---
 

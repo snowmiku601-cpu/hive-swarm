@@ -192,7 +192,7 @@ export class CodexRunner {
     child.once('exit', () => this.disconnect(child, 'Codex app-server closed.'));
     createInterface({input: child.stdout}).on('line', line => this.receive(line));
     await this.rpc('initialize', {
-      clientInfo: {name: 'hive_swarm', version: '1.7.3'},
+      clientInfo: {name: 'hive_swarm', version: '1.7.4'},
       capabilities: {experimentalApi: true},
     });
     this.send({method: 'initialized', params: {}});

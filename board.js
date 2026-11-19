@@ -15,12 +15,13 @@
   const posts=new Map();
   const pending=new Map();
   const liveSlots=new Map();
+  const nowSlots=new Map();
   const memberDrafts=new Map();
   let teamId=standalone&&!emptyPanel?location.pathname.split('/').at(-1):null;
   let team,signature='',rosterKey='',feedKey='',activeTab='board',chronology=[],latestByAuthor=new Map();
   let historyTail=0,historyRequest,refreshing=false,following=true,seen=0,feedLimit=160;
   let recentTeams=[],teamListKey='',loadingTeams=false,channelKey='',memberKey='';
-  let stream,streamOnline=false,modelCatalog,titleEditing=false,transcript;
+  let stream,streamOnline=false,modelCatalog,titleEditing=false,transcript,extendingBudget=false;
   let requestNumber=0,refreshTimer,playTimer,playing=false,cursor=null,focusedNode=null,graphFrame=0;
 
   function node(tag,kind='',text) {
@@ -160,7 +161,7 @@
     }
     if (changed) {
       chronology=[...posts.values()].sort((a,b)=>a.seq-b.seq);
-      latestByAuthor=new Map(chronology.filter(post=>post.kind!=='brief'&&graph.isPost(post)).map(post=>[post.author,post]));
+      latestByAuthor=new Map(chronology.filter(post=>post.kind!=='brief'&&post.author!=='system').map(post=>[post.author,post]));
     }
     return changed;
   }
@@ -175,6 +176,7 @@
       historyTail=seen=0;
       cursor=focusedNode=null;
       memberDrafts.clear();
+      $('overview-brief-details').open=false;
       memberKey=channelKey=rosterKey=feedKey='';
     }
     team=value;
@@ -384,6 +386,12 @@
     if (activeTab==='overview'||activeTab==='members') {
       for (const [name,slot] of liveSlots) renderActivitySlot(slot,team.activity?.[name]);
     }
+    if (activeTab==='overview') {
+      for (const member of team.members) {
+        const slot=nowSlots.get(member.name);
+        if (slot) slot.textContent=memberNow(member);
+      }
+    }
     syncTranscript();
   }
 
@@ -500,13 +508,109 @@
     $(display).textContent=used+'/'+total;
   }
 
+  function compact(value,max=140) {
+    const text=String(value??'').replace(/\s+/g,' ').trim();
+    return text.length>max?text.slice(0,max-1).trimEnd()+'…':text;
+  }
+
+  function memberNow(member) {
+    const latest=latestByAuthor.get(member.name);
+    if (member.status==='working') {
+      return compact(team.activity?.[member.name]?.steps?.findLast(step=>step.label?.trim())?.label)||
+        (member.lastTurn?'Working on turn '+member.lastTurn:'Working on the current turn');
+    }
+    if (['quota','failed'].includes(member.status)) return compact(latest?.text)||condition(member);
+    const waiting=member.pendingWaitFor??member.waitFor;
+    if (waiting?.length) return compact('Waiting on '+waiting.map(author).join(', '));
+    const done=/\[done\]\s*([^\r\n]+)/i.exec(latest?.text??'');
+    if (done) return compact(done[1]);
+    if (member.status==='waiting') return 'Waiting for an @mention';
+    if (member.status==='queued') return 'Queued for the next turn';
+    return compact(latest?.text?.split(/\r?\n/)[0])||condition(member);
+  }
+
+  function mentionMember(name) {
+    selectTab('board');
+    const message=$('message');
+    const mentions=message.value.matchAll(/(?:^|[^a-z0-9_])@([a-z][a-z0-9_-]*)/gi);
+    if (![...mentions].some(([,value])=>value.toLowerCase()===name)) message.value='@'+name+' '+message.value;
+    message.focus();
+  }
+
+  function attentionItems() {
+    const stopped=['stalled','budget'].includes(team.phase);
+    const issues=(team.attention??[]).filter(issue=>stopped||['quota','failed','dependency','cycle'].includes(issue.kind))
+      .map(issue=>({...issue}));
+    for (const member of team.members) {
+      if (['quota','failed'].includes(member.status)&&!issues.some(issue=>issue.kind===member.status&&issue.member===member.name)) {
+        issues.push({kind:member.status,member:member.name,text:author(member.name)+' · '+condition(member)});
+      }
+    }
+    if (team.phase==='budget'&&!issues.some(issue=>issue.kind==='budget')) {
+      issues.push({kind:'budget',text:'Turn limit reached ('+team.turns+'/'+team.turnLimit+'). Add 8 turns to continue.'});
+    } else if (team.phase==='stalled'&&!issues.length) {
+      const diagnostic=chronology.findLast(event=>event.kind==='monitor');
+      const waiting=team.members.find(member=>member.status==='waiting'&&member.waitFor?.length);
+      issues.push({kind:waiting?'dependency':'waiting',member:waiting?.waitFor[0],
+        text:diagnostic?.text.replace(/^\[stall\]\s*/,'')??(waiting?
+          author(waiting.name)+' is waiting on '+waiting.waitFor.map(author).join(', '):'The team is waiting for an @mention.')});
+    }
+    for (const member of team.members) {
+      if (member.workspace&&(member.status==='retired'||team.phase==='done')) {
+        issues.push({kind:'worktree',member:member.name,text:author(member.name)+' has a worktree to clean.'});
+      }
+    }
+    const rank={quota:0,failed:0,budget:0,unaddressed:1,mention:1,waiting:1,dependency:2,cycle:2,worktree:3};
+    return issues.map(issue=>({...issue,priority:rank[issue.kind]??1})).sort((a,b)=>a.priority-b.priority);
+  }
+
+  function attentionRow(issue) {
+    const row=node('li','alert-row');
+    row.dataset.kind=issue.kind;
+    row.dataset.priority=issue.priority;
+    row.append(node('span','alert-text',issue.text));
+    const actions=node('div','overview-actions');
+    if (issue.seq) actions.append(postReference(issue.seq));
+    if (issue.kind==='budget') actions.append(trustedButton('+8 turns',extendBudget));
+    else if (issue.kind==='worktree') {
+      const button=node('button','link-button','View member');
+      button.type='button';
+      button.onclick=()=>{
+        $('search-members').value=issue.member;
+        selectTab('members');
+        $('search-members').focus();
+      };
+      actions.append(button);
+    } else {
+      const active=team.members.filter(member=>member.status!=='retired'&&!member.retireAfterTurn);
+      const coordinator=active.find(member=>member.role==='coordinator');
+      const target=issue.kind==='unaddressed'?coordinator??active.find(member=>member.status==='waiting')??active.find(member=>member.name===issue.member):
+        active.find(member=>member.name===issue.member)??coordinator;
+      if (target) {
+        const button=node('button','link-button','Mention '+author(target.name));
+        button.type='button';
+        button.onclick=()=>mentionMember(target.name);
+        actions.append(button);
+      }
+    }
+    if (actions.childElementCount) row.append(actions);
+    return row;
+  }
+
   function renderOverview() {
     const members=team.members;
     const workers=members.filter(member=>member.role!=='coordinator'&&member.status!=='retired');
-    $('overview-goal').textContent=team.task??team.title;
+    $('overview-goal').textContent=team.title;
+    const brief=team.task?.trim()??'';
+    const long=brief.length>180||/\n/.test(brief);
+    $('overview-brief').textContent=brief;
+    $('overview-brief').hidden=long||!brief||brief===team.title;
+    $('overview-brief-details').hidden=!long;
+    $('overview-brief-full').textContent=brief;
     progressView('workers','worker-progress',workers.filter(member=>member.status==='done').length,workers.length);
     progressView('turns','turn-progress',team.turns,team.turnLimit);
     liveSlots.clear();
+    nowSlots.clear();
     $('overview-members').replaceChildren(...members.map(member=>{
       const row=node('li','overview-member');
       const heading=node('div','member-top');
@@ -514,6 +618,9 @@
       status.dataset.status=member.status;
       heading.append(node('strong','',author(member.name)),status);
       row.append(heading);
+      const now=node('p','now-summary',memberNow(member));
+      nowSlots.set(member.name,now);
+      row.append(now);
       const latest=latestByAuthor.get(member.name);
       const journal=transcriptButton(member);
       if (latest||journal) {
@@ -522,17 +629,10 @@
         if (journal) actions.append(journal);
         row.append(actions);
       }
-      if (member.status==='working') row.append(activitySlot(member));
       return row;
     }));
-    const alerts=[];
-    for (const member of members) {
-      const name=author(member.name);
-      if (['quota','failed'].includes(member.status)) alerts.push(name+' · '+condition(member));
-      if (member.waitFor?.length) alerts.push(name+' waiting on '+member.waitFor.map(author).join(', '));
-      if (member.workspace&&(member.status==='retired'||team.phase==='done')) alerts.push(name+' has a worktree to clean');
-    }
-    $('overview-alerts').replaceChildren(...alerts.map(text=>node('li','alert-row',text)));
+    const alerts=attentionItems();
+    $('overview-alerts').replaceChildren(...alerts.map(attentionRow));
     $('overview-alerts-panel').hidden=!alerts.length;
     const milestones=chronology.filter(event=>['checkpoint','monitor'].includes(event.kind)||/\[done\]/i.test(event.text)).slice(-6).reverse();
     $('overview-milestones').replaceChildren(...milestones.map(event=>{
@@ -665,6 +765,14 @@
     badge.dataset.status=member.status;
     line.append(node('h3','member-name',author(member.name)),badge);
     info.append(line);
+    if (member.role==='coordinator'&&['stalled','budget'].includes(team.phase)) {
+      card.dataset.needsYou='true';
+      line.append(node('strong','needs-you','Needs you'));
+      const alerts=attentionItems();
+      const reason=node('p','needs-reason',(team.phase==='budget'?alerts.find(issue=>issue.kind==='budget'):
+        alerts.find(issue=>issue.kind!=='worktree'))?.text);
+      info.append(reason);
+    }
     const last=latestByAuthor.get(member.name);
     const context=[member.model,member.effort,member.group?'@'+member.group:'',
       ...(member.channels??[]).map(channel=>'#'+channel),member.addedBy?'Invited by '+author(member.addedBy):'',
@@ -676,7 +784,8 @@
       summary.title=detail;
       info.append(summary);
     }
-    if (member.waitFor?.length) info.append(node('p','quiet','Waiting on '+member.waitFor.map(author).join(', ')));
+    const waiting=member.pendingWaitFor??member.waitFor;
+    if (waiting?.length) info.append(node('p','quiet','Waiting on '+waiting.map(author).join(', ')));
     if (member.workspace) info.append(node('code','member-path',member.workspace.cwd));
     else if (member.worktree) info.append(node('p','quiet','Isolated worktree on first turn'));
     const actions=node('div','member-actions');
@@ -697,15 +806,7 @@
       const send=node('button','link-button','@mention');
       send.type='button';
       send.setAttribute('aria-label','Mention @'+member.name+' on board');
-      send.onclick=()=>{
-        selectTab('board');
-        const message=$('message');
-        const mentions=message.value.matchAll(/(?:^|[^a-z0-9_])@([a-z][a-z0-9_-]*)/gi);
-        if (![...mentions].some(([,name])=>name.toLowerCase()===member.name)) {
-          message.value='@'+member.name+' '+message.value;
-        }
-        message.focus();
-      };
+      send.onclick=()=>mentionMember(member.name);
       actions.append(send);
     }
     if (standalone&&!member.external) {
@@ -741,7 +842,7 @@
     const visible=roster.filter(member=>!query||[author(member.name),member.group,member.model,condition(member),
       ...(member.channels??[]),member.addedBy]
       .join(' ').toLowerCase().includes(query));
-    const key=JSON.stringify([query,team.phase,visible.map(member=>[member,latestByAuthor.get(member.name)?.seq])]);
+    const key=JSON.stringify([query,team.phase,team.attention,team.turns,team.turnLimit,visible.map(member=>[member,latestByAuthor.get(member.name)?.seq])]);
     if (key===memberKey) {renderActivity();return;}
     memberKey=key;
     liveSlots.clear();
@@ -791,6 +892,11 @@
     if (activeTab!=='graph'||graphFrame) return;
     graphFrame=requestAnimationFrame(()=>{graphFrame=0;if (team && activeTab==='graph') renderGraph();});
   }
+  function renderGraphTotal(events=timeline(),index=cursorIndex(events)) {
+    const live=cursor===null&&['working','queued'].includes(team.phase);
+    $('graph-total').textContent=events.length+' posts · '+graph.elapsedSpan(events.slice(0,index),{live})+
+      (cursor!==null?' · '+index+'/'+events.length:'');
+  }
   function renderGraph() {
     const events=timeline();
     const index=cursorIndex(events);
@@ -798,7 +904,7 @@
     const projection=graph.project(events,people(),current?.seq??0,{
       hideInactive:$('hide-inactive').checked,expandBroadcast:$('expand-all').checked,
     });
-    $('graph-total').textContent=events.length+' posts'+(cursor!==null?' · '+index+'/'+events.length:'');
+    renderGraphTotal(events,index);
     $('replay').max=events.length;
     $('replay').value=index;
     $('replay').setAttribute('aria-valuetext',current?stamp(current):'Before first post');
@@ -813,9 +919,8 @@
     $('live').setAttribute('aria-pressed',String(cursor===null));
     $('broadcast-count').textContent=projection.broadcasts+' @all posts';
     const stage=$('graph-stage');
-    if (projection.nodes.length>11) {
-      stage.style.height=Math.max(350,Math.ceil(projection.nodes.length/Math.max(2,Math.floor(stage.clientWidth/112)))*82+50)+'px';
-    } else stage.style.height='';
+    const minimum=graph.minimumHeight(projection.nodes.length,stage.clientWidth);
+    stage.style.height=minimum?minimum+'px':'';
     const coordinates=graph.layout(projection.nodes,stage.clientWidth,stage.clientHeight);
     if (focusedNode && !coordinates.has(focusedNode)) focusedNode=null;
     const active=document.activeElement?.dataset.graphName;
@@ -829,7 +934,9 @@
       button.dataset.role=member.role??'worker';
       button.dataset.status=member.status;
       button.dataset.muted=String(!member.posts&&!projection.links.some(edge=>edge.to===member.name));
-      button.title=author(member.name)+' · '+condition(member);
+      button.dataset.unmentioned=String(graph.unmentionedNode(member));
+      button.title=author(member.name)+' · '+condition(member)+
+        (graph.unmentionedNode(member)?' · Posted with no mention':'');
       button.setAttribute('aria-label',button.title);
       button.setAttribute('aria-pressed',String(focusedNode===member.name));
       const hex=node('span','hex');
@@ -1046,14 +1153,16 @@
     catch (error) {notice(error.message,true);}
     finally {$('pause').disabled=false;}
   };
-  $('extra-turns').onclick=async event=>{
-    const button=$('extra-turns');
-    if (!event.isTrusted || button.disabled || team?.phase!=='budget') return;
+  async function extendBudget(button) {
+    if (extendingBudget || button.disabled || team?.phase!=='budget') return;
+    extendingBudget=true;
     button.disabled=true;
+    $('extra-turns').disabled=true;
     try {acceptStatus(await call('resume_team',{extraTurns:8}));}
     catch (error) {notice(error.message,true);}
-    finally {button.disabled=false;}
-  };
+    finally {extendingBudget=false;button.disabled=false;$('extra-turns').disabled=false;}
+  }
+  $('extra-turns').onclick=event=>{if (event.isTrusted) return extendBudget($('extra-turns'));};
   if (standalone) {
     $('close-transcript').onclick=closeTranscript;
     $('refresh-transcript').onclick=refreshTranscript;
@@ -1153,7 +1262,7 @@
       }
     });
     rpc('ui/initialize',{
-      appInfo:{name:'Hive Swarm',version:'1.7.3'},appCapabilities:{},protocolVersion:'2026-01-26',
+      appInfo:{name:'Hive Swarm',version:'1.7.4'},appCapabilities:{},protocolVersion:'2026-01-26',
     }).then(()=>{
       parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');
       refresh();
@@ -1161,5 +1270,8 @@
   }
   connectEvents();
   refreshTimer=emptyPanel?setInterval(()=>{if(!streamOnline)return refreshLanding();},12000)
-    :setInterval(()=>{if(!streamOnline)return refresh();},2400);
+    :setInterval(()=>{
+      if(!streamOnline)return refresh();
+      if(team&&activeTab==='graph'&&!document.hidden)renderGraphTotal();
+    },2400);
 })();

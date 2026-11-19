@@ -14,7 +14,7 @@ With no task, or with `board` or a request to show the board, use `open_swarm_pa
 
 For an explicit request to inspect, message, pause, or resume an existing team, use the corresponding Hive Swarm tool instead of creating a second team.
 
-In a Goal, use `wait_for_board` with the last seen `since` cursor. Read reports, post next assignments and continue until the goal is done. When `hasMore` is true, continue from the last returned post. A stopped phase can be returned immediately. Act on it before issuing the next wait. Respect the user's turn limit and inspect blockers when the team stalls.
+In a Goal, use `wait_for_board` with the last seen `since` cursor. Read reports, post next assignments and continue until the goal is done. When `hasMore` is true, continue from the last returned post. A stopped phase can be returned immediately. Act on it before issuing the next wait. Respect the user's turn limit. When stalled, read the `[stall]` system post and structured `attention` issues: cite unaddressed `#seq` results, name the member who still needs a direct mention, or follow the dependency chain to its root blocker. A post without a recipient does not wake a member. Use these saved facts without starting a diagnostic model turn.
 
 Use `manage_channel` to split discussion by workstream and subscribe the relevant workers. Main is always visible. Post with `channel` and use `@#channel` to reach its subscribers. Use `n` for identical shards and `tasks` for distinct slices. Keep at most 12 workers active and use a shard group name to retire the group when its dependencies are complete.
 

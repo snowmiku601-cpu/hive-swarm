@@ -67,6 +67,44 @@ test('start_team validates an explicit team model without effort or member overr
   assert.equal((await api.start({model:'fixture-a'})).model,'fixture-a');
 });
 
+test('status exposes stall evidence and turn numbers without running a diagnostic model turn',async t=>{
+  let runs=0;
+  const api=await fixture(t,async()=>{
+    runs++;
+    return {state:'waiting',message:'[done] Ready for review.',notify:[],waitFor:[]};
+  });
+  const {id}=await api.start({members:[{name:'builder',brief:'Build'},
+    {name:'reviewer',brief:'Review',waitFor:['builder']}]});
+  const stalled=await api.waitFor(id,state=>state.phase==='stalled');
+  const issue=stalled.attention.find(issue=>issue.kind==='unaddressed');
+  assert.equal(issue.member,'builder');
+  assert.ok(stalled.events.some(event=>event.seq===issue.seq&&event.author==='builder'));
+  assert.equal(stalled.members[0].lastTurn,1);
+  assert.equal(runs,1);
+  assert.equal(stalled.turns,1);
+  const budget=await api.start({turnLimit:1,members:[{name:'worker',brief:'Inspect'}]});
+  const stopped=await api.waitFor(budget.id,state=>state.phase==='budget');
+  assert.equal(stopped.attention[0].kind,'budget');
+  assert.match(stopped.attention[0].text,/1\/1/);
+});
+
+test('blocked and circular waits remain visible while an unrelated worker is still working',async t=>{
+  let release;
+  const running=new Promise(resolve=>{release=resolve;});
+  const api=await fixture(t,async({member})=>{
+    if(member.name==='observer')await running;
+    return {state:'waiting',message:'Waiting for a peer.',notify:[],
+      waitFor:member.name==='alpha'?['beta']:member.name==='beta'?['alpha']:[]};
+  });
+  t.after(release);
+  const {id}=await api.start({concurrency:3,members:[{name:'alpha',brief:'Inspect A'},
+    {name:'beta',brief:'Inspect B'},{name:'observer',brief:'Inspect independently'}]});
+  const state=await api.waitFor(id,state=>state.members[0].status==='waiting'&&state.members[1].status==='waiting');
+  assert.equal(state.phase,'working');
+  assert.ok(state.attention.some(issue=>issue.kind==='cycle'));
+  assert.ok(!state.attention.some(issue=>issue.kind==='unaddressed'));
+});
+
 test('switching providers does not copy the model response’s active effort',async t=>{
   const api=await fixture(t);
   const {id}=await api.start({model:'fixture-a'});

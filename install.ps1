@@ -137,7 +137,7 @@ function rpc(method, params) {
 }
 
 try {
-  await rpc('initialize', { clientInfo: { name: 'hive_swarm_installer', version: '1.7.3' }, capabilities: { experimentalApi: true } });
+  await rpc('initialize', { clientInfo: { name: 'hive_swarm_installer', version: '1.7.4' }, capabilities: { experimentalApi: true } });
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'initialized', params: {} }) + '\n');
   const added = await rpc('marketplace/add', { source: repoRoot });
   const installed = await rpc('plugin/install', { marketplacePath: marketplaceJson, pluginName: 'hive-swarm' });
