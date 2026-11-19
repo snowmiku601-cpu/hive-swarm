@@ -1,0 +1,47 @@
+{
+  "name": "hive-swarm",
+  "version": "1.8.0",
+  "description": "Local multi-agent coordination, dependent tasks, and a shared Swarm board.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/snowmiku601-cpu/hive-swarm.git"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.2.0"
+  },
+  "bin": {
+    "hive-swarm": "./cli.mjs"
+  },
+  "exports": {
+    "./engine": "./engine.mjs",
+    "./worktrees": "./worktrees.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    ".agents/plugins/marketplace.json",
+    ".codex-plugin/plugin.json",
+    ".mcp.json",
+    "assets/hive-swarm-banner.svg",
+    "assets/hive-swarm-flow.svg",
+    "assets/hive-swarm-icon.png",
+    "assets/hive-swarm-icon.svg",
+    "board.css",
+    "board.html",
+    "board.js",
+    "cli.mjs",
+    "codex.mjs",
+    "engine.mjs",
+    "hive-bees.js",
+    "hive-graph.js",
+    "server.mjs",
+    "skills/swarm/SKILL.md",
+    "skills/swarm/agents/openai.yaml",
+    "worktrees.mjs"
+  ],
+  "scripts": {
+    "test": "node --test ./*.test.mjs",
+    "pack:core": "node scripts/pack-core.mjs"
+  }
+}
