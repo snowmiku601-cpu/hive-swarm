@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Swarm</title>
+<!-- hive-style -->
+</head>
+<body>
+<main class="wrap">
+  <header class="masthead">
+    <div class="tile-field" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="mast-row">
+      <div class="brand"><span id="brand-bee" class="bee-tile brand-tile"></span><strong>Hive Swarm</strong></div>
+      <div class="mast-actions">
+        <label id="team-picker" class="team-picker" hidden><span class="sr-only">Recent swarms</span><select id="recent-teams"></select></label>
+        <button id="theme" class="icon-button" type="button" aria-label="Toggle light or dark theme"><span class="theme-glyph" aria-hidden="true">☀</span></button>
+      </div>
+    </div>
+    <div class="identity">
+      <div>
+        <div class="title-line"><h1 id="title">Hive Swarm</h1><button id="edit-title" class="link-button" type="button" hidden>Rename</button></div>
+        <p id="meta" class="subline">Connecting…</p>
+      </div>
+      <span id="phase" class="phase" hidden><span class="dot"></span><span id="phase-label"></span></span>
+    </div>
+    <form id="title-form" class="title-form" hidden>
+      <label class="sr-only" for="new-title">Swarm title</label>
+      <input id="new-title" maxlength="95" required>
+      <button id="save-title" class="primary" type="submit">Save</button>
+      <button id="cancel-title" type="button">Cancel</button>
+    </form>
+    <dl id="metrics" class="metrics" hidden>
+      <div><dt>Working</dt><dd id="active-count">0</dd></div>
+      <div><dt>Waiting</dt><dd id="waiting-count">0</dd></div>
+      <div><dt>Turns</dt><dd id="turn-count">0</dd></div>
+    </dl>
+  </header>
+  <section class="panel empty empty-swarm" id="empty-swarm" aria-labelledby="title" hidden>
+    <p>Use <code>/swarm</code> in chat to start a swarm.</p>
+  </section>
+  <div class="navigation" id="navigation" hidden>
+    <nav class="tabs" role="tablist" aria-label="Swarm views">
+      <button id="tab-overview" role="tab" type="button" aria-controls="panel-overview" aria-selected="false" tabindex="-1">Overview</button>
+      <button id="tab-board" role="tab" type="button" aria-controls="panel-board" aria-selected="true">Board<span id="post-count" class="tab-count"></span></button>
+      <button id="tab-members" role="tab" type="button" aria-controls="panel-members" aria-selected="false" tabindex="-1">Members<span id="roster-count" class="tab-count"></span></button>
+      <button id="tab-graph" role="tab" type="button" aria-controls="panel-graph" aria-selected="false" tabindex="-1">Graph</button>
+    </nav>
+    <div class="team-actions">
+      <button id="extra-turns" type="button" hidden>+8 turns</button>
+      <button id="pause" type="button">Pause</button>
+    </div>
+  </div>
+  <section id="panel-overview" role="tabpanel" aria-labelledby="tab-overview" hidden>
+    <div class="overview-grid">
+      <section class="panel">
+        <div class="panel-heading"><h2>Goal and progress</h2></div>
+        <div class="overview-body">
+          <p id="overview-goal" class="message"></p>
+          <div class="progress-row"><label for="progress-workers">Workers done <strong id="worker-progress"></strong></label><progress id="progress-workers" max="1" value="0"></progress></div>
+          <div class="progress-row"><label for="progress-turns">Turns used <strong id="turn-progress"></strong></label><progress id="progress-turns" max="1" value="0"></progress></div>
+          <div id="overview-summary"></div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-heading"><h2>Member status</h2></div>
+        <ul id="overview-members" class="overview-list"></ul>
+      </section>
+      <section id="overview-alerts-panel" class="panel" hidden>
+        <div class="panel-heading"><h2>Alerts</h2></div>
+        <ul id="overview-alerts" class="overview-list"></ul>
+      </section>
+      <section id="overview-milestones-panel" class="panel" hidden>
+        <div class="panel-heading"><h2>Milestones</h2></div>
+        <ul id="overview-milestones" class="overview-list"></ul>
+      </section>
+    </div>
+  </section>
+  <section id="panel-board" role="tabpanel" aria-labelledby="tab-board" hidden>
+    <section id="board-live" class="panel live-strip" aria-labelledby="board-live-title" hidden>
+      <div class="panel-heading"><h2 id="board-live-title">Live activity</h2></div>
+      <ul id="board-live-list" class="overview-list"></ul>
+    </section>
+    <div class="board-grid">
+      <div class="panel">
+        <div class="bar">
+          <label class="search"><span class="sr-only">Search posts</span><input id="search-posts" type="search" placeholder="Search posts"></label>
+          <label class="sr-only" for="member-filter">Filter by member</label>
+          <select id="member-filter"><option value="">All members</option></select>
+          <label class="sr-only" for="channel-filter">Board channel</label>
+          <select id="channel-filter"><option value="">All channels</option></select>
+          <button id="follow" type="button" aria-pressed="true">Follow</button>
+        </div>
+        <ol id="feed" class="feed" tabindex="0" aria-label="Posts in chronological order"></ol>
+        <form id="compose" class="composer">
+          <label class="sr-only" for="message">Message text</label>
+          <textarea id="message" maxlength="6000" placeholder="Send a message or @mention a member" required></textarea>
+          <div class="composer-foot">
+            <label class="sr-only" for="composer-channel">Post channel</label>
+            <select id="composer-channel" hidden><option value="main">#main</option></select>
+            <button id="submit" class="primary" type="submit">Send</button>
+          </div>
+        </form>
+      </div>
+      <aside class="panel roster-aside" aria-label="Hive summary">
+        <div class="panel-heading"><h2>Hive</h2><button id="open-members" class="link-button" type="button">View members</button></div>
+        <ul id="side-members" class="side-list"></ul>
+        <p id="aside-total" class="aside-total"></p>
+      </aside>
+    </div>
+  </section>
+  <section id="panel-members" role="tabpanel" aria-labelledby="tab-members" hidden>
+    <div class="bar member-bar"><label class="search"><span class="sr-only">Search members</span><input id="search-members" type="search" placeholder="Search by name, group, or model"></label></div>
+    <div class="roster-groups">
+      <section id="coordinator-group" class="panel roster-group" hidden><h2>Coordinator</h2><ul id="coordinator-list" class="member-list"></ul></section>
+      <section id="working-group" class="panel roster-group" hidden><h2 id="working-title">Working</h2><ul id="working-list" class="member-list"></ul></section>
+      <section id="rest-group" class="panel roster-group" hidden><h2 id="rest-title">Standing by &amp; done</h2><ul id="rest-list" class="member-list"></ul></section>
+      <details id="retired-group" class="panel retired" hidden><summary id="retired-title">Retired</summary><ul id="retired-list" class="member-list"></ul></details>
+      <p id="member-empty" class="panel empty" hidden>No matching members.</p>
+    </div>
+  </section>
+  <section id="panel-graph" role="tabpanel" aria-labelledby="tab-graph" hidden>
+    <div class="graph-grid">
+      <div class="panel">
+        <div class="panel-heading"><h2>Message graph</h2><span id="graph-total" class="minor"></span></div>
+        <div class="graph-toolbox">
+          <div class="controls">
+            <button class="icon-button" id="first" type="button" aria-label="First post" title="First post">|‹</button>
+            <button class="icon-button" id="back" type="button" aria-label="Previous post" title="Previous post">‹</button>
+            <button class="icon-button" id="play" type="button" aria-label="Replay" title="Replay">▶</button>
+            <button class="icon-button" id="next" type="button" aria-label="Next post" title="Next post">›</button>
+            <label class="sr-only" for="replay">Replay position</label>
+            <input id="replay" type="range" min="0" max="0" value="0">
+            <button id="live" type="button" aria-pressed="true"><span class="dot"></span>Live</button>
+          </div>
+          <div class="options">
+            <label for="pacing">Pacing <select id="pacing"><option value="even">Even</option><option value="real">Real-time</option></select></label>
+            <label for="speed">Speed <select id="speed"><option value=".5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label>
+            <label><input id="hide-inactive" type="checkbox">Hide inactive</label>
+            <label><input id="expand-all" type="checkbox">Expand @all</label>
+          </div>
+        </div>
+        <div id="graph-stage" class="graph-stage"><canvas id="graph-canvas" aria-hidden="true"></canvas><div id="graph-nodes" aria-label="Members on graph"></div></div>
+        <div class="graph-legend"><span>Direct or group @mention</span><span class="broadcast-mark">Broadcast @all</span><span id="broadcast-count"></span></div>
+      </div>
+      <aside class="panel" aria-label="Graph details">
+        <div class="panel-heading"><h2 id="inspection-title">Selected post</h2><button id="clear-node" class="link-button" type="button" hidden>Clear</button></div>
+        <div class="inspection"><p id="graph-post-author" class="minor"></p><div id="graph-post" class="message"></div><ul id="edge-list" class="edges"></ul></div>
+      </aside>
+    </div>
+  </section>
+  <p id="notice" class="notice" role="status" aria-live="polite"></p>
+</main>
+<dialog id="member-transcript" class="transcript-dialog" aria-labelledby="transcript-title">
+  <header class="transcript-header">
+    <div><h2 id="transcript-title">Journal</h2><p id="transcript-member-status" class="minor"></p></div>
+    <button id="close-transcript" type="button" autofocus>Close</button>
+  </header>
+  <div class="transcript-body">
+    <section id="transcript-live" class="transcript-live" hidden>
+      <h3><span class="dot"></span>Active</h3>
+      <div id="transcript-activity"></div>
+    </section>
+    <p id="transcript-state" class="quiet" role="status"></p>
+    <ol id="transcript-turns" class="transcript-turns" aria-label="Saved turns"></ol>
+  </div>
+  <footer class="transcript-footer">
+    <button id="refresh-transcript" type="button">Refresh</button>
+    <a id="transcript-chat">Open chat</a>
+  </footer>
+</dialog>
+<!-- hive-scripts -->
+</body>
+</html>

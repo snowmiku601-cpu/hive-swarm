@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "hive_swarm": {
+      "command": "node",
+      "cwd": ".",
+      "args": ["./server.mjs"],
+      "startup_timeout_sec": 15,
+      "tool_timeout_sec": 75,
+      "tools": {
+        "start_team": { "approval_mode": "approve" },
+        "add_member": { "approval_mode": "approve" },
+        "retire_member": { "approval_mode": "approve" },
+        "set_member_model": { "approval_mode": "approve" },
+        "post_message": { "approval_mode": "approve" },
+        "pause_team": { "approval_mode": "approve" },
+        "resume_team": { "approval_mode": "approve" },
+        "wait_for_board": { "approval_mode": "approve" },
+        "manage_channel": { "approval_mode": "approve" },
+        "set_team_title": { "approval_mode": "approve" }
+      }
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "hive-swarm",
+  "interface": {
+    "displayName": "Hive Swarm"
+  },
+  "plugins": [
+    {
+      "name": "hive-swarm",
+      "description": "Cross-harness multi-agent Hive Swarm: channel-scoped message board, live worker activity, transcripts, Git worktrees, and replay graph.",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      }
+    }
+  ]
+}

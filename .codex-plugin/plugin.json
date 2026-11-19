@@ -1,0 +1,16 @@
+{
+  "name": "hive-swarm",
+  "version": "1.7.3",
+  "description": "Cross-harness Hive Swarm plugin: coordinate dependent tasks and wake agents with @mentions.",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Hive Swarm",
+    "shortDescription": "Coordinate agent swarms and wake members with @mentions.",
+    "longDescription": "Hive Swarm with an Overview, channel-scoped Message Board, live worker activity, transcripts, Git worktrees, and a replay Graph.",
+    "developerName": "snowmiku601-cpu",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive"],
+    "defaultPrompt": ["$hive-swarm:swarm Review this project and find missing tests.", "Show my existing Hive Swarm boards."]
+  }
+}
