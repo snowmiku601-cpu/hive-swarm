@@ -24,6 +24,7 @@ Hive Swarm combines a persistent coordination engine, per-member host sessions, 
 - Current UI: Overview, Board, Members, Graph and worker Journal; representative demo screenshots are labeled as demo evidence.
 - Requested next capabilities: npm distribution and a native DeepSeek Harness integration, with compatible existing UI enhancements. These are requested work, not shipped functionality.
 - The user identified the DSH right-side Start launcher list as a required entry point: a native `Swarm` card with the existing bee icon, registered when the DSH npm bundle activates.
+- On November 20, 2026, the user approved placing that native card immediately above More tools, aligned with the existing cards.
 - The maintainer explicitly requested a design for approval before implementation on November 19, 2026.
 
 ## Capabilities and Constraints

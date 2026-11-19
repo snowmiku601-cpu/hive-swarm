@@ -1,6 +1,8 @@
 # Thiết kế phát hành npm và tích hợp DeepSeek Harness
 
 **Trạng thái:** ĐỀ XUẤT — chờ người dùng duyệt; chưa cho phép triển khai mã sản phẩm.
+
+**Đã duyệt riêng:** ngày 20/11, người dùng chốt ô **Swarm + icon ong** nằm ngay trên **More tools**, cùng bố cục/căn lề với list gốc DSH. Phần duyệt vị trí này không còn là câu hỏi mở.
 **Khởi thảo:** 19 tháng 11 năm 2026; **rà soát:** 20 tháng 11 năm 2026.
 **Mốc mã nguồn đã khảo sát:** `7d635e234dbb9d12634ce06b221d978d917e866e` (`main`).
 **Swarm khảo sát:** `a9dfb34e-7a1d-45f2-a65a-24be3b098f31`; báo cáo chính #23, #26, #27.
@@ -137,7 +139,7 @@ Empty state chỉ dẫn điểm vào chat và workspace cần chọn; mở panel
 - Label **Swarm**, dùng icon ong chúa SVG đang có của Hive, không dùng emoji phụ thuộc font và không nhận icon placeholder hình khối.
 - Đăng ký tab type bằng `ctx.sidebarRightTabs.register`: ID riêng của gói `dsh-hive-swarm`, kind `hive-swarm`, title `Swarm`, một phần tử `guide[]` có ID ổn định, title/icon và order. Body đăng ký dưới `sidebar.right.pane.tab` với key là ID definition.
 - Dùng **standard guide card renderer** của DSH. Host quyết định capsule, border radius, padding, gap, hàng icon/title, hover/focus và độ rộng cùng list; không tạo một nút absolute theo tọa độ ô đỏ trong ảnh, không chèn DOM vào sau một nút cụ thể.
-- Order ứng viên 900, qualify trên cấu hình đang cài để Swarm nằm sau các tool cards hiện có. **Chi tiết cần người dùng duyệt:** rc.5 luôn render More tools sau mọi guide card, nên vị trí native sẽ là **Wallpaper Engine → Swarm → More tools**, không phải một ô nằm ngoài list dưới More tools. Không override toàn bộ guide chỉ để đổi quy tắc này.
+- Order ứng viên 900, qualify trên cấu hình đang cài để Swarm nằm sau các tool cards hiện có. **Vị trí đã được người dùng duyệt:** **Wallpaper Engine → Swarm → More tools**. rc.5 giữ More tools cuối list; không tạo một ô nằm ngoài list hoặc override toàn bộ guide để đổi quy tắc này.
 - Khi bundle npm được cài qua DSH plugin manager và Client entry được activate, registry tự thêm card vào Start. Không yêu cầu người dùng tự sửa profile hay pin một entry bằng tay. Tôn trọng lựa chọn ẩn/pin do host quản lý sau đó.
 - Chọn card dùng navigation mặc định của guide: mở tab `hive-swarm` trong chính pane đó, thay Start theo lifecycle host. Tab Swarm dùng native React view responsive, cùng dữ liệu/controller với full panel; người dùng có thể dùng expand/fullscreen/docking của DSH. Không mở cửa sổ trình duyệt ngoài hoặc một trang iframe khác.
 - Không có team liên kết thì hiện empty state/selector trong đúng workspace; không tự khởi chạy model, tạo team hay chọn team gần nhất toàn máy. Team liên kết phải đến từ parent session hoặc thao tác chọn rõ ràng của người dùng.
@@ -234,7 +236,7 @@ Thứ tự thực hiện đề xuất sau khi duyệt: **npm/Codex không hồi 
 
 1. Hai gói, một engine; bản DSH có mục Hive Swarm native và dùng model/session của DSH.
 2. Mỗi team thuộc một host; đợt này không chuyển hội thoại hoặc trộn worker giữa hai app.
-3. Có card **Swarm + icon ong** trong Start ngay từ bản đầu, mở native right tab và có full panel; theo theme/font DSH, giữ cùng list renderer với các tool khác. Thứ tự native đề xuất là **Wallpaper Engine → Swarm → More tools** vì host giữ More tools cuối list.
+3. Có card **Swarm + icon ong** trong Start ngay từ bản đầu, mở native right tab và có full panel; theo theme/font DSH, giữ cùng list renderer với các tool khác. **Đã duyệt vị trí**: **Wallpaper Engine → Swarm → More tools**. Các chi tiết runtime/đóng gói còn lại trong bản thiết kế vẫn chờ duyệt tổng thể.
 4. Giữ dữ liệu khi update/uninstall; publish và model-backed smoke cần bước xác nhận cụ thể khi đến nơi.
 
 Các chi tiết triển khai nhỏ còn lại giao cho builder sau khi duyệt. Nếu gate API native thất bại hoặc phải thay đổi một trong bốn điểm trên, quay lại cập nhật thiết kế, không tự giảm phạm vi.
