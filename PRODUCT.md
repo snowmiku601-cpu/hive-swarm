@@ -26,6 +26,7 @@ Hive Swarm combines a persistent coordination engine, per-member host sessions, 
 - The user identified the DSH right-side Start launcher list as a required entry point: a native `Swarm` card with the existing bee icon, registered when the DSH npm bundle activates.
 - On November 20, 2026, the user approved placing that native card immediately above More tools, aligned with the existing cards.
 - The maintainer explicitly requested a design for approval before implementation on November 19, 2026.
+- On November 20, 2026, the maintainer approved the full design and implementation using the already selected Hive Swarm workflow. Publication and model-backed qualification remain separate release gates.
 
 ## Capabilities and Constraints
 

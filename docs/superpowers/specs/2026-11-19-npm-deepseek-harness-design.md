@@ -1,6 +1,6 @@
 # Thiết kế phát hành npm và tích hợp DeepSeek Harness
 
-**Trạng thái:** ĐỀ XUẤT — chờ người dùng duyệt; chưa cho phép triển khai mã sản phẩm.
+**Trạng thái:** ĐÃ DUYỆT — người dùng xác nhận “duyệt nha ní” ngày 20/11/2026, cho phép triển khai theo thiết kế và phương thức Swarm đã chọn. Publish và model-backed DSH smoke vẫn theo các gate/xác nhận riêng bên dưới.
 
 **Đã duyệt riêng:** ngày 20/11, người dùng chốt ô **Swarm + icon ong** nằm ngay trên **More tools**, cùng bố cục/căn lề với list gốc DSH. Phần duyệt vị trí này không còn là câu hỏi mở.
 **Khởi thảo:** 19 tháng 11 năm 2026; **rà soát:** 20 tháng 11 năm 2026.
@@ -236,7 +236,7 @@ Thứ tự thực hiện đề xuất sau khi duyệt: **npm/Codex không hồi 
 
 1. Hai gói, một engine; bản DSH có mục Hive Swarm native và dùng model/session của DSH.
 2. Mỗi team thuộc một host; đợt này không chuyển hội thoại hoặc trộn worker giữa hai app.
-3. Có card **Swarm + icon ong** trong Start ngay từ bản đầu, mở native right tab và có full panel; theo theme/font DSH, giữ cùng list renderer với các tool khác. **Đã duyệt vị trí**: **Wallpaper Engine → Swarm → More tools**. Các chi tiết runtime/đóng gói còn lại trong bản thiết kế vẫn chờ duyệt tổng thể.
+3. Có card **Swarm + icon ong** trong Start ngay từ bản đầu, mở native right tab và có full panel; theo theme/font DSH, giữ cùng list renderer với các tool khác. **Đã duyệt vị trí**: **Wallpaper Engine → Swarm → More tools**. Người dùng đã duyệt tổng thể ngày 20/11/2026.
 4. Giữ dữ liệu khi update/uninstall; publish và model-backed smoke cần bước xác nhận cụ thể khi đến nơi.
 
 Các chi tiết triển khai nhỏ còn lại giao cho builder sau khi duyệt. Nếu gate API native thất bại hoặc phải thay đổi một trong bốn điểm trên, quay lại cập nhật thiết kế, không tự giảm phạm vi.
