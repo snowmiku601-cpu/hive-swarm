@@ -389,6 +389,7 @@ export class TeamBoard {
     this.removingWorktrees = new Set();
     this.signals = new EventEmitter().setMaxListeners(0);
     this.activity = new Map();
+    this.runningTurns = new Map();
     this.closed = false;
 
     const savedTeams = this.db.prepare('SELECT value FROM teams').all();
@@ -421,6 +422,7 @@ export class TeamBoard {
         member.inbox = [...(member.inFlight ?? []), ...member.inbox].slice(-24);
         delete member.inFlight;
         delete member.declaredOutcome;
+        delete member.inFlightCompletions;
         if (member.retireAfterTurn) {
           retire(member);
           this.record(team, 'system', 'Retired @' + member.name + ' on service shutdown.');
@@ -883,6 +885,7 @@ export class TeamBoard {
     member.inbox = member.inbox.filter(post=>post.visibility!=='direct');
     const request = structuredClone(member);
     const completions = Object.fromEntries(team.members.map(m => [m.name, m.completed ?? 0]));
+    member.inFlightCompletions = completions;
     member.inFlight = member.inbox;
     member.inbox = [];
     team.lastDispatchSeq=this.record(team, 'system', '@' + member.name + ' started turn ' + team.turns + '.').seq;
@@ -916,15 +919,20 @@ export class TeamBoard {
     };
     const declaredOutcome = () => this.get(id).members.find(entry=>entry.name===member.name &&
       entry.status==='working' && entry.lastTurn===request.lastTurn)?.declaredOutcome;
-    Promise.resolve().then(() => this.runTurn({team, member: request, remember, declaredOutcome, onActivity})).then(
-      result => this.settle(id, member.name, completions, result),
+    const controller = new AbortController();
+    const key = id + ':' + member.name;
+    const run = {turn: request.lastTurn, controller};
+    this.runningTurns.set(key, run);
+    const cancelled = () => ({state:'failed',message:'Worker turn cancelled. Mention @' + member.name + ' only after checking the owned session.'});
+    run.finished = Promise.resolve().then(() => this.runTurn({team, member: request, remember, declaredOutcome, onActivity, signal:controller.signal})).then(
+      result => this.settle(id, member.name, completions, controller.signal.aborted ? cancelled() : result, {turn:request.lastTurn}),
       error => {
         const message = String(error?.message ?? error).slice(0, 6000);
         const quota = error?.blockedBy === 'quota' ||
           /\b429\b|too many requests|rate.limit|insufficient.quota|quota exceeded|usage limit/i.test(message);
-        this.settle(id, member.name, completions, {state: quota ? 'quota' : 'failed', message});
+        this.settle(id, member.name, completions, controller.signal.aborted ? cancelled() : {state: quota ? 'quota' : 'failed', message}, {turn:request.lastTurn});
       },
-    );
+    ).finally(() => {if (this.runningTurns.get(key) === run) this.runningTurns.delete(key);});
     this.schedule(id);
   }
 
@@ -962,10 +970,46 @@ export class TeamBoard {
     this.save(team);
   }
 
-  settle(id, name, completions, result) {
-    if (this.closed) return;
+  cancelTurn(id, name) {
+    const member = this.liveMember(this.get(id),name);
+    const run = this.runningTurns.get(id + ':' + name);
+    if (member.status !== 'working' || !run || run.turn !== member.lastTurn) throw Error('This worker turn is not running.');
+    run.controller.abort(Error('Worker turn cancelled.'));
+    return run.finished;
+  }
+
+  async cancelRunning() {
+    const runs = [...this.runningTurns.values()];
+    for (const run of runs) run.controller.abort(Error('Worker host is closing.'));
+    await Promise.allSettled(runs.map(run => run.finished));
+  }
+
+  // Trusted host adapters call this only after proving the matching host turn is terminal.
+  settleRecovered(id, name, {turn,requestId,result}) {
+    const team = this.get(id);
+    const member = team.members.find(entry => entry.name === name);
+    if (member?.lastSettledTurn === turn && member.lastSettledRequestId === requestId) return {settled:false};
+    if (!member?.recoveryRequired || member.lastTurn !== turn ||
+        member.pendingRun?.turn !== turn || member.pendingRun?.requestId !== requestId ||
+        typeof requestId !== 'string' || !requestId || !member.inFlightCompletions) {
+      throw Error('Recovered run identity does not match the pending request.');
+    }
+    if (!result || !['done','waiting','failed','quota'].includes(result.state) ||
+        typeof result.message !== 'string' || !result.message.trim() ||
+        (!['failed','quota'].includes(result.state) && (!Array.isArray(result.notify) || !Array.isArray(result.waitFor)))) {
+      throw Error('Recovered run has no valid verified outcome.');
+    }
+    return {settled:this.settle(id,name,member.inFlightCompletions,result,{turn,requestId,recovery:true})};
+  }
+
+  settle(id, name, completions, result, {turn,requestId,recovery = false} = {}) {
+    if (this.closed) return false;
     const team = this.get(id);
     const member = team.members.find(m => m.name === name);
+    const expectedTurn = turn ?? member?.lastTurn;
+    if (!member || (turn != null && member.lastTurn !== turn) ||
+        (expectedTurn != null && member.lastSettledTurn === expectedTurn) ||
+        (member.recoveryRequired && !recovery)) return false;
     const live=this.activity.get(id);
     live?.delete(name);
     if (!live?.size) this.activity.delete(id);
@@ -985,6 +1029,11 @@ export class TeamBoard {
     if (result.state === 'done') member.completed = (member.completed ?? 0) + 1;
     delete member.inFlight;
     delete member.declaredOutcome;
+    delete member.inFlightCompletions;
+    delete member.recoveryRequired;
+    member.lastSettledTurn = expectedTurn;
+    if (requestId || member.pendingRun?.requestId) member.lastSettledRequestId = requestId ?? member.pendingRun.requestId;
+    delete member.pendingRun;
     if (member.inbox.length && !failed) this.wakeForMessage(member,member.inbox.some(post=>post.addressed));
     if (member.retireAfterTurn) {
       retire(member);
@@ -1001,6 +1050,7 @@ export class TeamBoard {
     this.save(team);
     this.signals.emit('activity:'+id);
     this.schedule(id);
+    return true;
   }
 
   unblockDependencies(team) {
@@ -1023,6 +1073,7 @@ export class TeamBoard {
     this.signals.emit('close');
     this.signals.removeAllListeners();
     this.activity.clear();
+    this.runningTurns.clear();
     this.db.close();
   }
 }

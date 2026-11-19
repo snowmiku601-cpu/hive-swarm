@@ -48,3 +48,43 @@ test('a host cannot open the other host storage and reinterpret its sessions',()
   try{assert.throws(()=>{foreign=new TeamBoard(file,()=>{}, {host:'deepseek-harness',recovery:'preserve'});},/host|Codex/i);}
   finally{foreign?.close();rmSync(dir,{recursive:true,force:true});}
 });
+
+test('cancellation aborts the running adapter and cannot publish a late successful result',async()=>{
+  let release,signal;
+  const board=new TeamBoard(':memory:',request=>{signal=request.signal;return new Promise(resolve=>{release=resolve;});});
+  try{
+    const team=board.create({...input(),concurrency:1,members:[...input().members,{name:'reviewer',brief:'Wait for a verified result.',waitFor:['builder']}]});
+    await waitUntil(()=>Boolean(release));
+    const cancelled=board.cancelTurn(team.id,'builder');
+    assert.equal(signal.aborted,true);
+    release({state:'done',message:'A late result must not be published.',notify:['reviewer'],waitFor:[]});
+    await cancelled;
+    const current=board.get(team.id);
+    assert.equal(current.members[0].status,'failed');
+    assert.equal(current.members[0].completed,0);
+    assert.equal(current.members[1].status,'waiting');
+    assert.equal(current.events.some(e=>e.text==='A late result must not be published.'),false);
+  }finally{board.close();}
+});
+
+test('a verified recovered result settles one matching run once and preserves dependent wakeups',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'hive-recover-'));const file=join(dir,'teams.sqlite');
+  let board=new TeamBoard(file,()=>new Promise(()=>{}),{host:'deepseek-harness'});
+  try{
+    const team=board.create({...input(),members:[...input().members,{name:'reviewer',brief:'Review after builder.',waitFor:['builder']}]});
+    await waitUntil(()=>board.get(team.id).members[0].status==='working');
+    const saved=board.get(team.id);saved.members[0].pendingRun={requestId:'recover-request',turn:1};board.save(saved);
+    board.close();
+    board=new TeamBoard(file,()=>new Promise(()=>{}),{host:'deepseek-harness'});
+    const result={state:'done',message:'Recovered verified report.',notify:[],waitFor:[]};
+    assert.throws(()=>board.settleRecovered(team.id,'builder',{turn:1,requestId:'wrong-request',result}),/identity|request|run/i);
+    assert.deepEqual(board.settleRecovered(team.id,'builder',{turn:1,requestId:'recover-request',result}),{settled:true});
+    assert.deepEqual(board.settleRecovered(team.id,'builder',{turn:1,requestId:'recover-request',result}),{settled:false});
+    const current=board.get(team.id);
+    assert.equal(current.paused,true);
+    assert.equal(current.members[0].completed,1);
+    assert.equal(current.members[0].recoveryRequired,undefined);
+    assert.equal(current.members[1].status,'queued');
+    assert.equal(current.events.filter(e=>e.text==='Recovered verified report.').length,1);
+  }finally{board.close();rmSync(dir,{recursive:true,force:true});}
+});
