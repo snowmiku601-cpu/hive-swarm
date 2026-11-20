@@ -1,6 +1,6 @@
 {
   "version": "1.8.0",
-  "status": "unpublished candidate; model-backed Windows Desktop smoke and 3OS CI qualified",
+  "status": "core published; DSH native package remains unpublished pending npm OTP",
   "artifacts": [
     {
       "name": "hive-swarm",

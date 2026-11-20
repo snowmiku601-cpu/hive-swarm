@@ -74,7 +74,21 @@
     ]
   },
   "publication": {
-    "published": false,
+    "published": [
+      {
+        "name": "hive-swarm",
+        "version": "1.8.0",
+        "distTag": "latest",
+        "integrityVerified": true
+      }
+    ],
+    "pending": {
+      "name": "dsh-hive-swarm",
+      "version": "1.8.0",
+      "distTag": "next",
+      "reason": "npm requires a one-time password for publish",
+      "localTarballIntegrityVerified": true
+    },
     "tagged": false,
     "account": "snowmiku601",
     "namesReserved": false
