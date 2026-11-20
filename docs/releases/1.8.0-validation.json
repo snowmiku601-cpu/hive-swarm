@@ -1,7 +1,8 @@
 {
   "version": "1.8.0",
   "date": "2026-11-20",
-  "sourceCommit": "09c0cbbb3a2d81c1480026827046ce3011257b75",
+  "artifactSourceCommit": "b35cadd",
+  "verificationCommit": "09c0cbbb3a2d81c1480026827046ce3011257b75",
   "ci": {
     "url": "https://github.com/snowmiku601-cpu/hive-swarm/actions/runs/44700608834",
     "jobs": 12,

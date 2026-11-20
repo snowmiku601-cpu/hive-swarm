@@ -8,4 +8,4 @@
 - Keep worker identity through permission waits and restart recovery. Drain cancellation before releasing native guards or closing run evidence. Reject invalid outcomes before storing immutable reports.
 - Preserve the Windows source installer's selected Node runtime and paginate the GET event stream without skipping backlog posts.
 
-The DSH candidate remains experimental pending authenticated Desktop and model-backed acceptance. See [qualification](docs/releases/1.8.0-qualification.md) for evidence and remaining release gates. No public release or tag is implied by this entry.
+The experimental DSH candidate passed the approved Windows Desktop two-worker smoke; Windows shell enforcement remains partial and DSH has not been qualified on other operating systems. The packages are published: core `1.8.0` is tagged `latest`, and `dsh-hive-swarm@1.8.0` is tagged `next`. See [qualification](docs/releases/1.8.0-qualification.md) for evidence and platform limits. No Git release tag was created.
