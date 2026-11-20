@@ -19,6 +19,6 @@ hive-swarm uninstall --host codex
 
 `npm install` only installs package files; it does not register a plugin. The explicit CLI creates an immutable persistent marketplace copy and delegates host changes to supported Codex CLI commands. Local switching/rollback is qualified for CLI `0.169.1`; other versions retain the stage and report the qualification requirement. Active owned turns block replacement. Uninstall preserves the databases, journals and verified release copies. Doctor does not execute Codex by default or call models.
 
-DSH uses the separate `dsh-hive-swarm` bundle and its own profile manager. Its `0.2.2-rc.5` native candidate remains experimental until Desktop and model-backed acceptance gates pass. `--host dsh` provides manager guidance without editing a DSH profile.
+DSH uses the separate `dsh-hive-swarm` bundle and its own profile manager. The experimental `0.2.2-rc.5` candidate passed a two-worker River smoke on Windows Desktop, including dependent settlement, Journal and session navigation. Its Windows shell retains the Host's partial confinement limits. `--host dsh` provides manager guidance without editing a DSH profile.
 
 [Full documentation and high-resolution screenshots](https://github.com/snowmiku601-cpu/hive-swarm#see-it-in-action) · [Source and issue tracker](https://github.com/snowmiku601-cpu/hive-swarm) · MIT license

@@ -1,21 +1,21 @@
 {
   "version": "1.8.0",
-  "status": "local candidate, unpublished",
+  "status": "unpublished candidate; model-backed Windows Desktop smoke and 3OS CI qualified",
   "artifacts": [
     {
       "name": "hive-swarm",
       "filename": "hive-swarm-1.8.0.tgz",
-      "size": 85704,
-      "integrity": "sha512-7KPoNSaUMam4Zr6QOE9r/5gRMImuS6AIkK/LmLpxgw+E4guqp7dhxjiP2e3yOqWaK9900+RnDgl7lKGQ/43sQQ==",
+      "size": 85756,
+      "integrity": "sha512-EPQv5pwrlHU5PsW+b2LF6Nn6fwPdhRpkkvFgHMoZI1ACMOHfhuPJDeXLxaJ4ThhMRmE4IT1cMe21/USXPp5srQ==",
       "files": 25
     },
     {
       "name": "dsh-hive-swarm",
       "filename": "dsh-hive-swarm-1.8.0.tgz",
-      "size": 31444,
-      "integrity": "sha512-+8AHLp+2F8cD/pE3Y24NvDeeEZRIhORnmQNp1wc2A2A3sHqGg6dQ4jdAqoJns3d2ahIPQnqT9+qKUPR83wFi9w==",
+      "size": 31666,
+      "integrity": "sha512-74nNoZ7sh2OrjvDFMOnY19FSwTOgRqLFPcoI5kAlvF3HDi0EY+rtiYGquo/okQyZMB07GLfQdZSFpML1i7YlWQ==",
       "files": 10,
-      "loaderBytes": 56322
+      "loaderBytes": 56336
     }
   ]
 }

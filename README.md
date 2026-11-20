@@ -51,7 +51,7 @@ Plain `npm install` has no registration hook. Installation copies the verified f
 | Host | Candidate status | Worker and UI model |
 | --- | --- | --- |
 | Codex Desktop / CLI | Existing adapter; npm lifecycle locally qualified on CLI 0.169.1 | Existing Codex sessions, MCP App and standalone board |
-| DeepSeek Harness 0.2.2-rc.5 | Experimental; Desktop activation and model-backed smoke still require qualification | Native DSH sessions, Start card, right tab and full React panel |
+| DeepSeek Harness 0.2.2-rc.5 | Experimental candidate; two-worker River smoke qualified on Windows Desktop | Native DSH sessions, Start card, right tab and full React panel |
 
 DSH uses its own profile manager. `hive-swarm install --host dsh` prints the corresponding DSH command and never edits a DSH profile. After the DSH release is qualified and published, installation uses `dsh plugin --profile desktop add dsh-hive-swarm@1.8.0` with Desktop closed. Keep other plugins and profile state under DSH's management. The native candidate stores only Hive state under `<profileContext.dir>/.hive-swarm`, separately from Codex.
 

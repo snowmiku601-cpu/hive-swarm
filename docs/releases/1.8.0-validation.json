@@ -1,0 +1,82 @@
+{
+  "version": "1.8.0",
+  "date": "2026-11-20",
+  "sourceCommit": "951e391cabd9b835d5988ee253a617678e27bb7b",
+  "ci": {
+    "url": "https://github.com/snowmiku601-cpu/hive-swarm/actions/runs/44669713868",
+    "jobs": 12,
+    "passed": 12,
+    "oses": [
+      "Windows",
+      "macOS",
+      "Linux"
+    ],
+    "node": [
+      "22.19.0",
+      "24.2.0",
+      "24.x",
+      "lts/*"
+    ],
+    "testsPerJob": 246
+  },
+  "desktop": {
+    "version": "0.2.2-rc.5",
+    "platform": "Windows",
+    "transport": "dsh-app native Desktop",
+    "provider": "river/deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "workerPrompts": 2,
+    "preparationAttemptsWithoutAdmission": 2,
+    "dependencyOrderVerified": true,
+    "verificationFileUnchanged": true,
+    "workerEvidence": [
+      {
+        "member": "read_fixture",
+        "admissions": 1,
+        "acceptedSeq": 6,
+        "claimSeq": 8,
+        "turnEndSeq": 107,
+        "settled": true,
+        "readOnlyRecorded": true
+      },
+      {
+        "member": "verify_report",
+        "admissions": 1,
+        "acceptedSeq": 5,
+        "claimSeq": 7,
+        "turnEndSeq": 32,
+        "settled": true,
+        "readOnlyRecorded": true
+      }
+    ],
+    "journalVerified": true,
+    "exactWorkerSessionNavigationVerified": true,
+    "actualToolResultNavigationVerified": true,
+    "coexistence": {
+      "taskBoard": "0.4.19",
+      "gitGraph": "0.4.14",
+      "wallpaperEngine": "1.4.3"
+    },
+    "removalPreservesOtherPluginsVerified": true,
+    "reinstallationSingleCardVerified": true,
+    "completedTeamRetainedWithoutNewWorker": true
+  },
+  "enforcement": {
+    "readonlyWriteDenied": true,
+    "readonlyShellReadAllowed": true,
+    "readonlyShellWriteDenied": true,
+    "workspaceWriteAllowed": true,
+    "outsideWorkspaceWriteDenied": true,
+    "windowsShellEnforcement": "partial",
+    "limits": [
+      "Windows shell reports partial enforcement",
+      "Workspace-write includes Host platform temp areas",
+      "Live DSH acceptance was Windows-only"
+    ]
+  },
+  "publication": {
+    "published": false,
+    "tagged": false,
+    "account": "snowmiku601",
+    "namesReserved": false
+  }
+}
