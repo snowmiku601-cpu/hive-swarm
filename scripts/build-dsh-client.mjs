@@ -26,7 +26,7 @@ async function cliBuild(require) {
       const source=await readFile(new URL('hive-'+kind+'.js',root),'utf8');
       await writeFile(file,'var globalThis={};\n'+source+'\nmodule.exports=globalThis.'+exportName+';');
     }
-    await writeFile(icon,'export default '+JSON.stringify(await readFile(new URL('assets/hive-swarm-icon.svg',root),'utf8'))+';');
+    await writeFile(icon,'export default '+JSON.stringify((await readFile(new URL('assets/hive-swarm-icon.svg',root),'utf8')).replaceAll('\r\n','\n'))+';');
     const binary=require.resolve('@esbuild/'+process.platform+'-'+process.arch+'/'+(process.platform==='win32'?'esbuild.exe':'bin/esbuild'));
     const output=join(stage,'client.cjs'),meta=join(stage,'meta.json'),log=join(stage,'compiler.log');
     const fd=openSync(log,'wx');let result;
@@ -53,8 +53,9 @@ export async function buildClient({write=true,toolingDirectory}={}) {
     external:['react','react/*','@deepseek-ai/*'],loader:{'.css':'text'},legalComments:'none',metafile:true,
     plugins:[{name:'hive-canonical-assets',setup(build){
       build.onResolve({filter:/^hive:(graph|bees|icon)$/},args=>({path:args.path.slice(5),namespace:'hive'}));
+      build.onLoad({filter:/\.css$/},async args=>({contents:(await readFile(args.path,'utf8')).replaceAll('\r\n','\n'),loader:'text'}));
       build.onLoad({filter:/.*/,namespace:'hive'},async args=>{
-        if(args.path==='icon')return {contents:await readFile(new URL('assets/hive-swarm-icon.svg',root),'utf8'),loader:'text'};
+        if(args.path==='icon')return {contents:(await readFile(new URL('assets/hive-swarm-icon.svg',root),'utf8')).replaceAll('\r\n','\n'),loader:'text'};
         const source=await readFile(new URL('hive-'+args.path+'.js',root),'utf8');
         return {contents:'var globalThis = {};\n'+source+'\nmodule.exports = globalThis.'+(args.path==='graph'?'HiveGraph':'HiveBee')+';',loader:'js'};
       });

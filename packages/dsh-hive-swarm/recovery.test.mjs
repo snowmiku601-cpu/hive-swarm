@@ -71,3 +71,47 @@ test('recovery refuses a pending turn identity that differs from its durable run
   const f=await crashFixture(t,{storeFinished:false,running:true,inputPaused:true,pendingTurn:2});
   assert.equal(f.host.runner.actorForSession('owned'),null);assert.deepEqual(f.calls,[]);
 });
+
+test('reconcile keeps observing when an early idle event still reports active work',async t=>{
+  const root=mkdtempSync(join(tmpdir(),'hive-native-reconcile-busy-'));
+  let board=new TeamBoard(join(root,'teams.sqlite'),()=>new Promise(()=>{}),{host:'deepseek-harness'});
+  const team=board.create({cwd:root,task:'Busy idle fixture',members:[{name:'builder',brief:'Work'}]});
+  await until(()=>board.get(team.id).members[0].status==='working');
+  const pending=board.get(team.id);pending.members[0].threadId='owned';pending.members[0].pendingRun={turn:1,requestId:'one'};board.save(pending);
+  const store=new RunStore(join(root,'runs.sqlite'));
+  const run=store.begin({teamId:team.id,member:'builder',turn:1,requestId:'one',sessionId:'owned',workspace:root});
+  store.setOutcome(run,{state:'done',message:'Finished after queued step.',notify:[],waitFor:[]});
+  board.close();store.close();
+  const records=[
+    {seq:1,type:'agent/inbox/spliced',data:{target:'next-turn',start:0,inserted:[{id:'one',source:{kind:'user',rpcId:'one'}}]}},
+    {seq:2,type:'turn/start',data:{turn:4}},
+    {seq:3,type:'agent/inbox/spliced',data:{target:'next-turn',start:0,removedCount:1,inserted:[]}},
+  ];
+  let waitCalls=0,releaseSecond;
+  let running=true;
+  const native={
+    listModels:async()=>[],isCurrentAgent:agent=>agent?.current===true,
+    create:async()=>{throw Error('No create')},prompt:async()=>{throw Error('No prompt')},
+    state:async()=>({active:running,running,queue:[],pendingInput:[]}),
+    currentTurn:()=>({lastTurn:4,openTurnStartSeq:2}),
+    wait:async()=>{
+      waitCalls++;
+      if(waitCalls===1)return {reason:'idle',state:{active:true,running:true,queue:['queued']}};
+      await new Promise(resolve=>{releaseSecond=resolve;});
+      running=false;
+      records.push({seq:4,type:'turn/end',data:{turn:4,reason:{kind:'completed'}}});
+      return {reason:'idle',state:{active:true,running:false,queue:[]}};
+    },
+    events:async()=>records,flush:async()=>{},cancel:async()=>{releaseSecond?.()},dispose:async()=>{},
+  };
+  const {createHost}=await import('./host.mjs');
+  const ctx={connection:{fetch:{register:()=>async()=>{}}},workspaceRegistry:{list:()=>[{path:root}]},
+    tools:{register:()=>()=>{}},skills:{register:()=>()=>{}}};
+  const host=await createHost(ctx,{dataDirectory:root,coreFactory:createSwarmApplication,storeFactory:file=>new RunStore(file),nativeFactory:()=>native});
+  t.after(async()=>{await host.close();rmSync(root,{recursive:true,force:true});});
+  await until(()=>waitCalls===2&&Boolean(releaseSecond));
+  assert.equal(host.application.board.get(team.id).members[0].status,'working');
+  releaseSecond();
+  await until(()=>host.application.board.get(team.id).members[0].completed===1);
+  assert.equal(host.application.board.get(team.id).members[0].status,'done');
+});

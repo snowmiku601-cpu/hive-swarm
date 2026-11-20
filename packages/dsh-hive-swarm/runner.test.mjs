@@ -133,3 +133,36 @@ test('a rejected worker outcome cannot poison the immutable durable result',asyn
     assert.deepEqual(await f.runner.setOutcome('owned-session',1,outcome),outcome);
   }finally{abort.abort();await assert.rejects(running);}
 });
+
+test('member effort null uses the selected model default rather than team effort, and worker prompt carries team context',async t=>{
+  const f=await fixture(t);
+  let prepared,promptText;
+  f.native.listModels=async()=>[{id:'provider/model',provider:'provider',model:'model',efforts:['low','max'],defaultEffort:'low'}];
+  f.native.prepare=async(_id,opts)=>{prepared=opts;};
+  const origPrompt=f.native.prompt;
+  f.native.prompt=async req=>{promptText=req.content[0].text;return origPrompt(req);};
+  f.request.team={id:'team-42',cwd:process.cwd(),task:'Fixture task',model:'provider/model',effort:'max',
+    members:[{name:'builder',status:'working'},{name:'verifier',status:'waiting',channels:['qa']}]};
+  f.member.effort=null;
+  const running=f.runner.run(f.request);
+  await until(()=>f.calls.includes('wait'));
+  f.claim();await f.runner.setOutcome('owned-session',1,outcome);
+  f.event('turn/end',{turn:4,reason:{kind:'completed'}});
+  f.release();
+  await running;
+  assert.equal(prepared.effort,'low');
+  assert.match(promptText,/team-42/);
+  assert.match(promptText,/@verifier/);
+  assert.match(promptText,/do not.*duplicate|double-post/i);
+});
+
+test('correlateRun preserves turn/end failure detail so rate limits and errors remain visible',async()=>{
+  const {correlateRun}=await import('./runner.mjs');
+  const records=[
+    {seq:1,type:'agent/inbox/spliced',data:{target:'next-turn',start:0,inserted:[{source:{kind:'user',rpcId:'req-1'}}]}},
+    {seq:2,type:'turn/start',data:{turn:1}},
+    {seq:3,type:'agent/inbox/spliced',data:{target:'next-turn',start:0,removedCount:1,inserted:[]}},
+    {seq:4,type:'turn/end',data:{turn:1,reason:{kind:'error',message:'HTTP 429 quota exceeded'}}},
+  ];
+  assert.throws(()=>correlateRun({requestId:'req-1'},records),/429.*quota exceeded/i);
+});

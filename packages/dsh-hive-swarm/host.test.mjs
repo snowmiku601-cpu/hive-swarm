@@ -88,3 +88,34 @@ test('a bounded Host close retains the evidence store until cancellation is quie
   finally{finishCancel?.();for(let i=0;i<500&&!disposed;i++)await delay(2);}
   assert.equal(disposed,true);assert.equal(closed,1);
 });
+
+test('stale missing workspace entries do not block valid registered workspaces',async t=>{
+  const f=await fixture(t);
+  const {createHost}=await import('./host.mjs');
+  const root=f.root;
+  const routes=new Map();
+  const host=await createHost({
+    connection:{fetch:{register:r=>{routes.set(r.path,r);return async()=>routes.delete(r.path)}}},
+    workspaceRegistry:{list:()=>[{id:'missing',path:join(root,'deleted-workspace-does-not-exist')},{id:'valid',path:root}]},
+    skills:{register:()=>()=>{}},tools:{register:()=>()=>{}},
+  },{dataDirectory:join(root,'state-stale'),coreFactory:createSwarmApplication,storeFactory:file=>new RunStore(file),nativeFactory:()=>f.native});
+  try{
+    const created=await host.application.command('start_team',args(root));
+    assert.equal(created.cwd,root);
+  }finally{await host.close();}
+});
+
+test('worker tool visibility hides owner-only tools and effort schema accepts null',async t=>{
+  const f=await fixture(t);
+  await f.host.application.command('start_team',args(f.root));await delay(10);
+  const workerAgent={id:'worker-session',current:true};
+  const ownerAgent={id:'parent-session',current:true};
+  assert.equal(f.tools.get('hive_swarm_start_team').options.when({agent:ownerAgent}),true);
+  assert.equal(f.tools.get('hive_swarm_start_team').options.when({agent:workerAgent}),false);
+  assert.equal(f.tools.get('hive_swarm_pause_team').options.when({agent:workerAgent}),false);
+  assert.equal(f.tools.get('hive_swarm_resolve_recovery').options.when({agent:workerAgent}),false);
+  assert.equal(f.tools.get('hive_swarm_post_message').options.when({agent:workerAgent}),true);
+  assert.equal(f.tools.get('hive_swarm_set_turn_outcome').options.when({agent:workerAgent}),true);
+  assert.deepEqual(f.tools.get('hive_swarm_set_member_model').tool.parameters.effort,{type:['string','null']});
+  assert.ok(f.tools.get('hive_swarm_start_team').tool.parameters.members.items.properties?.name);
+});
