@@ -200,7 +200,7 @@ test('real loader registers the canonical bee guide and additive native seats on
   assert.equal(def.guide.length,1);assert.equal(def.guide[0].id,'open');assert.equal(def.guide[0].order,900);
   const icon=renderer.create(React.createElement(def.guide[0].icon,{size:22}));
   const svg=decodeURIComponent(icon.root.findByType('img').props.src.split(',')[1]);
-  assert.equal(svg,await readFile(new URL('../../assets/hive-swarm-icon.svg',import.meta.url),'utf8'));
+  assert.equal(svg,(await readFile(new URL('../../assets/hive-swarm-icon.svg',import.meta.url),'utf8')).replaceAll('\r\n','\n'));
   assert.deepEqual([...f.slots.keys()].sort(),['main:dsh-hive-swarm','sidebar.panellist:dsh-hive-swarm','sidebar.right.pane.tab:dsh-hive-swarm',
     'tool.call.toolview:hive_swarm_open_swarm_panel','tool.call.toolview:hive_swarm_start_team']);
   f.dispose();assert.deepEqual([...f.definitions.keys()],['wallpaper']);assert.equal(f.slots.size,0);icon.unmount();

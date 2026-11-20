@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,rmSync} from 'node:fs';
+import {mkdtempSync,realpathSync,rmSync} from 'node:fs';
 import {join} from 'node:path';import {tmpdir} from 'node:os';
 import {createSwarmApplication} from '../../core.mjs';import {RunStore} from '../../run-store.mjs';
 import {setTimeout as delay} from 'node:timers/promises';
@@ -101,7 +101,7 @@ test('stale missing workspace entries do not block valid registered workspaces',
   },{dataDirectory:join(root,'state-stale'),coreFactory:createSwarmApplication,storeFactory:file=>new RunStore(file),nativeFactory:()=>f.native});
   try{
     const created=await host.application.command('start_team',args(root));
-    assert.equal(created.cwd,root);
+    assert.equal(created.cwd,realpathSync(root));
   }finally{await host.close();}
 });
 
