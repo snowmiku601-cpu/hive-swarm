@@ -1,6 +1,8 @@
 # Changelog
 
-## 1.9.0 — release candidate (ready for npm publication)
+## 1.9.0 — published
+
+Published on npm as `hive-swarm@1.9.0` (`latest`, 25 files, SHA-512 `sha512-xlev8HFaXvb5j9TDsQLNYPhsTWxsmvyPn+mqI+IRG0uP3kmk7RSqlEWk3Z3tYl1ah3DDoygiabShC0KAij/uJg==`) and `dsh-hive-swarm@1.9.0` (`next`, 10 files, SHA-512 `sha512-nZnuq3fjNNrVwMhSrDoGsGi4nN8WXNPbK3Xjh7fp5pi15KIIqmCMt+yS8Zp6z3Pi+O9ehfwwRJa82z1o5+jCiQ==`). Verified across 24/24 CI checks (Windows, macOS, Linux × Node 22.19.0, 24.2.0, 24.x, LTS; 264/264 tests).
 
 ### Coordination & Engine
 - Normalize `notify` and `waitFor` member targets (strip leading `@`, lowercase, preserve `#channel`) in `engine.mjs` so `@member` targets always route and unlock dependencies reliably.

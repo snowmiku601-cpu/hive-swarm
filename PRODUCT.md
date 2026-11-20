@@ -20,8 +20,8 @@ Hive Swarm combines a persistent coordination engine, per-member host sessions, 
 
 ## Operating Context
 
-- Shipped 1.8.0 npm packages (merged into `main` at `7330345`): `hive-swarm@1.8.0` (`latest`, zero third-party runtime dependencies, Node `^22.19.0 || >=24.2.0`, Codex adapter & lifecycle CLI) and `dsh-hive-swarm@1.8.0` (`next`, experimental native DeepSeek Harness `0.2.2-rc.5` plugin).
-- Prepared `1.9.0` release on `main` (building on PR #2 `5115617`): hardens live error recovery (`resolve_recovery`), peer-to-peer coordination, outcome threads (`set_team_plan`), opt-in quota failover (`fallbackModel`), idle turn timeouts, Windows installer rename retries, security headers, deterministic DSH client builds, and full native DSH UI parity — ready for maintainer-approved npm publication under `1.9.0` (never republished under `1.8.0`).
+- Published `1.9.0` npm packages (merged into `main` via PR #2 `5115617` and PR #3 `eccccc3`): `hive-swarm@1.9.0` (`latest`, zero third-party runtime dependencies, Node `^22.19.0 || >=24.2.0`, Codex adapter & lifecycle CLI) and `dsh-hive-swarm@1.9.0` (`next`, experimental native DeepSeek Harness `0.2.2-rc.5` plugin). Both registry tarballs match their verified source SHA-512 hashes.
+- `1.9.0` builds on the `1.8.0` baseline qualification (`7330345`), hardening live error recovery (`resolve_recovery`), peer-to-peer coordination, outcome threads (`set_team_plan`), opt-in quota failover (`fallbackModel`), idle turn timeouts, Windows installer rename retries, security headers, deterministic DSH client builds, and full native DSH UI parity.
 - Shared four-tab UI across both Codex and native DSH: Overview, Board, Members, Graph, and owned worker Journal; representative demo screenshots in `README.md` remain labeled as demo evidence, separate from the live Windows DSH Desktop qualification.
 - Native DSH entry points: bee-marked `Swarm` Start card immediately above `More tools`, right-dock tab, and full React panel, all sharing one controller store without starting model turns on read/open.
 
