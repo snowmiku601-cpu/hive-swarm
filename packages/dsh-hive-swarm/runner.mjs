@@ -30,7 +30,10 @@ export function correlateRun(run,records) {
       if(data.source.rpcId===run.requestId&&claimedTurn!==turn)throw Error('User message belongs to another native turn.');
     }
     if(type==='turn/end'&&claimSeq&&data.turn===claimedTurn) {
-      if(data.reason?.kind!=='completed')throw Error('Native turn did not complete; outcome unconfirmed.');
+      if(data.reason?.kind!=='completed') {
+        const detail=data.reason?.message||data.reason?.error||data.reason?.kind||'incomplete';
+        throw Error('Native turn did not complete ('+detail+'); outcome unconfirmed.');
+      }
       turnEndSeq=event.seq;
     }
   }
@@ -66,7 +69,7 @@ export class NativeRunner {
     if(member.pendingRun)throw Error('Pending native outcome unconfirmed; inspect before continuing.');
     const catalog=await this.listModels();const id=member.model??team.model??catalog.find(model=>model.default)?.id;
     const selected=catalog.find(model=>model.id===id);if(!selected)throw Error('Requested native model is unavailable.');
-    const effort=member.effort??team.effort??selected.defaultEffort;
+    const effort=(member.effort===null?undefined:member.effort??team.effort)??selected.defaultEffort;
     if(effort&&!selected.efforts?.includes(effort))throw Error('Requested native model effort is unavailable.');
     const workspace=member.workspace?.cwd??team.cwd;let sessionId=member.threadId;
     if(sessionId){const owner=this.store.findSession(sessionId);if(!owner||owner.teamId!==team.id||owner.member!==member.name||owner.workspace!==workspace)throw Error('Session ownership or workspace does not match.');}
@@ -79,17 +82,26 @@ export class NativeRunner {
     const identity={teamId:team.id,member:member.name,turn:member.lastTurn,requestId:randomUUID(),sessionId,workspace};
     const run=this.store.begin(identity);let admitted=false,inputRequired=false,finish;const entry={run,controller,done:new Promise(resolve=>{finish=resolve})};
     const cancellation=()=>{void this.cancelEntry(entry).catch(()=>{});};
+    const peers=(team.members??[]).filter(m=>m.name!==member.name&&m.status!=='retired')
+      .map(m=>'@'+m.name+(m.group?' in @'+m.group:'')+(m.channels?.length?' ['+m.channels.map(c=>'#'+c).join(', ')+']':'')+(m.workspace?.cwd?' at '+m.workspace.cwd:'')).join(', ');
+    const promptLines=[
+      'You are Hive Swarm member @'+member.name+' in team '+team.id+'.'+(peers?' Active teammates: '+peers+'.':''),
+      'Goal: '+team.task,
+      'Your assignment: '+member.brief,
+      member.workspace?.cwd?'Your Git worktree is '+workspace+(member.workspace.base?' at base '+member.workspace.base:'')+'. Work in this checkout and report changed files and verification.':'',
+      'Work only in the assigned workspace and permissions. Do not create another scheduler or launch subagents.',
+      'Coordinate directly with teammates using scoped hive_swarm tools (teamId: '+team.id+'). Tag @name directly for peer-to-peer handoffs instead of routing through @coordinator. Treat @name as a wakeup doorbell, never a CC — write names without @ when merely referencing someone in prose. Use @#channel for channel subscribers and @all only for team-wide rules.',
+      'Reserve hive_swarm_post_message for mid-turn peer questions or handoffs; do not double-post your final report via hive_swarm_post_message right before calling hive_swarm_set_turn_outcome.',
+      'Finish by calling hive_swarm_set_turn_outcome for turn '+run.turn+' with state ("done" or "waiting"), a concise message (start finished reports with [done] and cite prior posts with #seq), notify (peer names who must act next), and waitFor (peer names you need a new report from). The outcome tool concludes this turn.',
+      'Incoming board messages: '+JSON.stringify(member.inbox??[]),
+    ].filter(Boolean).join('\n\n');
     try {
       await this.native.prepare(sessionId,{cwd:workspace,writable:member.writable===true,model:selected,effort},signal);
       signal?.throwIfAborted();
       remember({pendingRun:{requestId:run.requestId,turn:run.turn}});
       this.active.set(sessionId,entry);signal?.addEventListener('abort',cancellation,{once:true});
       admitted=true;
-      await this.native.prompt({sessionId,requestId:run.requestId,mode:'queue',content:[{type:'text',text:
-        'You are Hive Swarm member @'+member.name+'.\nGoal: '+team.task+'\nAssignment: '+member.brief+'\n'+
-        'Work only in the assigned workspace and permissions. Do not create another scheduler. Use the scoped hive_swarm tools. '+
-        'Finish by calling hive_swarm_set_turn_outcome for turn '+run.turn+' with state, message, notify and waitFor. '+
-        'The outcome tool concludes this turn. Incoming board messages: '+JSON.stringify(member.inbox??[])}]},signal);
+      await this.native.prompt({sessionId,requestId:run.requestId,mode:'queue',content:[{type:'text',text:promptLines}]},signal);
       for(;;) {
         signal?.throwIfAborted();const value=await this.native.wait(sessionId,signal);signal?.throwIfAborted();
         let current=await this.evidence(run,signal);
@@ -111,7 +123,12 @@ export class NativeRunner {
         return result;
       }
     } catch(error) {
-      if(admitted) {remember({status:'failed',recoveryRequired:true});throw Error('Native outcome unconfirmed: '+String(error.message??error),{cause:error});}
+      if(admitted) {
+        remember({status:'failed',recoveryRequired:true});
+        const wrapped=Error('Native outcome unconfirmed: '+String(error.message??error),{cause:error});
+        wrapped.recoveryRequired=true;
+        throw wrapped;
+      }
       throw error;
     } finally {signal?.removeEventListener('abort',cancellation);await entry.cancellation?.catch(()=>{});
       if(this.active.get(sessionId)===entry)this.active.delete(sessionId);finish();}
@@ -134,8 +151,12 @@ export class NativeRunner {
             const controller=new AbortController();const entry={controller,run};this.recoveries.set(run.sessionId,entry);
             entry.done=(async()=>{for(;;){controller.signal.throwIfAborted();const value=await this.native.wait(run.sessionId,controller.signal);
               if(value.reason==='input-required'){this.recoveryInput(board,run,true);await delay(1000,undefined,{signal:controller.signal});continue;}
-              if(value.reason!=='idle')continue;this.recoveryInput(board,run,false);
-              controller.signal.throwIfAborted();await this.settleRecovery(board,run,controller.signal);return;
+              if(value.reason!=='idle'||value.state?.running||value.state?.queue?.length)continue;
+              this.recoveryInput(board,run,false);
+              controller.signal.throwIfAborted();
+              if(await this.settleRecovery(board,run,controller.signal))return;
+              const current=await this.native.state(run.sessionId,controller.signal);
+              if(!current.running&&!current.queue?.length&&!current.pendingInput?.length)return;
             }})().catch(()=>{}).finally(()=>{this.recoveries.delete(run.sessionId);this.recoveryStatus(board,run,'failed');});
           }
           continue;

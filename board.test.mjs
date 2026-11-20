@@ -524,3 +524,35 @@ test('closing the journal aborts a pending read and ignores its late result',asy
   await pending;
   assert.doesNotMatch(view.element('transcript-turns').textContent,/Kết quả đến muộn/);
 });
+
+test('overview displays outcome threads ordered blocked -> active -> queued -> done',async()=>{
+  const state={
+    id:'team',title:'Outcome threads',cwd:'fixture',phase:'working',turns:3,turnLimit:12,
+    threads:[
+      {id:'t-done',title:'Docs polish',goal:'Update README',members:['docs']},
+      {id:'t-active',title:'Engine core',goal:'Fix scheduler',members:['builder']},
+      {id:'t-blocked',title:'DSH recovery',goal:'Unblock native runs',members:['native']},
+    ],
+    members:[
+      {name:'docs',status:'done'},
+      {name:'builder',status:'working',lastTurn:3},
+      {name:'native',status:'failed',recoveryRequired:true},
+    ],
+    events:[{seq:1,kind:'message',author:'docs',text:'[done] README updated.',targets:[]}],
+  };
+  const mutations=[];
+  const view=await boardView(state,{request:(url,options)=>{
+    if (url.endsWith('/resolve-recovery')) {
+      mutations.push(JSON.parse(options.body));
+      return {...state,members:state.members.map(m=>m.name==='native'?{...m,recoveryRequired:false,status:'queued'}:m)};
+    }
+  }});
+  view.element('tab-overview').onclick();
+  assert.equal(view.element('overview-threads-panel').hidden,false);
+  const threadTitles=childrenOf(view.element('overview-threads')).filter(n=>n.tagName==='strong').map(n=>n.textContent);
+  assert.deepEqual(threadTitles,['DSH recovery','Engine core','Docs polish']);
+  const retryBtn=childrenOf(view.element('overview-alerts')).find(n=>n.tagName==='button'&&/Retry fresh turn/i.test(n.textContent));
+  assert.ok(retryBtn);
+  await retryBtn.onclick({isTrusted:true});
+  assert.deepEqual(mutations,[{member:'native',action:'retry'}]);
+});

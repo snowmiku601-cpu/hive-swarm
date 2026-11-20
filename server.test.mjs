@@ -574,3 +574,22 @@ test('launchDaemon clears host MSIX and session variables while keeping Team Boa
   assert.equal(invocation.options.env.CODEX_HOME,'C:\\Users\\fixture\\.codex');
   assert.equal(invocation.options.env.TEAM_BOARD_PORT,'17943');
 });
+
+test('peer tools include board_history, coordinator can update outcome threads, and status/history require same-origin',async t=>{
+  let active,release;
+  const held=new Promise(resolve=>{release=resolve;});
+  t.after(release);
+  const api=await fixture(t,async request=>{active=request;await held;return done;});
+  const team=await api.start({threads:[{id:'t-init',title:'Initial',goal:'Check',members:['builder']}]});
+  await api.waitFor(team.id,state=>state.phase==='working'&&active);
+  const catalog=await api.peer(active,'peer_tools');
+  assert.ok(catalog.tools.some(tool=>tool.name==='board_history'));
+  const history=await api.peer(active,'board_history',{limit:50});
+  assert.ok(Array.isArray(history.posts));
+  const updated=await api.invoke('set_team_plan',{teamId:team.id,threads:[{id:'t-next',title:'Next',goal:'Verify',members:['builder']}]});
+  assert.deepEqual(updated.threads,[{id:'t-next',title:'Next',goal:'Verify',members:['builder']}]);
+  assert.equal((await fetch(team.url+'/status')).status,403);
+  assert.equal((await fetch(team.url+'/history')).status,403);
+  assert.equal((await fetch(team.url+'/status',{headers:{'sec-fetch-site':'same-origin'}})).status,200);
+  assert.equal((await fetch(team.url+'/history',{headers:{'sec-fetch-site':'same-origin'}})).status,200);
+});

@@ -537,12 +537,30 @@
     message.focus();
   }
 
+  function threadState(thread) {
+    const people=(thread.members??[]).map(name=>team.members.find(member=>member.name===name)).filter(Boolean);
+    if (people.some(member=>member.recoveryRequired||['failed','quota'].includes(member.status))) {
+      return {key:'blocked',label:'Blocked',rank:0};
+    }
+    if (people.some(member=>member.status==='working')) return {key:'active',label:'Active',rank:1};
+    if (people.some(member=>member.status==='queued')) return {key:'queued',label:'Queued',rank:2};
+    if (people.some(member=>member.status==='waiting')) return {key:'waiting',label:'Waiting',rank:3};
+    if (people.length&&people.every(member=>['done','retired'].includes(member.status))) {
+      return {key:'done',label:'Done',rank:4};
+    }
+    return {key:'queued',label:'Queued',rank:2};
+  }
+
   function attentionItems() {
     const stopped=['stalled','budget'].includes(team.phase);
-    const issues=(team.attention??[]).filter(issue=>stopped||['quota','failed','dependency','cycle'].includes(issue.kind))
+    const issues=(team.attention??[]).filter(issue=>stopped||['recovery','quota','failed','dependency','cycle'].includes(issue.kind))
       .map(issue=>({...issue}));
     for (const member of team.members) {
-      if (['quota','failed'].includes(member.status)&&!issues.some(issue=>issue.kind===member.status&&issue.member===member.name)) {
+      if (member.recoveryRequired&&!issues.some(issue=>issue.kind==='recovery'&&issue.member===member.name)) {
+        issues.push({kind:'recovery',member:member.name,
+          text:author(member.name)+' · Outcome unconfirmed. Inspect journal, then retry or dismiss.'});
+      } else if (['quota','failed'].includes(member.status)&&!member.recoveryRequired&&
+        !issues.some(issue=>issue.kind===member.status&&issue.member===member.name)) {
         issues.push({kind:member.status,member:member.name,text:author(member.name)+' · '+condition(member)});
       }
     }
@@ -560,7 +578,7 @@
         issues.push({kind:'worktree',member:member.name,text:author(member.name)+' has a worktree to clean.'});
       }
     }
-    const rank={quota:0,failed:0,budget:0,unaddressed:1,mention:1,waiting:1,dependency:2,cycle:2,worktree:3};
+    const rank={recovery:0,quota:0,failed:0,budget:0,unaddressed:1,mention:1,waiting:1,dependency:2,cycle:2,worktree:3};
     return issues.map(issue=>({...issue,priority:rank[issue.kind]??1})).sort((a,b)=>a.priority-b.priority);
   }
 
@@ -572,7 +590,19 @@
     const actions=node('div','overview-actions');
     if (issue.seq) actions.append(postReference(issue.seq));
     if (issue.kind==='budget') actions.append(trustedButton('+8 turns',extendBudget));
-    else if (issue.kind==='worktree') {
+    else if (issue.kind==='recovery'&&issue.member) {
+      const target=team.members.find(member=>member.name===issue.member);
+      const journal=target?transcriptButton(target):null;
+      if (journal) actions.append(journal);
+      if (standalone) {
+        const busy=target?.status==='working';
+        const retry=trustedButton('Retry fresh turn',button=>memberAction(button,'resolve_recovery',{member:issue.member,action:'retry'}),busy);
+        retry.setAttribute('aria-label','Retry fresh turn for '+author(issue.member));
+        const dismiss=trustedButton('Dismiss',button=>memberAction(button,'resolve_recovery',{member:issue.member,action:'dismiss'}),busy);
+        dismiss.setAttribute('aria-label','Dismiss unconfirmed run for '+author(issue.member));
+        actions.append(retry,dismiss);
+      }
+    } else if (issue.kind==='worktree') {
       const button=node('button','link-button','View member');
       button.type='button';
       button.onclick=()=>{
@@ -634,6 +664,20 @@
     const alerts=attentionItems();
     $('overview-alerts').replaceChildren(...alerts.map(attentionRow));
     $('overview-alerts-panel').hidden=!alerts.length;
+    const threads=(team.threads??[]).map(thread=>({thread,state:threadState(thread)}))
+      .sort((a,b)=>a.state.rank-b.state.rank);
+    $('overview-threads').replaceChildren(...threads.map(({thread,state})=>{
+      const row=node('li','thread-row');
+      const heading=node('div','member-top');
+      const badge=node('span','status-word',state.label);
+      badge.dataset.status=state.key==='blocked'?'failed':state.key==='active'?'working':state.key;
+      heading.append(node('strong','',thread.title),badge);
+      row.append(heading);
+      if (thread.goal) row.append(node('p','now-summary',thread.goal));
+      if (thread.members?.length) row.append(node('p','minor member-context',thread.members.map(author).join(' · ')));
+      return row;
+    }));
+    $('overview-threads-panel').hidden=!threads.length;
     const milestones=chronology.filter(event=>['checkpoint','monitor'].includes(event.kind)||/\[done\]/i.test(event.text)).slice(-6).reverse();
     $('overview-milestones').replaceChildren(...milestones.map(event=>{
       const result=node('li','milestone');
@@ -731,7 +775,7 @@
         modelLabel.append(model);
         effortLabel.append(optional);
         form.append(modelLabel,effortLabel);
-        const mayResume=['waiting','failed','quota'].includes(member.status);
+        const mayResume=['waiting','failed','quota'].includes(member.status)&&!member.recoveryRequired;
         if (mayResume) form.append(resumeLabel);
         form.append(save);
         form.onsubmit=async event=>{
@@ -786,6 +830,7 @@
     }
     const waiting=member.pendingWaitFor??member.waitFor;
     if (waiting?.length) info.append(node('p','quiet','Waiting on '+waiting.map(author).join(', ')));
+    if (member.recoveryRequired) info.append(node('p','needs-reason','Outcome unconfirmed. Inspect journal, then retry or dismiss.'));
     if (member.workspace) info.append(node('code','member-path',member.workspace.cwd));
     else if (member.worktree) info.append(node('p','quiet','Isolated worktree on first turn'));
     const actions=node('div','member-actions');
@@ -805,7 +850,7 @@
     if (!member.external && member.status!=='retired' && !member.retireAfterTurn) {
       const send=node('button','link-button','@mention');
       send.type='button';
-      send.setAttribute('aria-label','Mention @'+member.name+' on board');
+      send.setAttribute('aria-label','@mention '+author(member.name)+' on board');
       send.onclick=()=>mentionMember(member.name);
       actions.append(send);
     }
@@ -813,21 +858,37 @@
       const active=member.status!=='retired'&&!member.retireAfterTurn;
       const draft=memberDrafts.get(member.name)??{};
       memberDrafts.set(member.name,draft);
+      if (member.recoveryRequired) {
+        const busy=member.status==='working';
+        const retry=trustedButton('Retry fresh turn',button=>memberAction(button,'resolve_recovery',{member:member.name,action:'retry'}),busy);
+        retry.setAttribute('aria-label','Retry fresh turn for '+author(member.name));
+        const dismiss=trustedButton('Dismiss',button=>memberAction(button,'resolve_recovery',{member:member.name,action:'dismiss'}),busy);
+        dismiss.setAttribute('aria-label','Dismiss unconfirmed run for '+author(member.name));
+        actions.append(retry,dismiss);
+      }
       if (active) {
         const retire=node('div','retire-choice');
         const draw=()=>{
           if (draft.confirmRetire) {
-            retire.replaceChildren(trustedButton('Confirm retire',async button=>{
+            const confirm=trustedButton('Confirm retire',async button=>{
               if (await memberAction(button,'retire_member',{member:member.name})) draft.confirmRetire=false;
-            },false,'link-button danger'),trustedButton('Cancel',()=>{draft.confirmRetire=false;draw();}));
-          } else retire.replaceChildren(trustedButton('Retire',()=>{draft.confirmRetire=true;draw();}));
+            },false,'link-button danger');
+            confirm.setAttribute('aria-label','Confirm retire '+author(member.name));
+            retire.replaceChildren(confirm,trustedButton('Cancel',()=>{draft.confirmRetire=false;draw();}));
+          } else {
+            const start=trustedButton('Retire',()=>{draft.confirmRetire=true;draw();});
+            start.setAttribute('aria-label','Retire '+author(member.name));
+            retire.replaceChildren(start);
+          }
         };
         draw();
         actions.append(retire);
         modelControl=modelEditor(member,draft);
       }
       if (member.workspace&&(member.status==='retired'||team.phase==='done')) {
-        actions.append(trustedButton('Clean worktree',button=>memberAction(button,'remove_worktree',{member:member.name})));
+        const clean=trustedButton('Clean worktree',button=>memberAction(button,'remove_worktree',{member:member.name}));
+        clean.setAttribute('aria-label','Clean worktree for '+author(member.name));
+        actions.append(clean);
       }
     }
     if (actions.childElementCount) info.append(actions);
@@ -979,6 +1040,7 @@
       $('panel-'+tab).hidden=!selected||!team;
     }
     render();
+    $('tab-'+name).scrollIntoView?.({block:'nearest',inline:'nearest'});
     if (focus) $('tab-'+name).focus();
   }
 
@@ -998,7 +1060,7 @@
     if (!standalone) return unpack(await rpc('tools/call',{name:tool,arguments:{teamId,...values}}));
     const routes={board_status:'status',board_history:'history',post_message:'post',
       pause_team:'pause',resume_team:'resume',set_member_model:'member-model',retire_member:'member-retire',
-      remove_worktree:'worktree-remove',set_team_title:'title'};
+      remove_worktree:'worktree-remove',set_team_title:'title',resolve_recovery:'resolve-recovery'};
     const reading=tool==='board_status'||tool==='board_history';
     const query=tool==='board_history'?'?'+new URLSearchParams(values):'';
     const options=reading?{cache:'no-store'}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)};
@@ -1262,7 +1324,7 @@
       }
     });
     rpc('ui/initialize',{
-      appInfo:{name:'Hive Swarm',version:'1.7.4'},appCapabilities:{},protocolVersion:'2026-01-26',
+      appInfo:{name:'Hive Swarm',version:globalThis.__HIVE_SWARM_VERSION__||'1.8.0'},appCapabilities:{},protocolVersion:'2026-01-26',
     }).then(()=>{
       parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');
       refresh();

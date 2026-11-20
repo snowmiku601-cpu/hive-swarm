@@ -200,7 +200,7 @@ test('real loader registers the canonical bee guide and additive native seats on
   assert.equal(def.guide.length,1);assert.equal(def.guide[0].id,'open');assert.equal(def.guide[0].order,900);
   const icon=renderer.create(React.createElement(def.guide[0].icon,{size:22}));
   const svg=decodeURIComponent(icon.root.findByType('img').props.src.split(',')[1]);
-  assert.equal(svg,await readFile(new URL('../../assets/hive-swarm-icon.svg',import.meta.url),'utf8'));
+  assert.equal(svg,(await readFile(new URL('../../assets/hive-swarm-icon.svg',import.meta.url),'utf8')).replaceAll('\r\n','\n'));
   assert.deepEqual([...f.slots.keys()].sort(),['main:dsh-hive-swarm','sidebar.panellist:dsh-hive-swarm','sidebar.right.pane.tab:dsh-hive-swarm',
     'tool.call.toolview:hive_swarm_open_swarm_panel','tool.call.toolview:hive_swarm_start_team']);
   f.dispose();assert.deepEqual([...f.definitions.keys()],['wallpaper']);assert.equal(f.slots.size,0);icon.unmount();
@@ -515,4 +515,87 @@ test('the native client reaches the exact Host POST routes with correlated Conne
     '/api/hive-swarm/v1/command','/api/hive-swarm/v1/events','/api/hive-swarm/v1/snapshot',
   ]);
   assert.equal(launches,0);
+});
+
+test('native UI renders safe Markdown, clickable #seq jumps, outcome threads, progress bars, milestones, and recovery controls',async()=>{
+  const {client,React,renderer}=await loadClient();
+  let current={
+    ...team(),
+    phase:'stalled',
+    threads:[
+      {id:'t-done',title:'Docs update',goal:'Sync README',members:['beta']},
+      {id:'t-blocked',title:'Native runner',goal:'Fix recovery',members:['alpha']},
+    ],
+    members:[
+      {name:'alpha',status:'failed',recoveryRequired:true,brief:'Fix runner',model:'sol',effort:'max',writable:false,
+        session:{host:'deepseek-harness',id:'owned-alpha'},threadId:'owned-alpha',workspace:{cwd:'D:/managed/alpha'}},
+      {name:'beta',status:'done',brief:'Update docs',model:'sol',effort:'low',writable:false,
+        session:{host:'deepseek-harness',id:'owned-beta'},threadId:'owned-beta'},
+    ],
+    events:[
+      {seq:1,kind:'message',author:'beta',text:'[done] **Verified** `README.md` <script>alert(1)</script> [safe](https://example.test/doc) [bad](javascript:alert(1))',targets:[],channel:'main'},
+      {seq:2,kind:'message',author:'alpha',text:'Checked #1 with @beta.',targets:['beta'],channel:'main'},
+    ],
+  };
+  const f=fakeContext({snapshot:({teamId})=>({teams:[current],team:teamId?current:null}),command:({action,args})=>{
+    if(action==='list_models')return {models:[{id:'sol',label:'Sol',efforts:['low','max']}]};
+    if(action==='resolve_recovery')current={...current,members:current.members.map(m=>m.name===args.member?{...m,recoveryRequired:false,status:'queued'}:m)};
+    if(action==='set_team_title')current={...current,title:args.title};
+    if(action==='remove_worktree')current={...current,members:current.members.map(m=>m.name===args.member?{...m,workspace:undefined}:m)};
+    return current;
+  }});
+  client.apply(f.ctx);
+  const entry=f.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let view;
+  const findButton=label=>view.root.findAllByType('button').find(b=>b.children.join('')===label||b.props['aria-label']===label);
+  try{
+    await renderer.act(async()=>{view=renderer.create(React.createElement(entry.component,entry.options.inject('parent')));await tick();});
+    await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
+    // Overview: progress bars, outcome threads ordered blocked -> done, milestones, recovery controls
+    assert.equal(view.root.findAllByType('progress').length,2);
+    const overviewText=JSON.stringify(view.toJSON());
+    assert.ok(overviewText.includes('Native runner')&&overviewText.includes('Docs update'));
+    assert.ok(overviewText.indexOf('Native runner')<overviewText.indexOf('Docs update'));
+    assert.ok(overviewText.includes('Milestones'));
+    const retryBtn=findButton('Retry fresh turn for @alpha');
+    assert.ok(retryBtn,'Expected recovery retry control');
+    await renderer.act(async()=>{await retryBtn.props.onClick();await tick();});
+    // Jump via #1 button to Board and inspect safe Markdown
+    const jump=findButton('Jump to post #1');
+    assert.ok(jump,'Expected clickable #1 post jump button');
+    await renderer.act(async()=>{jump.props.onClick();await tick();});
+    assert.equal(view.root.findAllByType('strong').some(s=>s.children.join('')==='Verified'),true);
+    assert.equal(view.root.findAllByType('code').some(c=>c.children.join('')==='README.md'),true);
+    const links=view.root.findAllByType('a');
+    assert.deepEqual(links.map(l=>l.props.href),['https://example.test/doc']);
+    // Rename title in header
+    await renderer.act(async()=>{findButton('Rename').props.onClick();});
+    const titleInput=view.root.findByProps({'aria-label':'Swarm title'});
+    await renderer.act(async()=>{titleInput.props.onChange({target:{value:'Renamed Swarm'}});});
+    await renderer.act(async()=>{await titleInput.parent.props.onSubmit({preventDefault(){}});await tick();});
+    // Members: model default effort sends null + resume checkbox + clean worktree on retired/done
+    current={...current,phase:'done',members:current.members.map(m=>m.name==='alpha'?{...m,status:'waiting',recoveryRequired:false}:m)};
+    await renderer.act(async()=>{view.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Members')).props.onClick();await tick();});
+    await renderer.act(async()=>{await findButton('Refresh').props.onClick();await tick();});
+    const cleanBtn=findButton('Clean worktree for @alpha');
+    assert.ok(cleanBtn,'Expected Clean worktree button');
+    await renderer.act(async()=>{await cleanBtn.props.onClick();await tick();});
+    await renderer.act(async()=>{findButton('Change model').props.onClick({currentTarget:null});await tick();});
+    const dialog=view.root.findByType('dialog');
+    const [,effortSelect]=dialog.findAllByType('select');
+    await renderer.act(async()=>{effortSelect.props.onChange({target:{value:''}});});
+    const resumeCheck=dialog.findAllByType('input').find(i=>i.props.type==='checkbox');
+    assert.ok(resumeCheck,'Expected Resume now checkbox in MemberEditor');
+    await renderer.act(async()=>{resumeCheck.props.onChange({target:{checked:true}});});
+    await renderer.act(async()=>{await dialog.findByType('form').props.onSubmit({preventDefault(){}});await tick();});
+    // Graph: playback controls (Play/First/Back/Next)
+    await renderer.act(async()=>{view.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Graph')).props.onClick();await tick();});
+    assert.ok(findButton('Replay'),'Expected Replay button on native Graph');
+    assert.ok(findButton('Previous post'),'Expected Previous post button on native Graph');
+
+    const actions=f.ctx.calls.filter(c=>c.method==='command'&&c.payload.action!=='list_models');
+    assert.deepEqual(actions.map(c=>c.payload.action),['resolve_recovery','set_team_title','remove_worktree','set_member_model']);
+    const modelCall=actions.find(c=>c.payload.action==='set_member_model');
+    assert.equal(modelCall.payload.args.effort,null);
+    assert.equal(modelCall.payload.args.resume,true);
+  }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
 });

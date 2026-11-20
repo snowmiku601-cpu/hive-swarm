@@ -15,6 +15,7 @@ const usage = `Usage: hive-swarm [--help | --version | doctor | install | update
   hive-swarm update [--host codex]     Verify and stage the npm package.
   hive-swarm uninstall [--host codex]  Remove the managed plugin and marketplace. Keep Swarm data.
   --after-close                      Apply a staged update after Swarm work finishes and Codex exits.
+  --allow-unqualified-cli            Allow update switching on Codex CLI versions other than the qualified release.
   --bind-node                        Install or update using the current Node executable in Codex.
 
   --help, -h       Show this help.
@@ -146,6 +147,7 @@ export async function main(argv, options = {}) {
   let host = 'codex';
   let hostSpecified = false;
   let afterClose = false;
+  let allowUnqualifiedCli = false;
   let bindNode = false;
   const allowsBinding = action === 'install' || action === 'update';
   for (let i = 0; i < flags.length; i++) {
@@ -154,10 +156,12 @@ export async function main(argv, options = {}) {
       hostSpecified = true;
     } else if (flags[i] === '--after-close' && action === 'update' && !afterClose) {
       afterClose = true;
+    } else if (flags[i] === '--allow-unqualified-cli' && action === 'update' && !allowUnqualifiedCli) {
+      allowUnqualifiedCli = true;
     } else if (flags[i] === '--bind-node' && allowsBinding && !bindNode) {
       bindNode = true;
     } else {
-      return fail('Expected ' + action + ' [--host codex|dsh]' + (action === 'update' ? ' [--after-close]' : '') +
+      return fail('Expected ' + action + ' [--host codex|dsh]' + (action === 'update' ? ' [--after-close] [--allow-unqualified-cli]' : '') +
         (allowsBinding ? ' [--bind-node]' : '') + '.');
     }
   }
@@ -170,7 +174,7 @@ export async function main(argv, options = {}) {
   if (action === 'doctor') return doctor({stdout, packageDirectory, home, env, nodeVersion, runCommand, platform, queryAppxPackages});
   try {
     if (action !== 'uninstall' && !supportedNode(nodeVersion)) throw Error('Node.js ' + nodeRange + ' is required.');
-    const result = await runInstaller(action, {home, env, packageDirectory, afterClose, bindNode, runCommand,
+    const result = await runInstaller(action, {home, env, packageDirectory, afterClose, allowUnqualifiedCli, bindNode, runCommand,
       resolveCommand: () => runCommand
         ? env.HIVE_SWARM_CODEX || env.TEAM_BOARD_CODEX || (platform === 'win32' ? 'codex.exe' : 'codex')
         : locateCodex({env, platform, queryAppxPackages}),

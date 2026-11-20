@@ -14,7 +14,8 @@ const boardUri = 'ui://hive-swarm/board.html';
 const asset = name => readFileSync(new URL(name,import.meta.url),'utf8');
 const {version} = JSON.parse(asset('package.json'));
 const html = asset('board.html').replace('<!-- hive-style -->', () => '<style>'+asset('board.css')+'</style>')
-  .replace('<!-- hive-scripts -->', () => ['hive-graph.js','hive-bees.js','board.js'].map(name => '<script>'+asset(name)+'</script>').join('\n'));
+  .replace('<!-- hive-scripts -->', () => '<script>globalThis.__HIVE_SWARM_VERSION__='+JSON.stringify(version)+';</script>\n' +
+    ['hive-graph.js','hive-bees.js','board.js'].map(name => '<script>'+asset(name)+'</script>').join('\n'));
 const root = process.env.HIVE_SWARM_DATA || process.env.TEAM_BOARD_DATA || join(process.env.LOCALAPPDATA || homedir(), 'CodexTeamBoard');
 const port = Number(process.env.HIVE_SWARM_PORT || process.env.TEAM_BOARD_PORT || 17943);
 const origin = 'http://127.0.0.1:' + port;
@@ -26,13 +27,17 @@ const shape = (properties, required = []) => ({type: 'object', properties, requi
 const teamId = {teamId: string};
 const memberForm = shape({
   name: string, brief: string, group: string, model: string, effort: string,
+  fallbackModel: string, fallbackEffort: {type:['string','null']},
   writable:boolean,worktree:boolean,waitFor:strings,channels:strings,
   n:{...integer,minimum:2,maximum:8},tasks:{...strings,minItems:2,maxItems:8},
 }, ['name','brief']);
+const threadForm = shape({id:string,title:string,goal:string,members:strings}, ['id','title','goal']);
 const tools = [
   {
-    name: 'start_team', title: 'Start a team', description: 'Start a user-requested team in a local workspace. Workers wait for their dependencies and mentions. Each member has its own Codex chat. Set writable only for members authorized to edit.',
-    inputSchema: shape({title: string, cwd: string, task: string, model: string, effort: string, coordinator:boolean,
+    name: 'start_team', title: 'Start a team', description: 'Start a user-requested team in a local workspace. Workers wait for their dependencies and mentions. Each member has its own Codex chat. Set writable only for members authorized to edit. Optionally pass threads (outcome groups) and fallbackModel (quota failover).',
+    inputSchema: shape({title: string, cwd: string, task: string, model: string, effort: string,
+      fallbackModel: string, fallbackEffort: {type:['string','null']},
+      threads: {type:'array',items:threadForm}, coordinator:boolean,
       concurrency: integer, turnLimit: integer, members: {type: 'array', items: memberForm}},
     ['cwd', 'task', 'members']),
   },
@@ -71,6 +76,16 @@ const tools = [
     name:'set_team_title',title:'Rename a team',
     description:'Set a title for the team from the main chat or the coordinator.',
     inputSchema:shape({...teamId,title:string},['teamId','title']),
+  },
+  {
+    name:'set_team_plan',title:'Update outcome threads',
+    description:'Set or update outcome-grouped threads displayed in the Swarm Overview.',
+    inputSchema:shape({...teamId,threads:{type:'array',items:threadForm}},['teamId','threads']),
+  },
+  {
+    name:'resolve_recovery',title:'Resolve an unconfirmed worker run',
+    description:'Clear an unconfirmed native outcome after inspecting the member session. action is dismiss or retry.',
+    inputSchema:shape({...teamId,member:string,action:{type:'string',enum:['dismiss','retry']}},['teamId','member']),
   },
   {
     name: 'list_teams', title: 'List teams', description: 'Find existing local teams and their IDs.',
@@ -119,6 +134,11 @@ const peerTools = [
   {
     name: 'read_board', title: 'Read the team board',
     description: 'Read recent public posts or page through new posts after a post number. Check messages and briefs without starting another member.',
+    inputSchema: shape({after:integer,limit:integer,channel:string,mentionsOnly:boolean}), annotations: {readOnlyHint: true},
+  },
+  {
+    name: 'board_history', title: 'Read saved board history',
+    description: 'Page through saved public posts in sequence order (up to 200 per call), without waking members.',
     inputSchema: shape({after:integer,limit:integer,channel:string}), annotations: {readOnlyHint: true},
   },
   {
@@ -135,7 +155,7 @@ const peerTools = [
 ];
 
 const memberActions = new Set(['board_status','add_member','retire_member','set_member_model','manage_channel']);
-const coordinatorActions = new Set(['list_models','set_team_title']);
+const coordinatorActions = new Set(['list_models','set_team_title','set_team_plan']);
 
 function peerCatalog(member) {
   const coordinator=member.role==='coordinator';
@@ -180,12 +200,16 @@ function present(team, origin, activity, actor) {
   const events=visible?team.events.filter(event=>visible.includes(event.channel??'main')):team.events;
   return {
     id,title,cwd,task,model,effort,paused,turns,turnLimit,channels,activity,phase,
+    ...(team.fallbackModel?{fallbackModel:team.fallbackModel,...(team.fallbackEffort!==undefined?{fallbackEffort:team.fallbackEffort}:{})}:{}),
+    ...(team.threads?.length?{threads:team.threads}:{}),
     attention:phase==='stalled'?issues:phase==='budget'?
       [{kind:'budget',text:'Turn limit reached ('+turns+'/'+turnLimit+'). Add 8 turns to continue.'},...blockers]:blockers,
     ...panelLink(team, origin),
     members: team.members.map(member => {
-      const {name,role,group,brief,threadId,status,writable,waitFor,retireAfterTurn,worktree,workspace,addedBy,channels,lastTurn} = member;
+      const {name,role,group,brief,threadId,status,writable,waitFor,retireAfterTurn,worktree,workspace,addedBy,channels,lastTurn,fallbackModel,fallbackEffort} = member;
       return {name,role,group,brief,threadId,status,writable,waitFor,retireAfterTurn,worktree,workspace,addedBy,channels,lastTurn,
+        ...(fallbackModel?{fallbackModel,...(fallbackEffort!==undefined?{fallbackEffort}:{})}:{}),
+        ...(member.recoveryRequired?{recoveryRequired:true}:{}),
         pendingWaitFor:pendingWaitFor(team,member),
         model:member.model ?? member.activeModel ?? model, effort:member.effort ?? member.activeEffort ?? configuredEffort(team, member)};
     }),
@@ -291,7 +315,7 @@ export async function service({dataDirectory = root, listenPort = port, runner} 
       const {pathname,searchParams} = new URL(req.url, origin);
       const isBoard = pathname.match(/^\/board\/([a-f0-9-]{36})$/);
       const transcript = pathname.match(/^\/board\/([a-f0-9-]{36})\/member\/([a-z][a-z0-9_-]{0,29})\/transcript$/);
-      const api = pathname.match(/^\/board\/([a-f0-9-]{36})\/(status|history|post|pause|resume|events|member-model|member-retire|worktree-remove|title)$/);
+      const api = pathname.match(/^\/board\/([a-f0-9-]{36})\/(status|history|post|pause|resume|events|member-model|member-retire|worktree-remove|title|resolve-recovery)$/);
       if ((isBoard || pathname === '/swarm') && req.method === 'GET') {
         if (isBoard) board.get(isBoard[1]);
         res.writeHead(200, {
@@ -330,8 +354,12 @@ export async function service({dataDirectory = root, listenPort = port, runner} 
         if (!res.destroyed) return send(res,200,{member:name,status,threadId,turns,live});
         return;
       }
-      if (api && req.method === 'GET' && api[2] === 'status') return send(res, 200, view(board.get(api[1])));
+      if (api && req.method === 'GET' && api[2] === 'status') {
+        if (req.headers['sec-fetch-site'] !== 'same-origin') return send(res, 403, {error:'Open Swarm to read board status.'});
+        return send(res, 200, view(board.get(api[1])));
+      }
       if (api && req.method === 'GET' && api[2] === 'history') {
+        if (req.headers['sec-fetch-site'] !== 'same-origin') return send(res, 403, {error:'Open Swarm to read board history.'});
         return send(res,200,board.readHistory(api[1],{
           after:searchParams.has('after') ? Number(searchParams.get('after')) : 0,
           limit:searchParams.has('limit') ? Number(searchParams.get('limit')) : 48,
@@ -358,6 +386,7 @@ export async function service({dataDirectory = root, listenPort = port, runner} 
         }
         if (api[2]==='member-retire') return send(res,200,view(board.retireMember(api[1],data.member)));
         if (api[2]==='title') return send(res,200,view(board.setTeamTitle(api[1],data.title)));
+        if (api[2]==='resolve-recovery') return send(res,200,view(board.resolveRecovery(api[1],data.member,{action:data.action})));
         if (api[2]==='worktree-remove') {
           try {return send(res,200,view(await removeCheckout(api[1],data.member,false)));}
           catch (error) {
@@ -403,7 +432,7 @@ export async function service({dataDirectory = root, listenPort = port, runner} 
         return send(res,200,{teamId:team?.id??null,title:team?.title??'Swarm',...panelLink(team, origin)});
       }
       if (name === 'list_models') return send(res, 200, {models: modelOptions(await runner.listModels())});
-      if (name === 'board_history') return send(res,200,board.readHistory(args.teamId,args));
+      if (name === 'board_history') return send(res,200,board.readHistory(args.teamId,{...args,actor}));
       if (name==='wait_for_board') {
         const controller=new AbortController();
         const cancel=()=>controller.abort();
@@ -428,9 +457,14 @@ export async function service({dataDirectory = root, listenPort = port, runner} 
       switch (name) {
         case 'start_team': {
           const members = Array.isArray(args.members) ? args.members : [];
-          const selections = members.filter(member => member?.model || (args.model && member?.effort))
-            .map(member => ({model:member?.model ?? args.model, effort:member?.effort ?? args.effort}));
+          const selections = members.flatMap(member => [
+            member?.model || (args.model && member?.effort)
+              ? {model:member?.model ?? args.model, effort:member?.effort === null ? undefined : (member?.effort ?? args.effort)}
+              : null,
+            member?.fallbackModel ? {model:member.fallbackModel, effort:member.fallbackEffort ?? undefined} : null,
+          ]).filter(Boolean);
           if (args.model) selections.unshift({model:args.model,effort:args.effort});
+          if (args.fallbackModel) selections.push({model:args.fallbackModel,effort:args.fallbackEffort ?? undefined});
           const [source] = await Promise.all([
             members.some(member => member?.worktree === true) ? worktreeSource(args.cwd) : undefined,
             verifyModels(runner,selections),
@@ -443,10 +477,14 @@ export async function service({dataDirectory = root, listenPort = port, runner} 
           const current = board.get(args.teamId);
           const member = args.member;
           const model = member?.model ?? current.model;
-          const effort = member?.effort ?? current.effort;
+          const effort = member?.effort === null ? undefined : (member?.effort ?? current.effort);
+          const checks = [
+            ...(model && (member?.model || member?.effort) ? [{model,effort}] : []),
+            ...(member?.fallbackModel ? [{model:member.fallbackModel,effort:member.fallbackEffort ?? undefined}] : []),
+          ];
           const [source] = await Promise.all([
             member?.worktree === true ? current.worktreeSource ?? worktreeSource(current.cwd) : undefined,
-            verifyModels(runner,model && (member?.model || member?.effort) ? [{model,effort}] : []),
+            verifyModels(runner,checks),
           ]);
           if (res.destroyed) return;
           team = board.addMember(args.teamId,member,{replaces:args.replaces,worktreeSource:source,actor,fork:args.fork});
@@ -466,6 +504,8 @@ export async function service({dataDirectory = root, listenPort = port, runner} 
         case 'board_status': team = board.get(args.teamId); break;
         case 'post_message': team = board.post(args.teamId,args.text,args.channel); break;
         case 'set_team_title': team = board.setTeamTitle(args.teamId,args.title,actor); break;
+        case 'set_team_plan': team = board.setTeamPlan(args.teamId,args.threads,actor); break;
+        case 'resolve_recovery': team = board.resolveRecovery(args.teamId,args.member,{action:args.action}); break;
         case 'pause_team': team = board.pause(args.teamId); break;
         case 'resume_team': team = board.resume(args.teamId, args.extraTurns); break;
         default: return send(res, 404, {error: 'Tool not found.'});

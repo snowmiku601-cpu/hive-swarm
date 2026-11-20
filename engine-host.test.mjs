@@ -88,3 +88,107 @@ test('a verified recovered result settles one matching run once and preserves de
     assert.equal(current.events.filter(e=>e.text==='Recovered verified report.').length,1);
   }finally{board.close();rmSync(dir,{recursive:true,force:true});}
 });
+
+test('a live unconfirmed native error records failure, clears activity, schedules peers, blocks unsafe resume, and resolves via resolveRecovery',async()=>{
+  let runs=0;
+  const board=new TeamBoard(':memory:',async ({member,remember,onActivity})=>{
+    runs++;
+    if(member.name==='builder'&&runs===1){
+      remember({pendingRun:{requestId:'unconfirmed-1',turn:member.lastTurn}});
+      onActivity({kind:'turn',label:'Working'});
+      remember({status:'failed',recoveryRequired:true});
+      const error=Error('Native outcome unconfirmed: missing scoped report.');
+      error.recoveryRequired=true;
+      throw error;
+    }
+    return {state:'done',message:'[done] Completed '+member.name,notify:[],waitFor:[]};
+  },{host:'deepseek-harness',recovery:'preserve'});
+  try{
+    const team=board.create({...input(),concurrency:1,members:[
+      {name:'builder',brief:'May fail unconfirmed'},
+      {name:'peer',brief:'Independent queued teammate'},
+    ]});
+    await waitUntil(()=>board.get(team.id).members[1].status==='done');
+    const stuck=board.get(team.id);
+    assert.equal(stuck.members[0].status,'failed');
+    assert.equal(stuck.members[0].recoveryRequired,true);
+    assert.equal(stuck.members[0].pendingRun.requestId,'unconfirmed-1');
+    assert.deepEqual(board.activityFor(team.id),{});
+    assert.ok(stuck.events.some(e=>e.author==='builder'&&/outcome unconfirmed/i.test(e.text)));
+    assert.throws(()=>board.switchModel(team.id,'builder','alt/model',{resume:true}),/resolve|unconfirmed|recovery/i);
+    assert.equal(board.get(team.id).members[0].status,'failed');
+    const observing=board.get(team.id);
+    observing.members[0].status='working';
+    board.save(observing);
+    assert.throws(()=>board.resolveRecovery(team.id,'builder',{action:'retry'}),/running|active/i);
+    observing.members[0].status='failed';
+    board.save(observing);
+
+    board.resolveRecovery(team.id,'builder',{action:'retry'});
+    await waitUntil(()=>board.get(team.id).members[0].status==='done');
+    const recovered=board.get(team.id);
+    assert.equal(recovered.members[0].recoveryRequired,undefined);
+    assert.equal(recovered.members[0].pendingRun,undefined);
+    assert.equal(recovered.members[0].completed,1);
+  }finally{board.close();}
+});
+
+test('notify and waitFor normalize @ prefixes and uppercase names without dropping targets',async()=>{
+  let reviewerTurns=0;
+  const board=new TeamBoard(':memory:',async ({member})=>{
+    if(member.name==='builder'){
+      return {state:'done',message:'[done] Ready for review.',notify:['@Reviewer'],waitFor:[]};
+    }
+    reviewerTurns++;
+    if(reviewerTurns===1){
+      return {state:'waiting',message:'Waiting on another pass.',notify:[],waitFor:['@Builder']};
+    }
+    return {state:'done',message:'[done] Verified.',notify:[],waitFor:[]};
+  });
+  try{
+    const team=board.create({...input(),concurrency:2,members:[
+      {name:'builder',brief:'Build'},
+      {name:'reviewer',brief:'Review',waitFor:['builder']},
+    ]});
+    await waitUntil(()=>reviewerTurns>=1&&board.get(team.id).members[1].status==='waiting');
+    const state=board.get(team.id);
+    assert.deepEqual(state.members[1].waitFor,['builder']);
+    assert.ok(state.events.some(e=>e.author==='builder'&&e.targets.includes('reviewer')));
+  }finally{board.close();}
+});
+
+test('readPosts forwards mentionsOnly and optional fallbackModel auto-recovers from quota',async()=>{
+  const used=[];
+  const board=new TeamBoard(':memory:',async ({team,member})=>{
+    const active=member.model??team.model;
+    used.push({model:active,effort:member.effort??team.effort});
+    if(active==='primary/model'){
+      const err=Error('HTTP 429 rate limit exceeded');
+      err.blockedBy='quota';
+      throw err;
+    }
+    return {state:'done',message:'[done] @coordinator Finished on fallback.',notify:[],waitFor:[]};
+  });
+  try{
+    const team=board.create({...input(),model:'primary/model',effort:'max',fallbackModel:'backup/model',fallbackEffort:'medium'});
+    await waitUntil(()=>board.get(team.id).members[0].status==='done');
+    assert.deepEqual(used,[
+      {model:'primary/model',effort:'max'},
+      {model:'backup/model',effort:'medium'},
+    ]);
+    const onlyCoord=board.readPosts(team.id,{mentionsOnly:true});
+    assert.equal(onlyCoord.posts.length,1);
+    assert.match(onlyCoord.posts[0].text,/Finished on fallback/);
+  }finally{board.close();}
+});
+
+test('optional outcome threads persist on start and update via setTeamPlan',()=>{
+  const board=new TeamBoard(':memory:',()=>new Promise(()=>{}));
+  try{
+    const team=board.create({...input(),threads:[{id:'t-core',title:'Core fixes',goal:'Stabilize scheduler',members:['builder']}]});
+    assert.deepEqual(team.threads,[{id:'t-core',title:'Core fixes',goal:'Stabilize scheduler',members:['builder']}]);
+    const updated=board.setTeamPlan(team.id,[{id:'t-verify',title:'Verification',goal:'Run checks',members:['builder']}]);
+    assert.deepEqual(updated.threads,[{id:'t-verify',title:'Verification',goal:'Run checks',members:['builder']}]);
+    assert.throws(()=>board.setTeamPlan(team.id,[{id:'Bad Id!',title:'X',goal:'Y',members:['builder']}]),/thread/i);
+  }finally{board.close();}
+});

@@ -16,4 +16,6 @@ test('core and native artifacts share the candidate version and published runtim
   }
   for(const hook of ['preinstall','install','postinstall','prepare'])assert.equal(core.scripts[hook],undefined);
   assert.deepEqual(core.dependencies??{},{});
+  const boardJs=readFileSync(new URL('board.js',import.meta.url),'utf8');
+  assert.doesNotMatch(boardJs,/version:'1\.7\.4'/,'board.js must not hardcode a stale client version');
 });
