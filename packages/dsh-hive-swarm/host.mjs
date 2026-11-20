@@ -5,7 +5,7 @@ import {createNativeAccess} from './native.mjs';
 import {ownerActions,registerRoutes} from './routes.mjs';
 
 export const name='dsh-hive-swarm';
-export const inject=['connection','typertGateway','sessionController','sessions','agents','workspaceRegistry','tools','skills','profileContext'];
+export const inject=['connection','typertGateway','sessionController','sessions','agents','agentPresets','llm','sandboxPolicy','fs','shell','workspaceRegistry','tools','skills','profileContext'];
 const hosts=new WeakMap();
 const fields={
   start_team:['cwd','task','title','members','coordinator','model','effort','concurrency','turnLimit'],

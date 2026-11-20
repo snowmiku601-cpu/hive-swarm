@@ -182,6 +182,17 @@ function fakeContext(overrides={}) {
   return {ctx,definitions,slots,panels,sessions,dispose:()=>effects.splice(0).reverse().forEach(off=>off?.())};
 }
 
+test('the native client declares workspace navigation before opening an owned session',async()=>{
+  const {client}=await loadClient();const f=fakeContext();const declared=new Set(client.inject);
+  const utilities=new Set(['effect','on','logger']);
+  const ctx=new Proxy(f.ctx,{get(target,key){if(typeof key==='string'&&!declared.has(key)&&!utilities.has(key))throw Error('cannot get property '+key+' without inject');return Reflect.get(target,key);}});
+  client.apply(ctx);const seat=f.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');
+  const controller=seat.options.inject('parent-session').controllerForTeam('one','D:/fixture project');
+  const release=controller.retain();await tick();
+  try{await controller.openSession('alpha');assert.deepEqual(f.sessions,['owned-alpha']);assert.equal(controller.getSnapshot().error,null);}
+  finally{release();f.dispose();}
+});
+
 test('real loader registers the canonical bee guide and additive native seats once, then disposes only Hive',async()=>{
   const {client,React,renderer}=await loadClient();const f=fakeContext();
   client.apply(f.ctx);client.apply(f.ctx);

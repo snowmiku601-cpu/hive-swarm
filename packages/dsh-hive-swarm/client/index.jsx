@@ -3,7 +3,7 @@ import {BeeIcon,DockSurface,FullSurface} from './views.jsx';
 import {SwarmToolResult} from './tool-result.jsx';
 
 export const name='dsh-hive-swarm';
-export const inject=['slots','connection','layout','sidebarRightTabs'];
+export const inject=['slots','connection','layout','sidebarRightTabs','uiWorkspace'];
 const REGISTRATIONS=Symbol.for('hive-swarm.native-client.registrations');
 const registrations=globalThis[REGISTRATIONS]??=new WeakMap();
 const TOOL_RESULTS=['hive_swarm_open_swarm_panel','hive_swarm_start_team'];

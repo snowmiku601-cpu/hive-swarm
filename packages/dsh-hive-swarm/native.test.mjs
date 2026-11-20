@@ -62,3 +62,31 @@ test('recovery may verify a cold stored session without resuming its Agent or re
   await f.native.flush('owned');assert.equal(f.calls.at(-1).method,'state');
   assert.equal(f.calls.some(call=>call.method==='prompt'||call.method==='create'),false);
 });
+
+test('the Host declares every service used to prepare a worker in an injection-enforcing Context',async()=>{
+  const f=await fixture();const {inject}=await import('./host.mjs');const {createNativeAccess}=await import('./native.mjs');
+  const declared=new Set(inject);
+  const ctx=new Proxy(f.ctx,{get(target,key){
+    if(typeof key==='string'&&!declared.has(key))throw Error('cannot get property '+key+' without inject');
+    return Reflect.get(target,key);
+  }});
+  const native=createNativeAccess(ctx,{ownsSession:id=>id==='owned'});
+  await native.prepare('owned',{cwd:process.cwd(),writable:false,model:{provider:'p',model:'m'}});
+  assert.equal(f.calls.some(call=>call.kind==='selection'),true);
+  await native.dispose();
+});
+
+test('a preset may use an enforcing service inherited by its actual Agent context',async()=>{
+  const f=await fixture();f.ctx.agentPresets={composedPreset:()=> 'standard',serviceFor:()=>undefined};
+  f.agent.ctx.get=name=>f.ctx[name];
+  await f.native.prepare('owned',{cwd:process.cwd(),writable:false,model:{provider:'p',model:'m'}});
+  assert.equal(f.calls.some(call=>call.kind==='selection'),true);
+});
+
+test('a preset-local unconfined service cannot be replaced with a secure inherited service',async()=>{
+  const f=await fixture();f.ctx.agentPresets={composedPreset:()=> 'private-unconfined',
+    serviceFor:(_agent,name)=>name==='fs'?{sandboxMode:undefined}:undefined};
+  f.agent.ctx.get=name=>f.ctx[name];
+  await assert.rejects(f.native.prepare('owned',{cwd:process.cwd(),writable:false,model:{provider:'p',model:'m'}}),/sandbox/);
+  assert.equal(f.calls.some(call=>call.kind==='selection'),false);
+});

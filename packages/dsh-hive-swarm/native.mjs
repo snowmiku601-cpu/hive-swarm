@@ -34,7 +34,7 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
       const value=await ctx.sessionController.resolveAgent(id);if(value.error)throw value.error;agent=value.agent;}
     if(agent.session!==ctx.sessions.get(id)||!samePath(agent.session.header.cwd,cwd))throw Error('Owned session workspace does not match.');
     const preset=ctx.agentPresets?.composedPreset(agent.ctx);
-    const service=name=>preset===undefined?ctx[name]:ctx.agentPresets.serviceFor(agent,name);
+    const service=name=>preset===undefined?ctx[name]:ctx.agentPresets.serviceFor(agent,name)??agent.ctx.get?.(name);
     const policyService=service('sandboxPolicy');
     if(service('fs')?.sandboxMode===undefined||service('shell')?.sandboxMode===undefined||typeof policyService?.resolve!=='function')throw Error('Enforcing filesystem and shell sandbox capabilities are required in the worker preset.');
     const mode=writable?'workspace-write':'read-only';
