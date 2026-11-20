@@ -1324,7 +1324,7 @@
       }
     });
     rpc('ui/initialize',{
-      appInfo:{name:'Hive Swarm',version:globalThis.__HIVE_SWARM_VERSION__||'1.8.0'},appCapabilities:{},protocolVersion:'2026-01-26',
+      appInfo:{name:'Hive Swarm',version:globalThis.__HIVE_SWARM_VERSION__||'1.9.0'},appCapabilities:{},protocolVersion:'2026-01-26',
     }).then(()=>{
       parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');
       refresh();

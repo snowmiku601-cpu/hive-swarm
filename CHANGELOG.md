@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.9.0 — release candidate (ready for npm publication)
 
 ### Coordination & Engine
 - Normalize `notify` and `waitFor` member targets (strip leading `@`, lowercase, preserve `#channel`) in `engine.mjs` so `@member` targets always route and unlock dependencies reliably.

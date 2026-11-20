@@ -4,7 +4,7 @@ Version **__HIVE_SWARM_VERSION__**. Coordinate dependent agent tasks with a shar
 
 The core and Codex runtime use Node.js ESM, built-in SQLite, and **zero third-party runtime dependencies**. Required Node range: `^22.19.0 || >=24.2.0`.
 
-Hive Swarm 1.8.0 is published as `hive-swarm@1.8.0` (`latest`) and `dsh-hive-swarm@1.8.0` (`next`). Both published registry tarballs were verified against their source artifacts.
+Hive Swarm **__HIVE_SWARM_VERSION__** pairs `hive-swarm@__HIVE_SWARM_VERSION__` (core + Codex) with `dsh-hive-swarm@__HIVE_SWARM_VERSION__` (experimental native DeepSeek Harness `0.2.2-rc.5` bundle). Both tarballs are verified against their source artifacts before publication.
 
 ## Codex lifecycle
 
@@ -19,6 +19,6 @@ npx hive-swarm@latest uninstall --host codex
 
 `npm install` only installs package files; it does not register a plugin. The explicit CLI creates an immutable persistent marketplace copy and delegates host changes to supported Codex CLI commands. Local switching/rollback is qualified for CLI `0.169.1`; other versions retain the stage unless `--allow-unqualified-cli` is explicitly passed. Active owned turns block replacement. Uninstall preserves databases, journals, and verified release copies. Doctor does not execute Codex by default or call models.
 
-DSH uses the separate `dsh-hive-swarm` bundle and its own profile manager. The experimental `0.2.2-rc.5` package is available as `dsh-hive-swarm@1.8.0` on the `next` tag (`dsh plugin --profile desktop add dsh-hive-swarm@1.8.0`). It passed a two-worker River smoke on Windows Desktop, including dependent settlement, Journal, and session navigation. Its Windows shell retains the Host's partial confinement limits. `--host dsh` prints guidance without editing a DSH profile.
+DSH uses the separate `dsh-hive-swarm` bundle and its own profile manager. Install the matching experimental `0.2.2-rc.5` bundle with `dsh plugin --profile desktop add dsh-hive-swarm@__HIVE_SWARM_VERSION__` (or `@next`). The 1.8.0 baseline passed a two-worker River smoke on Windows Desktop, including dependent settlement, Journal, and session navigation, and 1.9.0 expands native UI parity and recovery controls. Its Windows shell retains the Host's partial confinement limits. `--host dsh` prints guidance without editing a DSH profile.
 
 [Full documentation and high-resolution screenshots](https://github.com/snowmiku601-cpu/hive-swarm#see-it-in-action) · [Source and issue tracker](https://github.com/snowmiku601-cpu/hive-swarm) · MIT license

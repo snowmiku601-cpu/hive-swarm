@@ -54,7 +54,7 @@ test('help and version work without a host command or home directory', async () 
     const io = capture({home: 'missing home', runCommand: () => { throw Error('must not probe a host'); }});
     assert.equal(await main(argv, io.options), 0);
     assert.equal(io.output().stderr, '');
-    if (argv.includes('--version') || argv.includes('-v')) assert.equal(io.output().stdout.trim(), '1.8.0');
+    if (argv.includes('--version') || argv.includes('-v')) assert.equal(io.output().stdout.trim(), '1.9.0');
     else {
       assert.match(io.output().stdout, /Usage: hive-swarm/);
       assert.match(io.output().stdout, /doctor/);
@@ -119,7 +119,7 @@ test('explicit doctor diagnostics read an injected package and report paths with
   assert.equal(stderr, '');
   assert.match(stdout, /PASS.*Node\.js/);
   assert.match(stdout, /PASS.*SQLite/);
-  assert.match(stdout, /PASS.*1\.8\.0/);
+  assert.match(stdout, /PASS.*1\.9\.0/);
   assert.match(stdout, /codex-cli 0\.169\.1/);
   assert.ok(stdout.includes(paths.packageDirectory));
   assert.ok(stdout.includes(join(paths.home, '.codex')));
@@ -184,7 +184,7 @@ test('doctor detects npm and Codex runtime version drift without repairing metad
   const before = tree(paths.directory);
   const io = capture({...paths, env: {}, runCommand: async () => ({exitCode: 0, stdout: 'codex-cli 0.169.1'})});
   assert.equal(await main(['doctor'], io.options), 1);
-  assert.match(io.output().stdout, /FAIL.*1\.8\.0.*1\.7\.4/);
+  assert.match(io.output().stdout, /FAIL.*1\.9\.0.*1\.7\.4/);
   assert.deepEqual(tree(paths.directory), before);
 });
 

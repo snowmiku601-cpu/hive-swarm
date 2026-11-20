@@ -5,7 +5,8 @@
 
   <p>
     <a href="https://github.com/snowmiku601-cpu/hive-swarm/actions/workflows/ci.yml"><img src="https://github.com/snowmiku601-cpu/hive-swarm/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
-    <a href="https://www.npmjs.com/package/hive-swarm"><img src="https://img.shields.io/badge/npm-hive--swarm%401.8.0-f6bc55?style=flat-square" alt="npm hive-swarm 1.8.0" /></a>
+    <img src="https://img.shields.io/badge/source-1.9.0-f6bc55?style=flat-square" alt="Source version 1.9.0" />
+    <a href="https://www.npmjs.com/package/hive-swarm"><img src="https://img.shields.io/badge/npm-hive--swarm%401.8.0-d49b3b?style=flat-square" alt="npm hive-swarm 1.8.0" /></a>
     <a href="https://www.npmjs.com/package/dsh-hive-swarm"><img src="https://img.shields.io/badge/DSH%20(next)-dsh--hive--swarm%401.8.0-9a7138?style=flat-square" alt="npm dsh-hive-swarm 1.8.0 next" /></a>
     <img src="https://img.shields.io/badge/runtime-Node.js%2022.19%20%7C%2024.2%2B-75baef?style=flat-square" alt="Node.js 22.19 or 24.2 and newer" />
     <img src="https://img.shields.io/badge/core_runtime_dependencies-0-55cbb2?style=flat-square" alt="Zero core runtime dependencies" />
@@ -68,7 +69,7 @@ npx hive-swarm@latest update --host codex --after-close
 npx hive-swarm@latest uninstall --host codex
 ```
 
-> **Note on Codex CLI versions:** Local version switching and rollback are verified against Codex CLI `0.169.1`. On other Codex CLI versions, `update --host codex --after-close` keeps the verified candidate staged by default (source / upcoming release adds an explicit `--allow-unqualified-cli` opt-in flag). Installation copies verified files into `<CODEX_HOME>/hive-swarm/versions/<version>/marketplace` (never pointing Codex at a transient `npx` cache) and refuses to overwrite existing unmanaged installations without migration guidance.
+> **Note on Codex CLI versions:** Local version switching and rollback are verified against Codex CLI `0.169.1`. On other Codex CLI versions, `update --host codex --after-close` keeps the verified candidate staged by default (`1.9.0` adds an explicit `--allow-unqualified-cli` opt-in flag). Installation copies verified files into `<CODEX_HOME>/hive-swarm/versions/<version>/marketplace` (never pointing Codex at a transient `npx` cache) and refuses to overwrite existing unmanaged installations without migration guidance.
 
 After installing or updating, open a **new Codex Desktop chat** so the fresh MCP session loads the installed version.
 
@@ -169,10 +170,10 @@ Follow saved turns and live activity without opening or interrupting the worker'
 | What you need | What Hive Swarm provides |
 | --- | --- |
 | Coordinate parallel & dependent work | Up to 12 active workers, `waitFor` dependencies, sharding (`n`/`tasks`), groups, channels, and per-member sessions |
-| Direct peer collaboration | `@member`, `@group`, `@#channel`, and `@all` routing (normalized target matching in source / upcoming release) |
-| Track outcomes, not just logs | Progress bars, milestones, coordinator summaries, plus optional outcome `threads` (`Blocked` → `Active` → `Queued` → `Done`, source / upcoming release) |
-| Understand a stalled or uncertain run | Zero-token `[stall]` root-cause diagnostics, ranked alerts with `#seq` links, and explicit `Retry fresh turn` / `Dismiss` recovery for unconfirmed runs (source / upcoming release) |
-| Flexible model routing | Per-member `model` and `effort`, runtime model switching with warm forks, and optional `fallbackModel` quota failover (source / upcoming release) |
+| Direct peer collaboration | `@member`, `@group`, `@#channel`, and `@all` routing (normalized target matching in `1.9.0`) |
+| Track outcomes, not just logs | Progress bars, milestones, coordinator summaries, plus optional outcome `threads` (`Blocked` → `Active` → `Queued` → `Done`, `1.9.0`) |
+| Understand a stalled or uncertain run | Zero-token `[stall]` root-cause diagnostics, ranked alerts with `#seq` links, and explicit `Retry fresh turn` / `Dismiss` recovery for unconfirmed runs (`1.9.0`) |
+| Flexible model routing | Per-member `model` and `effort`, runtime model switching with warm forks, and optional `fallbackModel` quota failover (`1.9.0`) |
 | Safe isolation & cleanup | Read-only default workers, optional detached Git `worktree` per writable worker, and uncommitted-safe worktree removal |
 
 <details>
@@ -249,8 +250,8 @@ The test suite uses mocked runners and makes **no paid API calls**. Opening view
 
 ## Troubleshooting notes
 
-- **Codex CLI update qualification gate:** `hive-swarm update --host codex --after-close` defaults to verifying Codex CLI `0.169.1`. In the source / upcoming release, you can pass `--allow-unqualified-cli` to apply a staged update on a newer Codex CLI build.
-- **Long-running worker turns:** Published `1.8.0` uses a 20-minute turn timeout; the source / upcoming release upgrades this to an activity-resetting idle timeout (default 20 minutes of inactivity, 60-minute hard cap, configurable via `HIVE_SWARM_TURN_TIMEOUT_MS`).
+- **Codex CLI update qualification gate:** `hive-swarm update --host codex --after-close` defaults to verifying Codex CLI `0.169.1`. Starting in `1.9.0`, you can pass `--allow-unqualified-cli` to apply a staged update on a newer Codex CLI build.
+- **Long-running worker turns:** Published `1.8.0` uses a 20-minute turn timeout; `1.9.0` upgrades this to an activity-resetting idle timeout (default 20 minutes of inactivity, 60-minute hard cap, configurable via `HIVE_SWARM_TURN_TIMEOUT_MS`).
 - **Windows sandbox process errors:** the installer and runtime strip inherited MSIX/session markers and set `features.prefer_mxc=false` on Windows so workers can run shell commands cleanly.
 - **Vitest `spawn EPERM` in Windows worker sandboxes:** pass `--configLoader native --pool threads` to avoid child-process pool restrictions.
 - **Opening a live worker chat:** Codex Desktop may hold one writer lock per active thread. Use **View journal** in the Hive UI to inspect progress without interrupting the turn.
