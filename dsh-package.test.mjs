@@ -1,11 +1,11 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import{mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync}from'node:fs';
+import{mkdtempSync,mkdirSync,writeFileSync,readFileSync,realpathSync,rmSync}from'node:fs';
 import{join,dirname}from'node:path';import{tmpdir}from'node:os';import{pathToFileURL}from'node:url';
 import{packCore,archiveFiles}from'./scripts/pack-core.mjs';
 
 test('the real native artifact loads against the paired core from a clean consumer without monorepo files',async t=>{
   const {packDsh}=await import('./scripts/pack-dsh.mjs');
-  const root=mkdtempSync(join(tmpdir(),'hive packages có dấu '));t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const root=mkdtempSync(join(realpathSync(tmpdir()),'hive packages có dấu '));t.after(()=>rmSync(root,{recursive:true,force:true}));
   const core=await packCore({outputDirectory:join(root,'core')}),native=await packDsh({outputDirectory:join(root,'native')});
   const expected=['LICENSE','README.md','package.json','host.mjs','native.mjs','runner.mjs','routes.mjs','client/dist.js','cordis.patch.yml','skills/hive-swarm/SKILL.md'].sort();
   assert.deepEqual(native.files,expected);const consumer=join(root,'clean consumer');
