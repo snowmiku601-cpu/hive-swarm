@@ -153,15 +153,16 @@ test('peer tools bind an active worker to its saved identity and its own helpers
   const worker=active.get('builder');
   const catalog=await api.peer(worker,'peer_tools');
   const actions=catalog.tools.map(tool=>tool.name);
-  for (const name of ['read_board','board_status','add_member','retire_member','set_member_model']) {
+  for (const name of ['list_models','read_board','board_status','add_member','retire_member','set_member_model']) {
     assert.ok(actions.includes(name));
   }
   assert.equal(catalog.tools.find(tool=>tool.name==='add_member').inputSchema.properties.fork.type,'string');
-  assert.ok(!actions.includes('list_models')&&!actions.includes('resume_team'));
+  assert.ok(!actions.includes('set_team_title')&&!actions.includes('resume_team'));
   assert.equal((await api.peer(worker,'board_status',{teamId:'spoofed',member:'other'})).id,id);
+  assert.ok((await api.peer(worker,'list_models')).models.length>0);
   await assert.rejects(api.peer(worker,'peer_tools',{}, {teamId:id,member:'other'}),/authorization/);
   await assert.rejects(api.peer(worker,'peer_tools',{}, {teamId:'unknown',member:'builder'}),/authorization/);
-  await assert.rejects(api.peer(worker,'list_models'),/not available/);
+  await assert.rejects(api.peer(worker,'set_team_title',{title:'Nope'}),/not available/);
   await assert.rejects(api.peer(worker,'resume_team',{extraTurns:100}),/not available/);
   await assert.rejects(api.peer(worker,'retire_member',{member:'other'}),/own helpers/);
   await assert.rejects(api.peer(worker,'set_member_model',{member:'other',model:'fixture-b'}),/own helpers/);

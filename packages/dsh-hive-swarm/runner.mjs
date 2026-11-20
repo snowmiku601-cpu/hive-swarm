@@ -6,7 +6,8 @@ export function correlateRun(run,records) {
   const unique=new Map();
   for(const record of records){const event=record.event??record;if(!Number.isSafeInteger(event.seq)||event.seq<0)throw Error('Invalid native event sequence.');
     if(unique.has(event.seq)&&JSON.stringify(unique.get(event.seq))!==JSON.stringify(event))throw Error('Conflicting native event sequence.');unique.set(event.seq,event);}
-  const events=[...unique.values()].sort((a,b)=>a.seq-b.seq);let acceptedSeq=0,claimSeq=0,turnEndSeq=0,turn,claimedTurn;
+  const events=[...unique.values()].sort((a,b)=>a.seq-b.seq);let acceptedSeq=0,claimSeq=0,turnEndSeq=0,turn,claimedTurn,lastRoute=null;
+  const routes=[];
   const inbox={'next-turn':[],'next-step':[]};
   for(const event of events) {
     const {type,data={}}=event;
@@ -29,6 +30,14 @@ export function correlateRun(run,records) {
       if(data.source.rpcId!==run.requestId&&(acceptedSeq||claimSeq))throw Error('Foreign user admission; outcome unconfirmed.');
       if(data.source.rpcId===run.requestId&&claimedTurn!==turn)throw Error('User message belongs to another native turn.');
     }
+    if(type==='request/header'||type==='model/selection'||type==='model/selected') {
+      const cfg=type==='request/header'?data.header?.config:data;
+      if(cfg?.provider&&cfg?.model) {
+        const route=cfg.provider+'/'+cfg.model+(cfg.reasoningEffort?' · '+cfg.reasoningEffort:'');
+        lastRoute=route;
+        if(type==='request/header'&&claimSeq&&!turnEndSeq&&!routes.includes(route))routes.push(route);
+      }
+    }
     if(type==='turn/end'&&claimSeq&&data.turn===claimedTurn) {
       if(data.reason?.kind!=='completed') {
         const detail=data.reason?.message||data.reason?.error||data.reason?.kind||'incomplete';
@@ -37,7 +46,8 @@ export function correlateRun(run,records) {
       turnEndSeq=event.seq;
     }
   }
-  return {acceptedSeq,claimSeq,turnEndSeq,claimedTurn};
+  if(claimSeq&&!routes.length&&lastRoute)routes.push(lastRoute);
+  return {acceptedSeq,claimSeq,turnEndSeq,claimedTurn,routes};
 }
 
 export class NativeRunner {
@@ -59,9 +69,17 @@ export class NativeRunner {
   }
   async evidence(run,signal) {
     const events=await this.native.events(run.sessionId,signal);const proof=correlateRun(run,events);
-    const patch=Object.fromEntries(Object.entries(proof).filter(([key,value])=>key!=='claimedTurn'&&value>0));
+    const patch=Object.fromEntries(['acceptedSeq','claimSeq','turnEndSeq'].filter(key=>proof[key]>0).map(key=>[key,proof[key]]));
     if(Object.keys(patch).length)this.store.patch(run,patch);
-    return this.store.read(run);
+    let current=this.store.read(run);
+    for(const route of proof.routes??[]) {
+      const label='Verified route: '+route;
+      if(!current.steps.some(step=>step.kind==='route'&&step.label===label)) {
+        this.store.appendStep(run,{kind:'route',label,time:new Date().toISOString()});
+        current=this.store.read(run);
+      }
+    }
+    return current;
   }
   async run({team,member,remember,signal,onActivity=()=>{}}) {
     if(this.closed)throw Error('Native runner is closed.');signal?.throwIfAborted();
@@ -106,14 +124,15 @@ export class NativeRunner {
         signal?.throwIfAborted();const value=await this.native.wait(sessionId,signal);signal?.throwIfAborted();
         let current=await this.evidence(run,signal);
         const step={kind:'turn',label:value.reason==='timeout'?'Native worker remains active':'Native worker state observed',time:new Date().toISOString()};
-        this.store.appendStep(run,step);onActivity(step);
-        if(value.reason==='timeout')continue;
+        if(current.steps.at(-1)?.kind!==step.kind||current.steps.at(-1)?.label!==step.label)this.store.appendStep(run,step);
+        onActivity(step);
         if(value.reason==='input-required'){
           if(!inputRequired){inputRequired=true;remember({inputRequired:true});}
           onActivity({kind:'permission',label:'Native worker needs your permission or input',time:new Date().toISOString()});
           await delay(1000,undefined,{signal});continue;
         }
         if(inputRequired){inputRequired=false;remember({inputRequired:false});}
+        if(value.reason==='timeout')continue;
         if(value.reason!=='idle'||value.state?.running||value.state?.queue?.length)continue;
         await this.native.flush(sessionId,signal);signal?.throwIfAborted();current=await this.evidence(run,signal);
         const stopped=await this.native.state(sessionId,signal);signal?.throwIfAborted();
@@ -151,8 +170,8 @@ export class NativeRunner {
             const controller=new AbortController();const entry={controller,run};this.recoveries.set(run.sessionId,entry);
             entry.done=(async()=>{for(;;){controller.signal.throwIfAborted();const value=await this.native.wait(run.sessionId,controller.signal);
               if(value.reason==='input-required'){this.recoveryInput(board,run,true);await delay(1000,undefined,{signal:controller.signal});continue;}
-              if(value.reason!=='idle'||value.state?.running||value.state?.queue?.length)continue;
               this.recoveryInput(board,run,false);
+              if(value.reason!=='idle'||value.state?.running||value.state?.queue?.length)continue;
               controller.signal.throwIfAborted();
               if(await this.settleRecovery(board,run,controller.signal))return;
               const current=await this.native.state(run.sessionId,controller.signal);

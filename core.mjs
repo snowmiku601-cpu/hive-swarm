@@ -5,8 +5,8 @@ import {TeamBoard,boardWaitTimeout,configuredEffort,pendingWaitFor,stallIssues,t
 import {openWorktree,removeWorktree,worktreeSource} from './worktrees.mjs';
 
 const reads=new Set(['list_teams','board_status','board_history','read_board','list_models','read_journal','open_swarm_panel','wait_for_board']);
-const workerActions=new Set(['board_status','board_history','read_board','post_to_board','set_turn_outcome','add_member','retire_member','set_member_model','manage_channel']);
-const coordinatorActions=new Set(['list_models','set_team_title','set_team_plan']);
+const workerActions=new Set(['board_status','board_history','read_board','list_models','post_to_board','set_turn_outcome','add_member','retire_member','set_member_model','manage_channel']);
+const coordinatorActions=new Set(['set_team_title','set_team_plan']);
 
 function signature(value) {
   if(value===null||typeof value==='string'||typeof value==='boolean')return JSON.stringify(value);

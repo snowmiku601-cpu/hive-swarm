@@ -166,3 +166,46 @@ test('correlateRun preserves turn/end failure detail so rate limits and errors r
   ];
   assert.throws(()=>correlateRun({requestId:'req-1'},records),/429.*quota exceeded/i);
 });
+
+test('runner records deduplicated host-verified request/header route proof in the worker journal',async t=>{
+  const f=await fixture(t);
+  const running=f.runner.run(f.request);
+  await until(()=>f.calls.includes('wait'));
+  f.claim();
+  f.event('request/header',{header:{config:{provider:'xingchiapi',model:'gpt-6.1-sol',reasoningEffort:'max'}}});
+  f.event('request/header',{header:{config:{provider:'xingchiapi',model:'gpt-6.1-sol',reasoningEffort:'max'}}});
+  await f.runner.setOutcome('owned-session',1,outcome);
+  f.event('turn/end',{turn:4,reason:{kind:'completed'}});
+  f.release();
+  await running;
+  const journal=f.runner.readTranscript('owned-session');
+  const routeSteps=journal[0].items.filter(item=>item.kind==='route');
+  assert.deepEqual(routeSteps.map(item=>item.label),['Verified route: xingchiapi/gpt-6.1-sol · max']);
+});
+
+test('runner preserves Verified route across reused multi-turn sessions, clears inputRequired on timeout, and deduplicates timeout heartbeats',async t=>{
+  const f=await fixture(t);
+  let waits=0,releaseIdle;
+  f.native.wait=async()=>{
+    waits++;
+    if(waits===1)return {reason:'input-required'};
+    if(waits===2||waits===3)return {reason:'timeout'};
+    await new Promise(resolve=>{releaseIdle=resolve;});
+    return {reason:'idle',state:{running:false,queue:[],pendingInput:[]}};
+  };
+  // Simulate earlier session turn's request/header before this prompt was admitted
+  f.event('request/header',{header:{config:{provider:'xingchiapi',model:'gpt-6.1-sol',reasoningEffort:'max'}}});
+  const running=f.runner.run(f.request);
+  await until(()=>waits>=2&&f.member.inputRequired===false);
+  assert.equal(f.member.inputRequired,false,'inputRequired must clear as soon as wait returns timeout after approval');
+  await until(()=>waits>=4&&releaseIdle);
+  f.claim();
+  await f.runner.setOutcome('owned-session',1,outcome);
+  f.event('turn/end',{turn:4,reason:{kind:'completed'}});
+  releaseIdle();
+  await running;
+  const journal=f.runner.readTranscript('owned-session');
+  const labels=journal[0].items.filter(item=>item.type==='activity').map(item=>item.label);
+  assert.ok(labels.includes('Verified route: xingchiapi/gpt-6.1-sol · max'),'subsequent turns without a new request/header must keep verified route');
+  assert.equal(labels.filter(l=>l==='Native worker remains active').length,1,'consecutive timeout heartbeats must not spam the durable journal');
+});

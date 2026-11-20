@@ -29,7 +29,8 @@ const memberForm = shape({
   name: string, brief: string, group: string, model: string, effort: string,
   fallbackModel: string, fallbackEffort: {type:['string','null']},
   writable:boolean,worktree:boolean,waitFor:strings,channels:strings,
-  n:{...integer,minimum:2,maximum:8},tasks:{...strings,minItems:2,maxItems:8},
+  n:{...integer,minimum:2,maximum:8,description:'Spawn N homogeneous shard copies (<name>-1..<name>-N); omit for a single worker.'},
+  tasks:{...strings,minItems:2,maxItems:8,description:'Shard this member into N copies (<name>-1..<name>-N), one per slice; omit for a single worker.'},
 }, ['name','brief']);
 const threadForm = shape({id:string,title:string,goal:string,members:strings}, ['id','title','goal']);
 const tools = [
@@ -154,8 +155,8 @@ const peerTools = [
   },
 ];
 
-const memberActions = new Set(['board_status','add_member','retire_member','set_member_model','manage_channel']);
-const coordinatorActions = new Set(['list_models','set_team_title','set_team_plan']);
+const memberActions = new Set(['board_status','list_models','add_member','retire_member','set_member_model','manage_channel']);
+const coordinatorActions = new Set(['set_team_title','set_team_plan']);
 
 function peerCatalog(member) {
   const coordinator=member.role==='coordinator';

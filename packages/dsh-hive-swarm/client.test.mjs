@@ -587,10 +587,14 @@ test('native UI renders safe Markdown, clickable #seq jumps, outcome threads, pr
     assert.ok(resumeCheck,'Expected Resume now checkbox in MemberEditor');
     await renderer.act(async()=>{resumeCheck.props.onChange({target:{checked:true}});});
     await renderer.act(async()=>{await dialog.findByType('form').props.onSubmit({preventDefault(){}});await tick();});
-    // Graph: playback controls (Play/First/Back/Next)
+    // Graph: playback controls (Play/First/Back/Next) and userSpaceOnUse arrowhead marker
     await renderer.act(async()=>{view.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Graph')).props.onClick();await tick();});
     assert.ok(findButton('Replay'),'Expected Replay button on native Graph');
     assert.ok(findButton('Previous post'),'Expected Previous post button on native Graph');
+    const marker=view.root.findByType('marker');
+    assert.equal(marker.props.markerUnits,'userSpaceOnUse');
+    const panel=view.root.findByProps({role:'tabpanel'});
+    assert.equal(panel.props['aria-labelledby'].includes(':'),false,'tabpanel aria-labelledby must not contain raw colons');
 
     const actions=f.ctx.calls.filter(c=>c.method==='command'&&c.payload.action!=='list_models');
     assert.deepEqual(actions.map(c=>c.payload.action),['resolve_recovery','set_team_title','remove_worktree','set_member_model']);

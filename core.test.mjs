@@ -155,3 +155,10 @@ test('resolve_recovery is owner-only and unblocks a member with an unconfirmed r
   assert.equal(resolved.members[0].recoveryRequired,false);
   assert.equal(resolved.members[0].status,'failed');
 });
+
+test('active workers can call list_models to verify host models without coordinator privileges',async t=>{
+  const {app}=fixture(t);
+  const team=await app.command('start_team',startArgs());await delay(10);
+  const models=await app.command('list_models',{},{actor:{teamId:team.id,member:'builder',turn:1}});
+  assert.equal(models.models[0].id,'fixture/model');
+});

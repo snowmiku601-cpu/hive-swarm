@@ -150,7 +150,7 @@ function memberNow(member,activity,latest) {
 
 // Native dialog owns modal focus/trapping; its opener regains focus after dismissal.
 function Dialog({title,onClose,opener,closeOnBackdrop=false,children}) {
-  const ref=useRef(null),close=useRef(null),titleId=useId();
+  const ref=useRef(null),close=useRef(null),titleId=useId().replace(/[^a-zA-Z0-9_-]/g,'');
   useLayoutEffect(()=>{
     const dialog=ref.current;if(!dialog)return;
     if(typeof dialog.showModal==='function')dialog.showModal();else dialog.setAttribute('open','');
@@ -365,11 +365,15 @@ function MemberWorkspace({workspace}) {
 function Members({state,controller,onJournal,onMention}) {
   const [filter,setFilter]=useState(''),[editor,setEditor]=useState(null),[retire,setRetire]=useState(null);
   const members=state.team.members.filter(member=>member.name.toLowerCase().includes(filter.toLowerCase()));
-  return <div><div className="dsh-hive-actions"><label>Find a member<input type="search" value={filter} onChange={event=>setFilter(event.target.value)}/></label>
+  return <div className="dsh-hive-members-view"><div className="dsh-hive-actions"><label>Find a member<input type="search" value={filter} onChange={event=>setFilter(event.target.value)}/></label>
     <button type="button" disabled={state.pending} onClick={event=>setEditor({member:null,opener:event.currentTarget})}>Add member</button></div>
-    {members.length?<ul className="dsh-hive-members">{members.map(member=><li key={member.name} className="dsh-hive-member">
+    {members.length?<ul className="dsh-hive-members">{members.map(member=>{
+      const brief=member.brief?.trim()??'';
+      const longBrief=brief.length>220||/\n/.test(brief);
+      return <li key={member.name} className="dsh-hive-member">
       <div className="dsh-hive-line"><Bee name={member.name} status={member.status}/><h2>@{member.name}</h2><Status value={member.status}/></div>
-      <p className="dsh-hive-prose">{member.brief}</p>
+      {longBrief?<><p className="dsh-hive-prose">{compact(brief,200)}</p><details className="dsh-hive-details"><summary>Full brief</summary><p className="dsh-hive-prose">{brief}</p></details></>:
+        <p className="dsh-hive-prose">{member.brief}</p>}
       <dl className="dsh-hive-facts"><div><dt>Model</dt><dd>{member.model}{member.effort?' · '+member.effort:''}</dd></div>
         {member.fallbackModel?<div><dt>Fallback</dt><dd>{member.fallbackModel}{member.fallbackEffort?' · '+member.fallbackEffort:''}</dd></div>:null}
         <div><dt>Permission</dt><dd>{member.writable?'Workspace write requested':'Read only'}</dd></div>
@@ -386,7 +390,7 @@ function Members({state,controller,onJournal,onMention}) {
         <button type="button" aria-label={'Retire @'+member.name} disabled={state.pending||member.status==='retired'||member.retireAfterTurn} onClick={event=>setRetire({member,opener:event.currentTarget})}>{member.retireAfterTurn?'Retiring after turn':'Retire'}</button>
         {member.recoveryRequired?<RecoveryButtons memberName={member.name} pending={state.pending||member.status==='working'} controller={controller}/>:null}
         {member.workspace&&(member.status==='retired'||state.team.phase==='done')?<button type="button" disabled={state.pending} aria-label={'Clean worktree for @'+member.name} onClick={()=>act(controller,'remove_worktree',{member:member.name})}>Clean worktree</button>:null}</div>
-    </li>)}</ul>:<p>No members match your search.</p>}
+    </li>;})}</ul>:<p>No members match your search.</p>}
     {editor?<MemberEditor key={editor.member?.name??'new'} {...editor} state={state} controller={controller} onClose={()=>setEditor(null)}/>:null}
     {retire?<Dialog title={'Retire '+retire.member.name+'?'} opener={retire.opener} onClose={()=>setRetire(null)}>
       <p>This member will receive no further turns. Its Journal and session remain available.</p>
@@ -422,7 +426,7 @@ function FlowGraph({state,controller,onJournal,onJumpPost}) {
     setPlaying(true);
   };
   const projection=useMemo(()=>Graph.project(posts,state.team.members,cursor,{hideInactive,expandBroadcast}),[posts,state.team.members,cursor,hideInactive,expandBroadcast]);
-  const height=Math.max(340,Graph.minimumHeight(projection.nodes.length,width));
+  const height=Math.max(380,Graph.minimumHeight(projection.nodes.length,width));
   const points=useMemo(()=>Graph.layout(projection.nodes,width,height),[projection,width,height]);
   const elapsed=Graph.elapsedSpan(posts.slice(0,index),{live:replay===null&&['working','queued'].includes(state.team.phase)});
   return <div className="dsh-hive-graph-view"><div className="dsh-hive-filters">
@@ -442,10 +446,14 @@ function FlowGraph({state,controller,onJournal,onJumpPost}) {
       <label>Replay ({index}/{posts.length} · {elapsed})<input aria-label="Replay through post" type="range" min="0" max={posts.length} value={index} onChange={event=>setPosition(Number(event.target.value))}/></label>
       <button type="button" aria-pressed={replay===null} onClick={()=>{setPlaying(false);setReplay(null);}}>Live</button></div>
     <div ref={ref} className="dsh-hive-graph" style={{height}} role="group" aria-label="Message flow graph">
-      <svg width="100%" height={height} viewBox={'0 0 '+width+' '+height} aria-hidden="true"><defs><marker id={arrow} markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7Z" fill="currentColor"/></marker></defs>
+      <svg width="100%" height={height} viewBox={'0 0 '+width+' '+height} aria-hidden="true"><defs><marker id={arrow} markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M1 1.5L9 5L1 8.5Z" fill="currentColor"/></marker></defs>
         {projection.links.map(link=>{const a=points.get(link.from),b=points.get(link.to);if(!a||!b)return null;
-          const dx=b.x-a.x,dy=b.y-a.y,distance=Math.max(1,Math.hypot(dx,dy)),x=b.x-dx/distance*40,y=b.y-dy/distance*38;
-          return <path key={link.from+'>'+link.to} data-hive-edge={link.from+'>'+link.to} d={'M'+a.x+' '+a.y+' Q'+((a.x+b.x)/2-dy*.12)+' '+((a.y+b.y)/2+dx*.12)+' '+x+' '+y}
+          const dx=b.x-a.x,dy=b.y-a.y,distance=Math.hypot(dx,dy);if(distance<16)return null;
+          const ux=dx/distance,uy=dy/distance,padStart=Math.min(48,distance*0.34),padEnd=Math.min(54,distance*0.4);
+          const sx=a.x+ux*padStart,sy=a.y+uy*padStart,ex=b.x-ux*padEnd,ey=b.y-uy*padEnd;
+          const seg=Math.hypot(ex-sx,ey-sy);if(seg<6)return null;
+          const bend=Math.min(24,seg*0.16),cx=(sx+ex)/2-uy*bend,cy=(sy+ey)/2+ux*bend;
+          return <path key={link.from+'>'+link.to} data-hive-edge={link.from+'>'+link.to} d={'M'+sx.toFixed(1)+' '+sy.toFixed(1)+' Q'+cx.toFixed(1)+' '+cy.toFixed(1)+' '+ex.toFixed(1)+' '+ey.toFixed(1)}
             className="dsh-hive-edge" strokeWidth={Math.min(4,1+Math.sqrt(link.count))} strokeDasharray={link.direct?undefined:'5 5'}
             opacity={!focus||focus===link.from||focus===link.to?1:.2} markerEnd={'url(#'+arrow+')'}/>;})}
       </svg>
@@ -471,7 +479,7 @@ export function SwarmView({controller,onExpand,mode='dock',visible=true}) {
   const [view,setView]=useState('Overview'),[journal,setJournal]=useState(null);
   const [renaming,setRenaming]=useState(false),[titleDraft,setTitleDraft]=useState('');
   const [focusedSeq,setFocusedSeq]=useState(null),[mentionRequest,setMentionRequest]=useState(null);
-  const tabRefs=useRef([]),prefix=useId(),journalOwner=useRef(false);
+  const tabRefs=useRef([]),prefix=useId().replace(/[^a-zA-Z0-9_-]/g,''),journalOwner=useRef(false);
   useEffect(()=>{
     if(!visible)return;
     const release=controller.retain();

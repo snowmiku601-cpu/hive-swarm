@@ -1081,3 +1081,26 @@ test('childEnvironment strips host session and Windows MSIX markers without alte
     assert.ok(Object.hasOwn(base,key),key);
   }
 });
+
+test('sharded group names expand in waitFor and outcome threads, and empty channel strings act as omitted',t=>{
+  const board=new TeamBoard(':memory:',async()=>assert.fail('Unexpected model turn'));
+  t.after(()=>board.close());
+  const created=board.create({
+    cwd:process.cwd(),
+    task:'Verify shard group references',
+    threads:[{id:'research',title:'Research',goal:'Design + assets',members:['design']}],
+    members:[
+      {name:'design',brief:'Research',tasks:['Layout','Typography']},
+      {name:'builder',brief:'Build',waitFor:['design']},
+    ],
+  });
+  board.pause(created.id);
+  const builder=created.members.find(m=>m.name==='builder');
+  assert.deepEqual(builder.waitFor,['design-1','design-2']);
+  assert.deepEqual(created.threads[0].members,['design-1','design-2']);
+  board.post(created.id,'Empty channel defaults to main','');
+  const recent=board.readPosts(created.id,{channel:'',limit:10});
+  assert.ok(recent.posts.some(p=>p.text==='Empty channel defaults to main'));
+  const history=board.readHistory(created.id,{channel:'',limit:10});
+  assert.ok(history.posts.some(p=>p.text==='Empty channel defaults to main'));
+});

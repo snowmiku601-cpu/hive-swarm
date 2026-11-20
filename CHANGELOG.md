@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.9.1
+
+Hardening and bugfix release based on live end-to-end multi-worker stress testing on DeepSeek Harness `0.2.2-rc.5` (4 workers, 43 turns, 175 board posts, verified strict model lock).
+
+### Native DSH Host, Tool Schemas & Strict-Mode Compatibility
+- Wrap all 21 `hive_swarm_*` tool parameter schemas in standard JSON Schema `{type: "object", properties, required, additionalProperties: false}` objects so OpenAI Responses API (`pi-ai`) never rejects parameter names like `title` as malformed root schema keywords.
+- Make optional tool fields nullable (`[type, "null"]`) with explicit range bounds (`read_board.limit` 1–20, `board_history.limit` 1–200, `wait_for_board.timeoutSec` 1–55), clear sharding descriptions on `n`/`tasks`, and strict argument normalization (`normalizeArgs`) stripping optional `null`/empty-string fields while preserving explicit `effort: null` and rejecting unknown/spoofed fields. This fixes OpenAI strict-mode tool decoders emitting both `n` and `tasks` or empty `fallbackModel` strings.
+- Sanitize all 21 native tool return payloads through strict lossless JSON (`lossless(...)`), eliminating `undefined` properties (such as `defaultEffort: undefined`) rejected by DSH `0.2.2-rc.5`.
+- Attach host-verified `currentSession` (`sessionId`, `cwd`, `model`, `provider`, `modelId`, `effort`) to `hive_swarm_list_models` via `native.sessionRoute(agent)` (falling back across live model selection, session state, `request/header`, and `model/selection`), and expose read-only `list_models` to active workers in both core (`workerActions`) and DSH (`workerVisible`).
+
+### Native DSH Runner, Sandbox & Coordination Core
+- Record deduplicated host-verified `Verified route: <provider>/<model> · <effort>` steps from `request/header` / `model/selection` in worker Journals (`correlateRun` + `evidence`), preserving verified route proof across multi-turn reused worker sessions.
+- Clear `inputRequired` immediately whenever `native.wait()` returns a non-`input-required` state (including `timeout`) in both `run()` and `reconcile()`, and deduplicate consecutive `'Native worker remains active'` timeout heartbeats in durable Journal storage.
+- Expand read-only DSH worker tool grants (`skill`, `web_search`, `web_fetch`, `todo_write`, `working_directory`, `job_list`, `job_output`) and writable grants (`job_kill`) while strictly denying write, subagent, goal, schedule, workflow, and admin capabilities — and explicitly block read-only workers from attempting shell `sandbox_permissions` escalation in the last-mile guard.
+- Expand sharded group names automatically inside `validateDependencies` (`waitFor`) and `normalizeThreads` (`threads[].members`), and treat empty `channel: ""` strings as omitted across `postingChannel`, `readPosts`, `readHistory`, and `waitForBoard` in `engine.mjs`.
+
+### Native DSH UI & Accessibility
+- Fix distorted SVG arrowheads on the Message Flow Graph by switching `<marker>` to `markerUnits="userSpaceOnUse"`, offsetting start/end points cleanly outside the 100px node cards, and increasing minimum graph height to `380px`.
+- Fix vertical spacing gap under `Needs you` in two-column `Overview` (`align-items: start` / `align-content: start`), improve spacing below `Find a member` in `Members`, prevent checkbox wrapping in filter bars, collapse long member briefs (>220 chars or multiline) behind `Full brief`, and sanitize `useId()` colons in `tabpanel` / `dialog` ARIA IDs.
+
 ## 1.9.0 — published
 
 Published on npm as `hive-swarm@1.9.0` (`latest`, 25 files, SHA-512 `sha512-xlev8HFaXvb5j9TDsQLNYPhsTWxsmvyPn+mqI+IRG0uP3kmk7RSqlEWk3Z3tYl1ah3DDoygiabShC0KAij/uJg==`) and `dsh-hive-swarm@1.9.0` (`next`, 10 files, SHA-512 `sha512-nZnuq3fjNNrVwMhSrDoGsGi4nN8WXNPbK3Xjh7fp5pi15KIIqmCMt+yS8Zp6z3Pi+O9ehfwwRJa82z1o5+jCiQ==`). Verified across 24/24 CI checks (Windows, macOS, Linux × Node 22.19.0, 24.2.0, 24.x, LTS; 264/264 tests).

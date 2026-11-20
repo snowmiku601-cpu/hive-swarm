@@ -92,7 +92,7 @@ function subscriptions(team, values) {
 }
 
 function postingChannel(team, member, requested) {
-  if (requested != null) return openChannel(team,requested).name;
+  if (requested != null && requested !== '') return openChannel(team,requested).name;
   return member?.channels.find(name=>team.channels.some(channel=>channel.name===name&&!channel.archived))??'main';
 }
 
@@ -110,6 +110,14 @@ function normalizeThreads(threads, members) {
   if (threads === undefined) return undefined;
   if (!Array.isArray(threads) || threads.length > 8) throw Error('Outcome threads must be a list of at most 8 items.');
   const roster = new Set(members.map(member => member.name));
+  const groups = new Map();
+  for (const member of members) {
+    if (member.group && activeMember(member)) {
+      const list = groups.get(member.group) ?? [];
+      list.push(member.name);
+      groups.set(member.group, list);
+    }
+  }
   const ids = new Set();
   return threads.map(entry => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw Error('Each thread must be an object.');
@@ -118,7 +126,8 @@ function normalizeThreads(threads, members) {
     ids.add(id);
     const assigned = entry.members ?? [];
     if (!Array.isArray(assigned)) throw Error('Thread members must be a list of member names.');
-    const validMembers = [...new Set(assigned.map(normalizeTarget).filter(name => roster.has(name)))];
+    const validMembers = [...new Set(assigned.map(normalizeTarget).flatMap(name =>
+      roster.has(name) ? [name] : groups.has(name) ? groups.get(name) : []))];
     return {
       id,
       title: text(entry.title, 'Thread title', 80),
@@ -200,6 +209,19 @@ function validateRoster(members) {
 
 function validateDependencies(members, roots) {
   const roster = new Map(members.map(member => [member.name, member]));
+  const groups = new Map();
+  for (const member of members) {
+    if (member.group && activeMember(member)) {
+      const list = groups.get(member.group) ?? [];
+      list.push(member.name);
+      groups.set(member.group, list);
+    }
+  }
+  for (const member of roots) {
+    if (!member.waitFor?.length) continue;
+    member.waitFor = [...new Set(member.waitFor.flatMap(name =>
+      !roster.has(name) && groups.has(name) ? groups.get(name) : [name]))];
+  }
   const visiting = new Set();
   const settled = new Set();
   function visit(member) {
@@ -757,7 +779,7 @@ export class TeamBoard {
     const team=this.get(id);
     integer(limit, 1, 200, 'History page size');
     if (after != null) integer(after, 0, Number.MAX_SAFE_INTEGER, 'After post');
-    const selected=channel==='*'?null:channel!=null?[channelName(channel)]:
+    const selected=channel==='*'?null:channel!=null&&channel!==''?[channelName(channel)]:
       actor?visibleChannels(this.peerMember(team,actor,false)):null;
     const filter=selected ? JSON.stringify(selected) : null;
     const condition=[filter,filter,mentionsOnly?1:0];

@@ -2,8 +2,8 @@ import {realpathSync} from 'node:fs';
 
 const never=()=>new AbortController().signal;
 const samePath=(left,right)=>realpathSync(left)===realpathSync(right);
-const readTools=new Set(['read','read_image','glob','grep']);
-const writeTools=new Set(['write','edit','apply_patch']);
+const readTools=new Set(['read','read_image','glob','grep','skill','web_search','web_fetch','todo_write','working_directory','job_list','job_output']);
+const writeTools=new Set(['write','edit','apply_patch','job_kill']);
 const shellTools=new Set(['bash','pwsh']);
 
 /** Adapter for the pinned rc.5 public Gateway, SessionStore and per-session sandbox contracts. */
@@ -46,7 +46,11 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
     const coordination=new Set(coordinationTools);
     const allow=definitions.map(tool=>tool.name).filter(name=>readTools.has(name)||shellTools.has(name)||(writable&&writeTools.has(name))||coordination.has(name));
     scopes.get(id)?.();const releases=[agent.ctx.tools.restrict({allow})];const permitted=new Set(allow);
-    releases.push(agent.ctx.tools.guard(exec=>permitted.has(exec.name)?undefined:'This capability is outside the Hive worker grant.'));
+    releases.push(agent.ctx.tools.guard(exec=>{
+      if(!permitted.has(exec.name))return 'This capability is outside the Hive worker grant.';
+      if(!writable&&shellTools.has(exec.name)&&(exec.args?.sandbox_permissions||exec.input?.sandbox_permissions))return 'Read-only Hive workers cannot escalate shell sandbox permissions.';
+      return undefined;
+    }));
     scopes.set(id,()=>{for(const release of releases.reverse())release()});
     // SessionController.selectModel also saves the personal default in rc.5. Keep this choice session-local.
     const selection={provider:model.provider,model:model.model,...effort?{reasoningEffort:effort}:{}};
@@ -75,7 +79,36 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
     }
     if(!await ctx.sessions.flush(session))throw Error('Native durable persistence is unavailable.');}
   async function cancel(id) {owned(id);await invoke('cancel',{sessionId:id});await live(id).whenIdle();await flush(id);}
-  return {listModels,create,prepare,events,flush,cancel,
+  async function sessionRoute(agent,signal) {
+    if(!agent)return null;
+    const cwd=agent.session?.header?.cwd;
+    const sel=agent.model?.current??agent.model?.selection??(typeof agent.model?.get==='function'?agent.model.get():null);
+    let provider=sel?.provider,model=sel?.model,effort=sel?.reasoningEffort;
+    if(!provider||!model) {
+      try {
+        const st=await invoke('state',{sessionId:agent.id},signal);
+        const m=st?.model??st?.selection??st?.config;
+        if(m?.provider&&m?.model){provider=m.provider;model=m.model;effort??=m.reasoningEffort;}
+      } catch {/* Ignore unsupported state shape */}
+    }
+    if(!provider||!model) {
+      try {
+        const value=await invoke('events',{address:{kind:'session',sessionId:agent.id},maxMessages:40},signal);
+        for(const record of [...(value?.records??[])].reverse()) {
+          const ev=record?.event??record;
+          const cfg=ev?.type==='request/header'?ev.data?.header?.config:(ev?.type==='model/selection'||ev?.type==='model/selected')?ev.data:null;
+          if(cfg?.provider&&cfg?.model){provider=cfg.provider;model=cfg.model;effort??=cfg.reasoningEffort;break;}
+        }
+      } catch {/* Ignore unavailable session events */}
+    }
+    return {
+      sessionId:agent.id,
+      ...(typeof cwd==='string'&&cwd?{cwd}:{}),
+      ...(provider&&model?{model:provider+'/'+model,provider,modelId:model}:{}),
+      ...(typeof effort==='string'&&effort?{effort}:{}),
+    };
+  }
+  return {listModels,sessionRoute,create,prepare,events,flush,cancel,
     fork:async(id,signal)=>{owned(id);const value=await invoke('fork',{sessionId:id,allowMigration:false},signal);
       if(typeof value?.sessionId!=='string'||!value.sessionId||value.sessionId===id)throw Error('Native fork returned no distinct session identity.');
       created.add(value.sessionId);return value.sessionId;},
