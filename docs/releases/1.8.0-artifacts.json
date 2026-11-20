@@ -1,6 +1,6 @@
 {
   "version": "1.8.0",
-  "status": "core published; DSH native package remains unpublished pending npm OTP",
+  "status": "both packages published; registry SHA-512 verified",
   "artifacts": [
     {
       "name": "hive-swarm",
@@ -17,5 +17,9 @@
       "files": 10,
       "loaderBytes": 56336
     }
-  ]
+  ],
+  "registryTags": {
+    "hiveSwarm": "latest",
+    "dshHiveSwarm": "next"
+  }
 }

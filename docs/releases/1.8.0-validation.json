@@ -1,9 +1,9 @@
 {
   "version": "1.8.0",
   "date": "2026-11-20",
-  "sourceCommit": "951e391cabd9b835d5988ee253a617678e27bb7b",
+  "sourceCommit": "43cf08df66425de3638cb2f60fdf0321db9ebc36",
   "ci": {
-    "url": "https://github.com/snowmiku601-cpu/hive-swarm/actions/runs/44669713868",
+    "url": "https://github.com/snowmiku601-cpu/hive-swarm/actions/runs/44698242653",
     "jobs": 12,
     "passed": 12,
     "oses": [
@@ -80,17 +80,17 @@
         "version": "1.8.0",
         "distTag": "latest",
         "integrityVerified": true
+      },
+      {
+        "name": "dsh-hive-swarm",
+        "version": "1.8.0",
+        "distTag": "next",
+        "integrityVerified": true
       }
     ],
-    "pending": {
-      "name": "dsh-hive-swarm",
-      "version": "1.8.0",
-      "distTag": "next",
-      "reason": "npm requires a one-time password for publish",
-      "localTarballIntegrityVerified": true
-    },
     "tagged": false,
     "account": "snowmiku601",
-    "namesReserved": false
+    "namesPublished": true,
+    "registryHashesFetched": true
   }
 }
