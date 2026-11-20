@@ -5,9 +5,8 @@
 
   <p>
     <a href="https://github.com/snowmiku601-cpu/hive-swarm/actions/workflows/ci.yml"><img src="https://github.com/snowmiku601-cpu/hive-swarm/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
-    <img src="https://img.shields.io/badge/source-1.9.0-f6bc55?style=flat-square" alt="Source version 1.9.0" />
-    <a href="https://www.npmjs.com/package/hive-swarm"><img src="https://img.shields.io/badge/npm-hive--swarm%401.8.0-d49b3b?style=flat-square" alt="npm hive-swarm 1.8.0" /></a>
-    <a href="https://www.npmjs.com/package/dsh-hive-swarm"><img src="https://img.shields.io/badge/DSH%20(next)-dsh--hive--swarm%401.8.0-9a7138?style=flat-square" alt="npm dsh-hive-swarm 1.8.0 next" /></a>
+    <a href="https://www.npmjs.com/package/hive-swarm"><img src="https://img.shields.io/badge/npm-hive--swarm%401.9.0-f6bc55?style=flat-square" alt="npm hive-swarm 1.9.0" /></a>
+    <a href="https://www.npmjs.com/package/dsh-hive-swarm"><img src="https://img.shields.io/badge/DSH%20(next)-dsh--hive--swarm%401.9.0-9a7138?style=flat-square" alt="npm dsh-hive-swarm 1.9.0 next" /></a>
     <img src="https://img.shields.io/badge/runtime-Node.js%2022.19%20%7C%2024.2%2B-75baef?style=flat-square" alt="Node.js 22.19 or 24.2 and newer" />
     <img src="https://img.shields.io/badge/core_runtime_dependencies-0-55cbb2?style=flat-square" alt="Zero core runtime dependencies" />
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-b3ce64?style=flat-square" alt="MIT license" /></a>
@@ -30,8 +29,8 @@ Hive Swarm is a lightweight **multi-agent coordination engine and UI** for AI co
 
 The coordination core (`engine.mjs`, `core.mjs`, `run-store.mjs`) is harness-agnostic:
 
-- **Codex Desktop & Codex CLI (`hive-swarm@1.8.0`, npm `latest`)** — full MCP server, per-member Codex `app-server` sessions, inline MCP App, and standalone four-tab board UI.
-- **DeepSeek Harness Desktop `0.2.2-rc.5` (`dsh-hive-swarm@1.8.0`, npm `next`, experimental)** — native DSH sessions, permission-scoped tools, bee-marked **Swarm** Start card, right-dock tab, and full React panel.
+- **Codex Desktop & Codex CLI (`hive-swarm@1.9.0`, npm `latest`)** — full MCP server, per-member Codex `app-server` sessions, inline MCP App, and standalone four-tab board UI.
+- **DeepSeek Harness Desktop `0.2.2-rc.5` (`dsh-hive-swarm@1.9.0`, npm `next`, experimental)** — native DSH sessions, permission-scoped tools, bee-marked **Swarm** Start card, right-dock tab, and full React panel.
 
 The core runtime uses **Node.js ESM**, built-in `node:sqlite`, and **zero third-party runtime dependencies**. Pinned `devDependencies` are only used to build and test the DSH client bundle (React is supplied by DSH at runtime).
 
@@ -41,8 +40,8 @@ Requires **Node.js `^22.19.0 || >=24.2.0`** and either **Codex Desktop / Codex C
 
 | Host | Published package | Status | Worker & UI model |
 | --- | --- | --- | --- |
-| **Codex Desktop / CLI** | `hive-swarm@1.8.0` (`latest`) | Production adapter; lifecycle qualified on CLI `0.169.1` | Per-member Codex sessions, inline MCP App & standalone 4-tab board |
-| **DeepSeek Harness `0.2.2-rc.5`** | `dsh-hive-swarm@1.8.0` (`next`) | Experimental; two-worker Windows Desktop smoke qualified | Native DSH sessions, Start card, right tab & full React panel |
+| **Codex Desktop / CLI** | `hive-swarm@1.9.0` (`latest`) | Production adapter; lifecycle qualified on CLI `0.169.1` | Per-member Codex sessions, inline MCP App & standalone 4-tab board |
+| **DeepSeek Harness `0.2.2-rc.5`** | `dsh-hive-swarm@1.9.0` (`next`) | Experimental; built on `1.8.0` Windows Desktop smoke qualification + full UI parity | Native DSH sessions, Start card, right tab & full React panel |
 
 ### 1. Codex Desktop / CLI (via npm — recommended)
 
@@ -69,7 +68,7 @@ npx hive-swarm@latest update --host codex --after-close
 npx hive-swarm@latest uninstall --host codex
 ```
 
-> **Note on Codex CLI versions:** Local version switching and rollback are verified against Codex CLI `0.169.1`. On other Codex CLI versions, `update --host codex --after-close` keeps the verified candidate staged by default (`1.9.0` adds an explicit `--allow-unqualified-cli` opt-in flag). Installation copies verified files into `<CODEX_HOME>/hive-swarm/versions/<version>/marketplace` (never pointing Codex at a transient `npx` cache) and refuses to overwrite existing unmanaged installations without migration guidance.
+> **Note on Codex CLI versions:** Local version switching and rollback are verified against Codex CLI `0.169.1`. On newer Codex CLI versions, `update --host codex --after-close` keeps the verified candidate staged by default unless you pass `--allow-unqualified-cli`. Installation copies verified files into `<CODEX_HOME>/hive-swarm/versions/<version>/marketplace` (never pointing Codex at a transient `npx` cache) and refuses to overwrite existing unmanaged installations without migration guidance.
 
 After installing or updating, open a **new Codex Desktop chat** so the fresh MCP session loads the installed version.
 
@@ -78,7 +77,7 @@ After installing or updating, open a **new Codex Desktop chat** so the fresh MCP
 DSH manages plugins through its own profile manager. Close DSH Desktop, then run:
 
 ```sh
-dsh plugin --profile desktop add dsh-hive-swarm@1.8.0
+dsh plugin --profile desktop add dsh-hive-swarm@1.9.0
 ```
 
 - `npx hive-swarm@latest install --host dsh` prints this command and never edits a DSH profile directly.
@@ -170,10 +169,10 @@ Follow saved turns and live activity without opening or interrupting the worker'
 | What you need | What Hive Swarm provides |
 | --- | --- |
 | Coordinate parallel & dependent work | Up to 12 active workers, `waitFor` dependencies, sharding (`n`/`tasks`), groups, channels, and per-member sessions |
-| Direct peer collaboration | `@member`, `@group`, `@#channel`, and `@all` routing (normalized target matching in `1.9.0`) |
-| Track outcomes, not just logs | Progress bars, milestones, coordinator summaries, plus optional outcome `threads` (`Blocked` → `Active` → `Queued` → `Done`, `1.9.0`) |
-| Understand a stalled or uncertain run | Zero-token `[stall]` root-cause diagnostics, ranked alerts with `#seq` links, and explicit `Retry fresh turn` / `Dismiss` recovery for unconfirmed runs (`1.9.0`) |
-| Flexible model routing | Per-member `model` and `effort`, runtime model switching with warm forks, and optional `fallbackModel` quota failover (`1.9.0`) |
+| Direct peer collaboration | `@member`, `@group`, `@#channel`, and `@all` routing with normalized target matching |
+| Track outcomes, not just logs | Progress bars, milestones, coordinator summaries, and optional outcome `threads` (`Blocked` → `Active` → `Queued` → `Done`) |
+| Understand a stalled or uncertain run | Zero-token `[stall]` root-cause diagnostics, ranked alerts with `#seq` links, and explicit `Retry fresh turn` / `Dismiss` recovery for unconfirmed runs |
+| Flexible model routing | Per-member `model` and `effort`, runtime model switching with warm forks, and optional `fallbackModel` quota failover |
 | Safe isolation & cleanup | Read-only default workers, optional detached Git `worktree` per writable worker, and uncommitted-safe worktree removal |
 
 <details>
@@ -250,8 +249,8 @@ The test suite uses mocked runners and makes **no paid API calls**. Opening view
 
 ## Troubleshooting notes
 
-- **Codex CLI update qualification gate:** `hive-swarm update --host codex --after-close` defaults to verifying Codex CLI `0.169.1`. Starting in `1.9.0`, you can pass `--allow-unqualified-cli` to apply a staged update on a newer Codex CLI build.
-- **Long-running worker turns:** Published `1.8.0` uses a 20-minute turn timeout; `1.9.0` upgrades this to an activity-resetting idle timeout (default 20 minutes of inactivity, 60-minute hard cap, configurable via `HIVE_SWARM_TURN_TIMEOUT_MS`).
+- **Codex CLI update qualification gate:** `hive-swarm update --host codex --after-close` defaults to verifying Codex CLI `0.169.1`. Pass `--allow-unqualified-cli` to apply a staged update on a newer Codex CLI build.
+- **Long-running worker turns:** Codex worker turns use an activity-resetting idle timeout (default 20 minutes of inactivity, 60-minute hard cap, configurable via `HIVE_SWARM_TURN_TIMEOUT_MS`).
 - **Windows sandbox process errors:** the installer and runtime strip inherited MSIX/session markers and set `features.prefer_mxc=false` on Windows so workers can run shell commands cleanly.
 - **Vitest `spawn EPERM` in Windows worker sandboxes:** pass `--configLoader native --pool threads` to avoid child-process pool restrictions.
 - **Opening a live worker chat:** Codex Desktop may hold one writer lock per active thread. Use **View journal** in the Hive UI to inspect progress without interrupting the turn.
