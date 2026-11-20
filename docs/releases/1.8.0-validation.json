@@ -1,9 +1,9 @@
 {
   "version": "1.8.0",
   "date": "2026-11-20",
-  "sourceCommit": "43cf08df66425de3638cb2f60fdf0321db9ebc36",
+  "sourceCommit": "09c0cbbb3a2d81c1480026827046ce3011257b75",
   "ci": {
-    "url": "https://github.com/snowmiku601-cpu/hive-swarm/actions/runs/44698242653",
+    "url": "https://github.com/snowmiku601-cpu/hive-swarm/actions/runs/44700608834",
     "jobs": 12,
     "passed": 12,
     "oses": [
@@ -74,23 +74,29 @@
     ]
   },
   "publication": {
+    "account": "snowmiku601",
+    "registry": "https://registry.npmjs.org",
     "published": [
       {
         "name": "hive-swarm",
         "version": "1.8.0",
         "distTag": "latest",
-        "integrityVerified": true
+        "fileCount": 25,
+        "size": 85756,
+        "integrity": "sha512-EPQv5pwrlHU5PsW+b2LF6Nn6fwPdhRpkkvFgHMoZI1ACMOHfhuPJDeXLxaJ4ThhMRmE4IT1cMe21/USXPp5srQ==",
+        "sourceBytesVerified": true
       },
       {
         "name": "dsh-hive-swarm",
         "version": "1.8.0",
         "distTag": "next",
-        "integrityVerified": true
+        "fileCount": 10,
+        "size": 31666,
+        "integrity": "sha512-74nNoZ7sh2OrjvDFMOnY19FSwTOgRqLFPcoI5kAlvF3HDi0EY+rtiYGquo/okQyZMB07GLfQdZSFpML1i7YlWQ==",
+        "sourceBytesVerified": true
       }
     ],
-    "tagged": false,
-    "account": "snowmiku601",
-    "namesPublished": true,
-    "registryHashesFetched": true
+    "license": "MIT",
+    "gitReleaseTagCreated": false
   }
 }
