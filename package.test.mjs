@@ -10,8 +10,8 @@ const root = dirname(fileURLToPath(import.meta.url));
 const expectedFiles = [
   '.agents/plugins/marketplace.json', '.codex-plugin/plugin.json', '.mcp.json', 'LICENSE', 'README.md',
   'assets/hive-swarm-banner.svg', 'assets/hive-swarm-flow.svg', 'assets/hive-swarm-icon.png', 'assets/hive-swarm-icon.svg',
-  'board.css', 'board.html', 'board.js', 'cli.mjs', 'codex.mjs', 'engine.mjs', 'hive-bees.js', 'hive-graph.js',
-  'package.json', 'server.mjs', 'skills/swarm/SKILL.md', 'skills/swarm/agents/openai.yaml', 'worktrees.mjs',
+  'board.css', 'board.html', 'board.js', 'cli.mjs', 'codex.mjs', 'core.mjs', 'engine.mjs', 'hive-bees.js', 'hive-graph.js',
+  'installer.mjs', 'package.json', 'run-store.mjs', 'server.mjs', 'skills/swarm/SKILL.md', 'skills/swarm/agents/openai.yaml', 'worktrees.mjs',
 ].sort();
 
 // File descriptors also work in Windows shells where creating subprocess pipes is unavailable.
@@ -167,6 +167,8 @@ test('the package exposes an ESM CLI and library without install side effects or
   assert.equal(manifest.bin['hive-swarm'], './cli.mjs');
   assert.equal(manifest.exports['./engine'], './engine.mjs');
   assert.equal(manifest.exports['./worktrees'], './worktrees.mjs');
+  assert.equal(manifest.exports['./core'], './core.mjs');
+  assert.equal(manifest.exports['./run-store'], './run-store.mjs');
   assert.equal(manifest.engines.node, '^22.19.0 || >=24.2.0');
   assert.deepEqual(manifest.dependencies ?? {}, {});
   assert.deepEqual(manifest.optionalDependencies ?? {}, {});
@@ -174,6 +176,16 @@ test('the package exposes an ESM CLI and library without install side effects or
     assert.equal(manifest.scripts?.[hook], undefined, hook);
   }
   assert.deepEqual([...manifest.files, 'package.json', 'README.md', 'LICENSE'].sort(), expectedFiles);
+});
+
+test('real npm packaging uses the compact registry README while preserving source documentation',async t=>{
+  const {packCore}=await import('./scripts/pack-core.mjs');const {directory,source}=packageFixture(t);
+  const sourceText='Source-only gallery documentation '+directory;const compact='# Hive Swarm registry README\nNo unpackaged gallery assets.\n';
+  writeFileSync(join(source,'README.md'),sourceText);writeFileSync(join(source,'README.npm.md'),compact);
+  const result=await packCore({packageDirectory:source,outputDirectory:join(directory,'packed')});
+  const {gunzipSync}=await import('node:zlib');const tar=gunzipSync(readFileSync(result.tarball));
+  assert.equal(tar.includes(Buffer.from(compact)),true);assert.equal(tar.includes(Buffer.from(sourceText)),false);
+  assert.equal(readFileSync(join(source,'README.md'),'utf8'),sourceText);assert.equal(result.files.includes('README.npm.md'),false);
 });
 
 test('a real core tarball contains only exact public files and runs from a path with spaces and Unicode', {timeout: 60000}, async t => {

@@ -2,20 +2,16 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync,writeFileSync } from 'node:fs';
 import { delimiter, dirname, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
+import { CORE_PACKAGE_FILES, matchesPackageFiles, validIdentity } from '../installer.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const coreFiles = [
-  '.agents/plugins/marketplace.json', '.codex-plugin/plugin.json', '.mcp.json', 'LICENSE', 'README.md',
-  'assets/hive-swarm-banner.svg', 'assets/hive-swarm-flow.svg', 'assets/hive-swarm-icon.png', 'assets/hive-swarm-icon.svg',
-  'board.css', 'board.html', 'board.js', 'cli.mjs', 'codex.mjs', 'engine.mjs', 'hive-bees.js', 'hive-graph.js',
-  'package.json', 'server.mjs', 'skills/swarm/SKILL.md', 'skills/swarm/agents/openai.yaml', 'worktrees.mjs',
-].sort();
+const coreFiles = CORE_PACKAGE_FILES;
 
-function npmCli() {
+export function npmCli() {
   const candidates = [process.env.npm_execpath, join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js')];
   for (const directory of (process.env.PATH || process.env.Path || '').split(delimiter)) {
     for (const name of ['npm', 'npm.cmd']) {
@@ -29,7 +25,7 @@ function npmCli() {
   return found;
 }
 
-function archiveFiles(bytes) {
+export function archiveFiles(bytes) {
   const tar = gunzipSync(bytes, {maxOutputLength: 2 * 1024 * 1024});
   assert.ok(tar.length >= 1024 && tar.length % 512 === 0, 'Invalid tar block padding or missing terminator');
   const files = new Map();
@@ -65,7 +61,7 @@ function archiveFiles(bytes) {
   throw Error('Missing tar terminator: two zero blocks required');
 }
 
-function prepareOutputDirectory(directory) {
+export function prepareOutputDirectory(directory) {
   let current = parse(directory).root;
   for (const part of relative(current, directory).split(sep).filter(Boolean)) {
     current = join(current, part);
@@ -86,12 +82,21 @@ export async function packCore({packageDirectory = root, outputDirectory = join(
   packageDirectory = resolve(packageDirectory);
   outputDirectory = resolve(outputDirectory);
   const manifest = JSON.parse(readFileSync(join(packageDirectory, 'package.json'), 'utf8'));
-  assert.deepEqual([...manifest.files, 'package.json', 'README.md', 'LICENSE'].sort(), coreFiles, 'Core npm allowlist drift');
+  assert.ok(validIdentity(manifest), 'Invalid Hive Swarm npm identity');
+  assert.ok(matchesPackageFiles(manifest.files), 'Core npm allowlist drift');
   for (const file of coreFiles) assert.ok(lstatSync(join(packageDirectory, file)).isFile(), `Required public source file: ${file}`);
   prepareOutputDirectory(outputDirectory);
   const staging = mkdtempSync(join(outputDirectory, '.pack-core-'));
   const owned = lstatSync(staging);
   try {
+    const sourceDirectory=join(staging,'source');mkdirSync(sourceDirectory,{mode:0o700});
+    for(const file of coreFiles){const target=join(sourceDirectory,file);mkdirSync(dirname(target),{recursive:true});
+      const origin=join(packageDirectory,file);let current=packageDirectory;
+      for(const part of file.split('/')){current=join(current,part);assert.ok(!lstatSync(current).isSymbolicLink(),'Refusing linked package source: '+current);}
+      writeFileSync(target,readFileSync(origin),{flag:'wx',mode:file==='cli.mjs'?0o755:0o644});}
+    const compactReadme=join(packageDirectory,'README.npm.md');
+    if(existsSync(compactReadme)){assert.ok(lstatSync(compactReadme).isFile()&&!lstatSync(compactReadme).isSymbolicLink(),'Registry README must be a regular file.');
+      writeFileSync(join(sourceDirectory,'README.md'),readFileSync(compactReadme,'utf8').replaceAll('__HIVE_SWARM_VERSION__',manifest.version));}
     let out, err;
     let result;
     try {
@@ -100,7 +105,7 @@ export async function packCore({packageDirectory = root, outputDirectory = join(
       result = spawnSync(process.execPath, [npmCli(), 'pack', '--offline', '--ignore-scripts', '--json',
         '--pack-destination', staging, '--userconfig', join(staging, 'empty-user.npmrc'),
         '--globalconfig', join(staging, 'empty-global.npmrc')], {
-        cwd: packageDirectory, windowsHide: true, stdio: ['ignore', out, err], timeout: 30000,
+        cwd: sourceDirectory, windowsHide: true, stdio: ['ignore', out, err], timeout: 30000,
         env: {...process.env, npm_config_cache: join(staging, '.npm-cache'), npm_config_update_notifier: 'false'},
       });
     } finally {
@@ -122,7 +127,7 @@ export async function packCore({packageDirectory = root, outputDirectory = join(
     assert.equal(createHash('sha1').update(bytes).digest('hex'), metadata.shasum, 'npm archive shasum mismatch');
     const files = archiveFiles(bytes);
     assert.deepEqual([...files.keys()].sort(), coreFiles, 'Actual tarball differs from the exact public allowlist');
-    for (const [file, contents] of files) assert.deepEqual(contents, readFileSync(join(packageDirectory, file)), `Archive/source mismatch: ${file}`);
+    for (const [file, contents] of files) assert.deepEqual(contents, readFileSync(join(sourceDirectory, file)), `Archive/source mismatch: ${file}`);
     assert.ok(metadata.files.find(file => file.path === 'cli.mjs')?.mode & 0o111, 'npm bin must be executable');
     return {tarball, files: [...files.keys()].sort(), size: bytes.length, unpackedSize: metadata.unpackedSize,
       integrity, verifiedFiles: files.size};

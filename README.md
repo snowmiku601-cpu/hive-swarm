@@ -4,10 +4,9 @@
   <p><strong>One goal. A team of agents. A shared board for every handoff.</strong></p>
 
   <p>
-    <img src="https://img.shields.io/badge/runtime-Node.js%20%E2%89%A522.5-75baef?style=flat-square" alt="Node.js 22.5 or newer" />
-    <img src="https://img.shields.io/badge/dependencies-0-55cbb2?style=flat-square" alt="Zero dependencies" />
-    <img src="https://img.shields.io/badge/tests-121%20passing-91d4a2?style=flat-square" alt="121 tests passing" />
-    <img src="https://img.shields.io/badge/version-1.7.4-f6bc55?style=flat-square" alt="Version 1.7.4" />
+    <img src="https://img.shields.io/badge/runtime-Node.js%2022.19%20%7C%2024.2%2B-75baef?style=flat-square" alt="Node.js 22.19 or 24.2 and newer" />
+    <img src="https://img.shields.io/badge/core_runtime_dependencies-0-55cbb2?style=flat-square" alt="Zero core runtime dependencies" />
+    <img src="https://img.shields.io/badge/version-1.8.0--candidate-f6bc55?style=flat-square" alt="Version 1.8.0 release candidate" />
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-b3ce64?style=flat-square" alt="MIT license" /></a>
   </p>
 
@@ -24,13 +23,41 @@
 
 Hive Swarm is a lightweight, single-folder **coordination engine and UI for AI agents**. Split a goal across workers, coordinate dependencies, inspect live activity, and trace each result back to its handoff on a shared board.
 
-The MCP core is independent of the worker harness. **The current runtime adapter supports Codex Desktop and Codex CLI.** Future adapters can connect the same board to Claude Code, DeepSeek Harness, OpenCode, Pi, ZCode, Kimi Code, and other agent harnesses.
+The core is independent of the worker harness. **The established adapter supports Codex Desktop and Codex CLI.** The separate `dsh-hive-swarm` candidate adds native DeepSeek Harness sessions and React views for DSH `0.2.2-rc.5`; it remains experimental until the Desktop behavior gates below pass.
 
-The runtime stays deliberately small: pure Node.js ESM, built-in `node:sqlite`, and no third-party packages or `npm install` step.
+The core runtime stays small: Node.js ESM, built-in `node:sqlite`, and zero third-party runtime dependencies. Development and the DSH client build use pinned development dependencies; React is supplied by DSH at runtime.
 
 ## Quick Start
 
-Requires **Codex Desktop or Codex CLI** and **Node.js >= 22.5** with built-in `node:sqlite`. The Windows installer can also find the Node runtime bundled with Codex Desktop.
+Requires **Codex Desktop or Codex CLI** and **Node.js `^22.19.0 || >=24.2.0`**. The older 22.5 claim was insufficient for the executable ESM entry point. The Windows source wrapper also looks for a compatible Node runtime bundled with Codex Desktop.
+
+### npm candidate and lifecycle commands
+
+Version `1.8.0` is a local release candidate, not a claim that these package names are published or owned. Build the exact verified artifact with `npm run pack:core`; it prints the unique `.tgz` path. Validate that artifact before any registry publication. The release helper uses a compact npm README and excludes the screenshot gallery, tests and local data.
+
+The packaged CLI provides these explicit host operations:
+
+```sh
+node cli.mjs doctor --host codex
+node cli.mjs install --host codex
+node cli.mjs update --host codex
+# After active work finishes and Codex closes:
+node cli.mjs update --host codex --after-close
+node cli.mjs uninstall --host codex
+```
+
+Plain `npm install` has no registration hook. Installation copies the verified files into `<CODEX_HOME>/hive-swarm/versions/<version>/marketplace`, then uses the supported Codex plugin CLI. It never registers the transient npm cache. Local version switching and rollback were exercised with Codex CLI `0.169.1` in an isolated home. Other CLI versions keep the verified candidate staged and explain the qualification requirement. Active owned Swarm turns block replacement; idle owned services use authenticated graceful shutdown. Uninstall retains Swarm databases, journals and verified release copies. Existing unmanaged installations are refused with migration guidance rather than overwritten.
+
+| Host | Candidate status | Worker and UI model |
+| --- | --- | --- |
+| Codex Desktop / CLI | Existing adapter; npm lifecycle locally qualified on CLI 0.169.1 | Existing Codex sessions, MCP App and standalone board |
+| DeepSeek Harness 0.2.2-rc.5 | Experimental; Desktop activation and model-backed smoke still require qualification | Native DSH sessions, Start card, right tab and full React panel |
+
+DSH uses its own profile manager. `hive-swarm install --host dsh` prints the corresponding DSH command and never edits a DSH profile. After the DSH release is qualified and published, installation uses `dsh plugin --profile desktop add dsh-hive-swarm@1.8.0` with Desktop closed. Keep other plugins and profile state under DSH's management. The native candidate stores only Hive state under `<profileContext.dir>/.hive-swarm`, separately from Codex.
+
+The [1.8.0 qualification report](docs/releases/1.8.0-qualification.md) records the exact artifacts, completed checks and remaining Desktop, model-backed, CI and publication gates.
+
+In DSH, `/hive-swarm` coordinates explicit user-requested work. The bee-marked **Swarm** Start card and the full panel share Overview, Board, Members, Graph and owned Journal data. Opening views never starts a worker. Unknown outcomes after a crash remain visible for reconciliation; they never automatically re-prompt a possibly accepted paid turn. Read-only and workspace-write workers require the corresponding enforcing native preset services.
 
 ### Windows (PowerShell)
 
@@ -43,7 +70,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 Useful options:
 
 - `-RunTests` runs the complete unit/integration suite with mocked runners before installing.
-- `-NodePath "C:\path\to\node.exe"` selects a specific Node 22.5+ binary.
+- `-NodePath "C:\path\to\node.exe"` selects a compatible Node 22.19 or 24.2+ binary.
+- `-CodexPath "C:\path\to\codex.exe"` selects the Codex CLI for this invocation.
 
 ### macOS / Linux
 
@@ -56,7 +84,7 @@ chmod +x ./install.sh
 
 Pass `--test` to run the suite first: `./install.sh --test`.
 
-After installing, open a new Codex Desktop chat so the fresh MCP session loads `v1.7.4`. An older daemon with active turns refuses shutdown; let those turns finish before upgrading.
+After installing, open a new Codex Desktop chat so the fresh MCP session loads the candidate version. Let active turns finish before upgrading.
 
 ## See it in action
 

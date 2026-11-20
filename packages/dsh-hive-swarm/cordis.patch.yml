@@ -1,0 +1,4 @@
+# The Host entry and browser face share one plugin lifecycle.
+- insert:
+    - id: dsh-hive-swarm
+      name: dsh-hive-swarm

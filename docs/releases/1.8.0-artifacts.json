@@ -1,0 +1,21 @@
+{
+  "version": "1.8.0",
+  "status": "local candidate, unpublished",
+  "artifacts": [
+    {
+      "name": "hive-swarm",
+      "filename": "hive-swarm-1.8.0.tgz",
+      "size": 85704,
+      "integrity": "sha512-7KPoNSaUMam4Zr6QOE9r/5gRMImuS6AIkK/LmLpxgw+E4guqp7dhxjiP2e3yOqWaK9900+RnDgl7lKGQ/43sQQ==",
+      "files": 25
+    },
+    {
+      "name": "dsh-hive-swarm",
+      "filename": "dsh-hive-swarm-1.8.0.tgz",
+      "size": 31444,
+      "integrity": "sha512-+8AHLp+2F8cD/pE3Y24NvDeeEZRIhORnmQNp1wc2A2A3sHqGg6dQ4jdAqoJns3d2ahIPQnqT9+qKUPR83wFi9w==",
+      "files": 10,
+      "loaderBytes": 56322
+    }
+  ]
+}

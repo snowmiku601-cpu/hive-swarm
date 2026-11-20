@@ -5,29 +5,26 @@ import { homedir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { CORE_PACKAGE_FILES, installPaths, matchesPackageFiles, runInstaller, semver, supportedNode, validIdentity } from './installer.mjs';
 
 const packageRoot = dirname(fileURLToPath(import.meta.url));
 const nodeRange = '^22.19.0 || >=24.2.0';
-const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*)?(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?$/;
-const mandatoryFiles = [
-  '.agents/plugins/marketplace.json', '.codex-plugin/plugin.json', '.mcp.json',
-  'assets/hive-swarm-banner.svg', 'assets/hive-swarm-flow.svg', 'assets/hive-swarm-icon.png', 'assets/hive-swarm-icon.svg',
-  'board.css', 'board.html', 'board.js', 'cli.mjs', 'codex.mjs', 'engine.mjs', 'hive-bees.js', 'hive-graph.js',
-  'server.mjs', 'skills/swarm/SKILL.md', 'skills/swarm/agents/openai.yaml', 'worktrees.mjs',
-];
-const usage = `Usage: hive-swarm [--help | --version | doctor [--host codex]]
+const usage = `Usage: hive-swarm [--help | --version | doctor | install | update | uninstall]
+
+  hive-swarm install [--host codex]    Install from a persistent marketplace copy.
+  hive-swarm update [--host codex]     Verify and stage the npm package.
+  hive-swarm uninstall [--host codex]  Remove the managed plugin and marketplace. Keep Swarm data.
+  --after-close                      Apply a staged update after Swarm work finishes and Codex exits.
+  --bind-node                        Install or update using the current Node executable in Codex.
 
   --help, -h       Show this help.
   --version, -v    Show the npm package version.
   doctor          Check Node, SQLite, package integrity and the Codex CLI.
-  --host codex    Select the Codex host (the default for doctor).
+  --host codex    Select the Codex host (default).
+  --host dsh      Show commands for the DSH plugin manager.
 
 Doctor is read-only. It does not start models, register plugins or change host data.
 `;
-
-function validIdentity(manifest) {
-  return manifest?.name === 'hive-swarm' && typeof manifest.version === 'string' && semver.test(manifest.version);
-}
 
 async function appxPackages(env) {
   const powershell = join(env.SystemRoot || env.SYSTEMROOT || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
@@ -63,13 +60,6 @@ async function locateCodex({env, platform, queryAppxPackages}) {
     .map(item => join(item.InstallLocation, 'app', 'resources', 'codex.exe')).find(usable);
 }
 
-function supportedNode(version) {
-  const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(version);
-  if (!match) return false;
-  const [, major, minor] = match.map(Number);
-  return major === 22 && minor >= 19 || major === 24 && minor >= 2 || major > 24;
-}
-
 async function doctor(options) {
   const {stdout, packageDirectory, home, env, nodeVersion, runCommand, platform, queryAppxPackages} = options;
   let failed = false;
@@ -79,8 +69,8 @@ async function doctor(options) {
   };
   stdout.write(`Hive Swarm doctor (${runCommand ? 'explicit diagnostic runner' : 'read-only'})\n`);
   stdout.write(`Package directory: ${packageDirectory}\n`);
-  stdout.write(`Codex home: ${env.CODEX_HOME || join(home, '.codex')}\n`);
-  stdout.write(`Swarm data directory: ${env.HIVE_SWARM_DATA || env.TEAM_BOARD_DATA || join(env.LOCALAPPDATA || home, 'CodexTeamBoard')}\n`);
+  const {codexHome, store, data} = installPaths(home, env);
+  stdout.write(`Codex home: ${codexHome}\nPersistent marketplace store: ${store}\nSwarm data directory: ${data}\n`);
   check(supportedNode(nodeVersion), `Node.js ${nodeVersion}; required ${nodeRange}`);
   try {
     const {DatabaseSync} = await import('node:sqlite');
@@ -98,11 +88,8 @@ async function doctor(options) {
     const plugin = JSON.parse(readFileSync(join(packageDirectory, '.codex-plugin', 'plugin.json'), 'utf8'));
     check(validIdentity(manifest) && validIdentity(plugin) && manifest.version === plugin.version,
       `Version integrity: npm ${manifest.version}; Codex runtime ${plugin.version}`);
-    if (!Array.isArray(manifest.files) || manifest.files.length === 0 || new Set(manifest.files).size !== manifest.files.length ||
-      !manifest.files.every(file => typeof file === 'string' && file.length > 0 && !/[\\\0:*?\[\]{}]/.test(file) &&
-        file.split('/').every(part => part && part !== '.' && part !== '..')) ||
-      !mandatoryFiles.every(file => manifest.files.includes(file))) throw Error('Invalid mandatory file metadata');
-    const missing = [...new Set([...manifest.files, 'package.json', 'README.md', 'LICENSE'])].filter(file => {
+    if (!matchesPackageFiles(manifest.files)) throw Error('Invalid mandatory file metadata');
+    const missing = CORE_PACKAGE_FILES.filter(file => {
       try { return !statSync(join(packageDirectory, file)).isFile(); } catch { return true; }
     });
     check(missing.length === 0, missing.length ? `Package files missing: ${missing.join(', ')}` : 'Required package files present');
@@ -154,12 +141,53 @@ export async function main(argv, options = {}) {
       return 1;
     }
   }
-  if (argv[0] !== 'doctor') return fail(`Unknown command or arguments: ${argv.join(' ')}`);
-  if (!(argv.length === 1 || argv.length === 3 && argv[1] === '--host')) return fail('Expected doctor [--host codex].');
-  const host = argv[2] ?? 'codex';
-  if (host === 'dsh') return fail('DSH uses the separate dsh-hive-swarm native bundle and DSH plugin manager; core doctor currently supports Codex.');
-  if (host !== 'codex') return fail(`Unsupported host: ${host}. Expected codex.`);
-  return doctor({stdout, packageDirectory, home, env, nodeVersion, runCommand, platform, queryAppxPackages});
+  const [action, ...flags] = argv;
+  if (!['doctor', 'install', 'update', 'uninstall'].includes(action)) return fail('Unknown command: ' + action);
+  let host = 'codex';
+  let hostSpecified = false;
+  let afterClose = false;
+  let bindNode = false;
+  const allowsBinding = action === 'install' || action === 'update';
+  for (let i = 0; i < flags.length; i++) {
+    if (flags[i] === '--host' && !hostSpecified && i + 1 < flags.length) {
+      host = flags[++i];
+      hostSpecified = true;
+    } else if (flags[i] === '--after-close' && action === 'update' && !afterClose) {
+      afterClose = true;
+    } else if (flags[i] === '--bind-node' && allowsBinding && !bindNode) {
+      bindNode = true;
+    } else {
+      return fail('Expected ' + action + ' [--host codex|dsh]' + (action === 'update' ? ' [--after-close]' : '') +
+        (allowsBinding ? ' [--bind-node]' : '') + '.');
+    }
+  }
+  if (host === 'dsh') {
+    if (action === 'doctor') return fail('DSH uses the dsh-hive-swarm native bundle. Use the DSH plugin manager for your profile.');
+    const dshCommand = action === 'uninstall' ? 'remove dsh-hive-swarm' : 'add dsh-hive-swarm@<version>';
+    return fail('Manage the dsh-hive-swarm bundle through DSH. With Desktop closed, run dsh plugin --profile desktop ' + dshCommand + '.');
+  }
+  if (host !== 'codex') return fail('Unsupported host: ' + host + '. Expected codex or dsh.');
+  if (action === 'doctor') return doctor({stdout, packageDirectory, home, env, nodeVersion, runCommand, platform, queryAppxPackages});
+  try {
+    if (action !== 'uninstall' && !supportedNode(nodeVersion)) throw Error('Node.js ' + nodeRange + ' is required.');
+    const result = await runInstaller(action, {home, env, packageDirectory, afterClose, bindNode, runCommand,
+      resolveCommand: () => runCommand
+        ? env.HIVE_SWARM_CODEX || env.TEAM_BOARD_CODEX || (platform === 'win32' ? 'codex.exe' : 'codex')
+        : locateCodex({env, platform, queryAppxPackages}),
+    });
+    if (result.status === 'absent') stdout.write('No managed Hive Swarm installation found.\n');
+    else if (result.status === 'uninstalled') stdout.write('Removed the managed Codex plugin and marketplace. Swarm data and verified release copies retained.\n');
+    else {
+      const actionLabel = {installed: 'Installed', updated: 'Updated to', unchanged: 'Already installed'}[result.status];
+      stdout.write(actionLabel + ' Hive Swarm ' + result.version + ' from ' + result.path + '.\n');
+      if (result.status !== 'unchanged') stdout.write('Open a new Codex session when ready to load the plugin. ' +
+        (result.nodePath ? 'Codex will use Node.js at ' + result.nodePath + '.\n' : 'Codex needs Node.js on its PATH.\n'));
+    }
+    return 0;
+  } catch (error) {
+    stderr.write('hive-swarm: ' + error.message + '\n');
+    return 1;
+  }
 }
 
 if (import.meta.main) process.exitCode = await main(process.argv.slice(2));

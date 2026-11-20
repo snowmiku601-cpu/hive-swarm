@@ -1,0 +1,25 @@
+.dsh-hive-tool {
+  min-width: 0;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  line-height: 1.5;
+}
+.dsh-hive-tool-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.dsh-hive-tool-line span, .dsh-hive-tool details { color: var(--dsw-alias-label-secondary); }
+.dsh-hive-tool-line span[data-failed], .dsh-hive-tool [role="alert"] { color: var(--dsw-alias-state-error-primary); }
+.dsh-hive-tool button {
+  padding: 3px 9px;
+  min-height: 28px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.dsh-hive-tool button:not(:disabled):hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-hive-tool button:disabled { opacity: .55; cursor: default; }
+.dsh-hive-tool :focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+.dsh-hive-tool p, .dsh-hive-tool details { margin: 4px 0 0; overflow-wrap: anywhere; }
+.dsh-hive-tool summary { cursor: pointer; }
+.dsh-hive-tool pre { margin: 6px 0 0; max-height: 14rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

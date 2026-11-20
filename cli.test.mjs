@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import {removeFixture as rmSync} from './test-support.mjs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -57,20 +58,43 @@ test('help and version work without a host command or home directory', async () 
     else {
       assert.match(io.output().stdout, /Usage: hive-swarm/);
       assert.match(io.output().stdout, /doctor/);
-      assert.doesNotMatch(io.output().stdout, /hive-swarm (install|update|uninstall)/);
+      assert.match(io.output().stdout, /hive-swarm (install|update|uninstall)/);
     }
   }
 });
 
 test('unknown commands and malformed arguments return useful nonzero errors', async () => {
   const {main} = await cli();
-  for (const argv of [['wat'], ['install'], ['doctor', '--host'], ['doctor', '--host', 'other'],
+  for (const argv of [['wat'], ['install', '--host'], ['doctor', '--host'], ['doctor', '--host', 'other'],
     ['doctor', '--write'], ['--version', 'extra'], ['doctor', '--host', 'codex', '--host', 'codex']]) {
     const io = capture({runCommand: () => { assert.fail('invalid input must not invoke a host'); }});
     assert.equal(await main(argv, io.options), 2, JSON.stringify(argv));
     assert.match(io.output().stderr, /hive-swarm --help/);
     assert.equal(io.output().stdout, '');
   }
+});
+
+test('Codex lifecycle commands delegate with injectable host execution', async t => {
+  const {main} = await cli();
+  const paths = fixture(t);
+  const io = capture({...paths, env: {CODEX_HOME: paths.home, HIVE_SWARM_CODEX: 'codex fixture'},
+    runCommand: () => { assert.fail('an absent owned store and Codex home need no host command'); }});
+  assert.equal(await main(['uninstall', '--host', 'codex'], io.options), 0, io.output().stderr);
+  assert.match(io.output().stdout, /no managed.*installation/i);
+  assert.equal(existsSync(paths.home), false);
+});
+
+test('lifecycle --host dsh explains DSH-owned installation without invoking a command', async () => {
+  const {main} = await cli();
+  let invoked = false;
+  const io = capture({runCommand: () => { invoked = true; }});
+  assert.equal(await main(['install', '--host', 'dsh'], io.options), 2);
+  assert.equal(invoked, false);
+  assert.match(io.output().stderr, /dsh plugin.*dsh-hive-swarm/i);
+  assert.match(io.output().stderr, /profile/i);
+  assert.equal(await main(['update', '--host', 'dsh'], io.options), 2);
+  assert.equal(await main(['uninstall', '--host', 'dsh'], io.options), 2);
+  assert.match(io.output().stderr, /dsh plugin.*remove/i);
 });
 
 test('DSH doctor directs users to the native bundle without probing or changing a profile', async () => {

@@ -767,6 +767,7 @@ export class TeamBoard {
       throw error;
     }
     this.signals.emit(team.id,team);
+    this.signals.emit('update',team.id);
   }
 
   record(team, author, body, targets = [], kind = 'status', channel = 'main') {
@@ -915,6 +916,7 @@ export class TeamBoard {
         if (activity.steps.length>10) activity.steps.shift();
       }
       this.signals.emit('activity:'+id);
+      this.signals.emit('update',id);
     };
     this.save(team);
     const remember = details => {

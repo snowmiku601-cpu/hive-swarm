@@ -1,0 +1,24 @@
+# Hive Swarm
+
+Version **__HIVE_SWARM_VERSION__**. Coordinate dependent agent tasks with a shared board, live activity, owned journals and message-flow graphs.
+
+The core and Codex runtime use Node.js ESM, built-in SQLite and **zero third-party runtime dependencies**. Required Node range: `^22.19.0 || >=24.2.0`.
+
+This artifact is a release candidate until its publisher approves the exact package and registry identity. Do not infer public availability from the examples.
+
+## Codex lifecycle
+
+```sh
+hive-swarm doctor --host codex
+hive-swarm install --host codex
+hive-swarm update --host codex
+# Finish active work and close Codex before applying a staged update:
+hive-swarm update --host codex --after-close
+hive-swarm uninstall --host codex
+```
+
+`npm install` only installs package files; it does not register a plugin. The explicit CLI creates an immutable persistent marketplace copy and delegates host changes to supported Codex CLI commands. Local switching/rollback is qualified for CLI `0.169.1`; other versions retain the stage and report the qualification requirement. Active owned turns block replacement. Uninstall preserves the databases, journals and verified release copies. Doctor does not execute Codex by default or call models.
+
+DSH uses the separate `dsh-hive-swarm` bundle and its own profile manager. Its `0.2.2-rc.5` native candidate remains experimental until Desktop and model-backed acceptance gates pass. `--host dsh` provides manager guidance without editing a DSH profile.
+
+[Full documentation and high-resolution screenshots](https://github.com/snowmiku601-cpu/hive-swarm#see-it-in-action) · [Source and issue tracker](https://github.com/snowmiku601-cpu/hive-swarm) · MIT license

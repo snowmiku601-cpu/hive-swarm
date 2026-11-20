@@ -17,6 +17,8 @@
   "exports": {
     "./engine": "./engine.mjs",
     "./worktrees": "./worktrees.mjs",
+    "./core": "./core.mjs",
+    "./run-store": "./run-store.mjs",
     "./package.json": "./package.json"
   },
   "files": [
@@ -32,16 +34,28 @@
     "board.js",
     "cli.mjs",
     "codex.mjs",
+    "core.mjs",
     "engine.mjs",
     "hive-bees.js",
     "hive-graph.js",
+    "installer.mjs",
+    "run-store.mjs",
     "server.mjs",
     "skills/swarm/SKILL.md",
     "skills/swarm/agents/openai.yaml",
     "worktrees.mjs"
   ],
   "scripts": {
-    "test": "node --test ./*.test.mjs",
-    "pack:core": "node scripts/pack-core.mjs"
+    "test": "node --test --test-concurrency=2 ./*.test.mjs packages/dsh-hive-swarm/*.test.mjs",
+    "pack:core": "node scripts/pack-core.mjs",
+    "pack:dsh": "node scripts/pack-dsh.mjs",
+    "build:dsh": "node scripts/build-dsh-client.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-test-renderer": "18.3.1",
+    "jsdom": "26.1.0"
   }
 }

@@ -1,6 +1,7 @@
 import {mkdirSync,realpathSync} from 'node:fs';
 import {join} from 'node:path';
-import {TeamBoard,configuredEffort,pendingWaitFor,stallIssues,teamPhase,visibleChannels} from './engine.mjs';
+import {randomUUID} from 'node:crypto';
+import {TeamBoard,boardWaitTimeout,configuredEffort,pendingWaitFor,stallIssues,teamPhase,visibleChannels} from './engine.mjs';
 import {openWorktree,removeWorktree,worktreeSource} from './worktrees.mjs';
 
 const reads=new Set(['list_teams','board_status','board_history','read_board','list_models','read_journal','open_swarm_panel','wait_for_board']);
@@ -29,9 +30,10 @@ export function presentTeam(team,{activity={},actor,host=team.host??'codex'}={})
   const visible=visibleChannels(selected);
   const events=visible?team.events.filter(event=>visible.includes(event.channel??'main')):team.events;
   const recovery=team.members.filter(m=>m.recoveryRequired).map(m=>({kind:'recovery',member:m.name,text:'@'+m.name+' outcome unconfirmed. Inspect the owned session before continuing.'}));
+  const input=team.members.filter(m=>m.inputRequired).map(m=>({kind:'input',member:m.name,text:'@'+m.name+' needs your permission or input in its owned DSH session.'}));
   return {id:team.id,host,title:team.title,cwd:team.cwd,task:team.task,model:team.model,effort:team.effort,
     paused:team.paused,turns:team.turns,turnLimit:team.turnLimit,phase:teamPhase(team),channels:team.channels,activity,
-    attention:[...recovery,...stallIssues(team)],events:events.slice(-60),
+    attention:[...input,...recovery,...stallIssues(team)],events:events.slice(-60),
     members:team.members.map(member=>({name:member.name,role:member.role,group:member.group,brief:member.brief,
       status:member.status,writable:member.writable,threadId:member.threadId,
       session:member.threadId?{host,id:member.threadId}:null,waitFor:member.waitFor,pendingWaitFor:pendingWaitFor(team,member),
@@ -49,7 +51,7 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
   const inflight=new Map();let closing;let closed=false;
   const board=new TeamBoard(join(dataDirectory,'teams.sqlite'),async request=>{
     if(request.member.worktree) {
-      const workspace=await openWorktree(dataDirectory,request.team.worktreeSource,request.team.id,request.member,{mustExist:Boolean(request.member.workspace)});
+      const workspace=await openWorktree(dataDirectory,request.team.worktreeSource,request.team.id,request.member.name,{mustExist:Boolean(request.member.workspace)});
       request.remember({workspace});request.member.workspace=workspace;
     }
     return runner.run(request);
@@ -58,7 +60,9 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
   const find=board.db.prepare('SELECT * FROM application_commands WHERE id=?');
   const reserve=board.db.prepare("INSERT INTO application_commands VALUES (?, ?, ?, 'pending', NULL)");
   const finish=board.db.prepare('UPDATE application_commands SET state=?,value=? WHERE id=?');
-  const view=(team,actor)=>presentTeam(team,{activity:board.activityFor(team.id),actor,host});
+  const epoch=randomUUID();const revisions=new Map();let revision=0;
+  board.subscribe('update',id=>revisions.set(id,++revision));
+  const view=(team,actor)=>({...presentTeam(team,{activity:board.activityFor(team.id),actor,host}),revision:epoch+':'+(revisions.get(team.id)??0)});
   const ensureOpen=()=>{if(closed||closing)throw Error('Swarm application is closing.');};
   async function allowed(cwd,context={}) {
     let canonical;try{canonical=realpathSync(cwd);}catch{throw Error('Workspace is unavailable.');}
@@ -167,9 +171,29 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
   }
   async function subscribe(teamId,listener,context={}) {
     ensureOpen();await ownTeam(teamId,context);const actor=actorOf(context.actor,{teamId});let active=true;
-    const release=board.subscribe(teamId,team=>{if(active&&!context.signal?.aborted)listener(view(team,actor?.member));});
+    const release=board.subscribe('update',id=>{if(id===teamId&&active&&!context.signal?.aborted)listener(view(board.get(id),actor?.member));});
     const unsubscribe=()=>{active=false;release();context.signal?.removeEventListener('abort',unsubscribe);};
     context.signal?.addEventListener('abort',unsubscribe,{once:true});if(context.signal?.aborted)unsubscribe();return unsubscribe;
+  }
+  async function waitForUpdate({teamId,since=0,revision:previous,timeoutSec=45},context={}) {
+    ensureOpen();await ownTeam(teamId,context);const actor=actorOf(context.actor,{teamId});
+    if(!Number.isSafeInteger(since)||since<0)throw Error('Invalid update cursor.');
+    const duration=boardWaitTimeout(timeoutSec)*1000;
+    return new Promise((resolve,reject)=>{
+      let done=false,timer;
+      const current=reason=>{const page=board.readHistory(teamId,{after:since,limit:100,actor:actor?.member});
+        const status=view(board.get(teamId),actor?.member);return {...page,status,revision:status.revision,wokeBy:reason};};
+      const finish=(value,error)=>{if(done)return;done=true;clearTimeout(timer);release();releaseClose();
+        context.signal?.removeEventListener('abort',abort);if(error)reject(error);else resolve(value);};
+      const release=board.subscribe('update',id=>{if(id===teamId)finish(current('update'));});
+      const releaseClose=board.subscribe('close',()=>finish(null,Error('Swarm application closed.')));
+      const abort=()=>finish(null,context.signal.reason??Error('Update wait cancelled.'));
+      context.signal?.addEventListener('abort',abort,{once:true});
+      if(context.signal?.aborted)return abort();
+      const first=current('post');
+      if(first.posts.length||(previous!=null&&previous!==first.revision))return finish(first);
+      timer=setTimeout(()=>finish(current('timeout')),duration);
+    });
   }
   function close() {
     if(closing)return closing;if(closed)return Promise.resolve({quiescent:true});
@@ -182,5 +206,5 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
       return {quiescent};
     })();return closing;
   }
-  return {board,host,snapshot,command,subscribe,close};
+  return {board,host,snapshot,command,subscribe,waitForUpdate,close};
 }

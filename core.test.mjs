@@ -23,6 +23,22 @@ function fixture(t,options={}) {
 }
 const startArgs=()=>({cwd:workspace,task:'Controlled native application task',members:[{name:'builder',brief:'Inspect fixture only.'}]});
 
+test('the host application dispatches a worktree worker using its member name and persisted owned checkout',async t=>{
+  const {mkdirSync,writeFileSync,readFileSync}=await import('node:fs');const {execFileSync}=await import('node:child_process');
+  const root=mkdtempSync(join(tmpdir(),'hive-core-worktree-'));const repo=join(root,'repo');mkdirSync(repo);
+  const git=(...args)=>execFileSync('git',['-C',repo,...args],{stdio:'pipe',windowsHide:true});
+  git('init','-q');writeFileSync(join(repo,'value.txt'),'committed fixture');git('add','.');
+  git('-c','user.name=Hive tests','-c','user.email=fixture@example.test','-c','commit.gpgsign=false','commit','-qm','base');
+  const calls=[];const app=createSwarmApplication({dataDirectory:join(root,'state'),host:'deepseek-harness',
+    workspaceAllowed:()=>true,runner:{run:async request=>{calls.push(request);return {state:'done',message:'Checkout verified.',notify:[],waitFor:[]}},close:async()=>{}}});
+  try{const team=await app.command('start_team',{cwd:repo,task:'Owned worktree',members:[{name:'builder',brief:'Inspect checkout',worktree:true}]});
+    for(let i=0;i<500&&!calls.length;i++){if(app.board.get(team.id).members[0].status==='failed')break;await delay(10)}
+    assert.equal(calls.length,1,app.board.get(team.id).events.at(-1).text);
+    assert.equal(readFileSync(join(calls[0].member.workspace.cwd,'value.txt'),'utf8'),'committed fixture');
+    assert.notEqual(calls[0].member.workspace.cwd,repo);
+  }finally{await app.close();rmSync(root,{recursive:true,force:true})}
+});
+
 test('application reads never start models and workspace denial happens before admission',async t=>{
   const {app,calls}=fixture(t);
   assert.deepEqual(await app.snapshot(),{teams:[],team:null});
@@ -85,4 +101,19 @@ test('shutdown suspends dispatch beyond the forty-team catalog window',async t=>
   await delay(5);assert.equal(calls.length,42);
   await app.close();await delay(5);
   assert.equal(calls.length,42);
+});
+
+test('native view waits receive live activity without a new post or model turn',async t=>{
+  const {app,calls}=fixture(t);
+  const team=await app.command('start_team',startArgs());await delay(5);
+  const initial=(await app.snapshot({teamId:team.id})).team;
+  const head=initial.events.at(-1).seq;
+  const update=app.waitForUpdate({teamId:team.id,since:head,revision:initial.revision,timeoutSec:1});
+  await delay(5);
+  calls[0].onActivity({kind:'tool',label:'Inspect fixture',detail:'Started',time:new Date().toISOString()});
+  const value=await update;
+  assert.equal(value.head,head);
+  assert.notEqual(value.revision,initial.revision);
+  assert.equal(value.status.activity.builder.steps.at(-1).label,'Inspect fixture');
+  assert.equal(calls.length,1);
 });
