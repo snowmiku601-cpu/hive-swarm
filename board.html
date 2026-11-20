@@ -71,6 +71,10 @@
         <div class="panel-heading"><h2>Alerts</h2></div>
         <ul id="overview-alerts" class="overview-list"></ul>
       </section>
+      <section id="overview-threads-panel" class="panel" hidden>
+        <div class="panel-heading"><h2>Threads</h2></div>
+        <ul id="overview-threads" class="overview-list"></ul>
+      </section>
       <section class="panel">
         <div class="panel-heading"><h2>Member status</h2></div>
         <ul id="overview-members" class="overview-list"></ul>
@@ -156,7 +160,7 @@
   </section>
   <p id="notice" class="notice" role="status" aria-live="polite"></p>
 </main>
-<dialog id="member-transcript" class="transcript-dialog" aria-labelledby="transcript-title">
+<dialog id="member-transcript" class="transcript-dialog" closedby="any" aria-labelledby="transcript-title">
   <header class="transcript-header">
     <div><h2 id="transcript-title">Journal</h2><p id="transcript-member-status" class="minor"></p></div>
     <button id="close-transcript" type="button" autofocus>Close</button>

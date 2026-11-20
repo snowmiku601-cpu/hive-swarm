@@ -96,9 +96,36 @@ function postingChannel(team, member, requested) {
   return member?.channels.find(name=>team.channels.some(channel=>channel.name===name&&!channel.archived))??'main';
 }
 
+function normalizeTarget(value) {
+  return typeof value === 'string' ? value.trim().replace(/^@/, '').toLowerCase() : '';
+}
+
 function addressesIn(body,names) {
   const mentions = [...body.matchAll(/(?:^|[^a-z0-9_])@(#?[a-z][a-z0-9_-]*)/gi)].map(match=>match[1].toLowerCase());
-  return new Set([...names,...mentions]);
+  const listed = (names ?? []).map(normalizeTarget).filter(Boolean);
+  return new Set([...listed,...mentions]);
+}
+
+function normalizeThreads(threads, members) {
+  if (threads === undefined) return undefined;
+  if (!Array.isArray(threads) || threads.length > 8) throw Error('Outcome threads must be a list of at most 8 items.');
+  const roster = new Set(members.map(member => member.name));
+  const ids = new Set();
+  return threads.map(entry => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw Error('Each thread must be an object.');
+    const id = text(entry.id, 'Thread id', 40);
+    if (!/^[a-z][a-z0-9_-]{0,39}$/.test(id) || ids.has(id)) throw Error('Thread id must be a unique lowercase slug.');
+    ids.add(id);
+    const assigned = entry.members ?? [];
+    if (!Array.isArray(assigned)) throw Error('Thread members must be a list of member names.');
+    const validMembers = [...new Set(assigned.map(normalizeTarget).filter(name => roster.has(name)))];
+    return {
+      id,
+      title: text(entry.title, 'Thread title', 80),
+      goal: text(entry.goal, 'Thread goal', 240),
+      members: validMembers,
+    };
+  });
 }
 
 export function visibleChannels(member) {
@@ -131,8 +158,10 @@ function newMember(spec) {
     brief: text(spec.brief, 'Member brief', 4000),
     model: spec.model == null ? undefined : text(spec.model, 'Model', 100),
     effort: reasoningEffort(spec.effort),
+    ...(spec.fallbackModel ? {fallbackModel: text(spec.fallbackModel, 'Fallback model', 100)} : {}),
+    ...(spec.fallbackEffort !== undefined ? {fallbackEffort: spec.fallbackEffort === null ? null : reasoningEffort(spec.fallbackEffort)} : {}),
     writable: spec.writable === true, worktree: spec.worktree === true,
-    waitFor: [...new Set(waitFor)],channels:spec.channels ?? [],
+    waitFor: [...new Set(waitFor.map(normalizeTarget).filter(Boolean))],channels:spec.channels ?? [],
     status: waitFor.length ? 'waiting' : 'queued', threadId: null, inbox: [], completed: 0,
   };
 }
@@ -448,10 +477,14 @@ export class TeamBoard {
     if (members.some(member => member.worktree) && !worktreeSource) throw Error('A Git workspace is required for worktrees.');
 
     const task = text(input.task, 'Task', 8000);
+    const threads = normalizeThreads(input.threads, members);
     const team = {
       id: randomUUID(), host: this.host, cwd, task, title: text(input.title ?? task.slice(0, 95), 'Title', 95),
       ...(input.model ? {model: text(input.model, 'Model', 100)} : {}),
       effort: reasoningEffort(input.effort),
+      ...(input.fallbackModel ? {fallbackModel: text(input.fallbackModel, 'Fallback model', 100)} : {}),
+      ...(input.fallbackEffort !== undefined ? {fallbackEffort: input.fallbackEffort === null ? null : reasoningEffort(input.fallbackEffort)} : {}),
+      ...(threads?.length ? {threads} : {}),
       concurrency: integer(input.concurrency ?? 2, 1, 4, 'Concurrency'),
       turns: 0, turnLimit: integer(input.turnLimit ?? 24, 1, 100, 'Turn limit'),
       paused: false, members, channels:[{...main}], events: [], worktreeSource,
@@ -597,6 +630,45 @@ export class TeamBoard {
     return team;
   }
 
+  setTeamPlan(id, threads, actor) {
+    const team = this.get(id);
+    if (actor && this.peerMember(team, actor).role !== 'coordinator') {
+      throw Error('Only the user or coordinator can update outcome threads.');
+    }
+    const normalized = normalizeThreads(threads, team.members);
+    if (normalized?.length) team.threads = normalized;
+    else delete team.threads;
+    this.save(team);
+    return team;
+  }
+
+  resolveRecovery(id, name, {action = 'dismiss'} = {}) {
+    if (!['dismiss', 'retry'].includes(action)) throw Error('Choose dismiss or retry to resolve an unconfirmed outcome.');
+    const team = this.get(id);
+    const member = this.liveMember(team, name);
+    if (!member.recoveryRequired && !member.pendingRun) {
+      throw Error('@' + name + ' has no unconfirmed outcome to resolve.');
+    }
+    if (member.status === 'working') {
+      throw Error('@' + name + ' is currently running. Wait for the active turn to finish before resolving recovery.');
+    }
+    member.inbox = [...(member.inFlight ?? []), ...member.inbox].slice(-24);
+    delete member.recoveryRequired;
+    delete member.pendingRun;
+    delete member.inFlight;
+    delete member.inFlightCompletions;
+    delete member.declaredOutcome;
+    delete member.inputRequired;
+    delete team.monitorPhase;
+    member.status = action === 'retry' ? 'queued' : 'failed';
+    this.record(team, 'system', action === 'retry'
+      ? 'Resolved unconfirmed outcome for @' + name + ' and queued a fresh retry.'
+      : 'Dismissed unconfirmed outcome for @' + name + '. Mention @' + name + ' when ready to continue.', [name]);
+    this.save(team);
+    this.schedule(id);
+    return team;
+  }
+
   manageChannel(id, {op,channel,topic,member}, actor) {
     const team = this.get(id);
     const peer = actor && this.peerMember(team,actor);
@@ -636,6 +708,9 @@ export class TeamBoard {
     if (member.status === 'working' && member !== peer) {
       throw Error('Wait for @' + name + ' to finish its current turn before switching models.');
     }
+    if (resume === true && member.recoveryRequired) {
+      throw Error('Resolve the unconfirmed outcome for @' + name + ' before resuming.');
+    }
     member.model = text(model, 'Model', 100);
     if (effort !== undefined) member.effort = effort === null ? null : reasoningEffort(effort);
     delete member.activeModel;
@@ -673,9 +748,9 @@ export class TeamBoard {
     }
   }
 
-  readPosts(id, {after, limit = 10, channel, actor} = {}) {
+  readPosts(id, {after, limit = 10, channel, actor, mentionsOnly = false} = {}) {
     integer(limit, 1, 20, 'Post limit');
-    return this.readHistory(id,{after,limit,channel,actor});
+    return this.readHistory(id,{after,limit,channel,actor,mentionsOnly});
   }
 
   readHistory(id, {after, limit = 100, channel, actor, mentionsOnly = false} = {}) {
@@ -940,7 +1015,10 @@ export class TeamBoard {
         const message = String(error?.message ?? error).slice(0, 6000);
         const quota = error?.blockedBy === 'quota' ||
           /\b429\b|too many requests|rate.limit|insufficient.quota|quota exceeded|usage limit/i.test(message);
-        this.settle(id, member.name, completions, controller.signal.aborted ? cancelled() : {state: quota ? 'quota' : 'failed', message}, {turn:request.lastTurn});
+        const recoveryRequired = error?.recoveryRequired === true;
+        this.settle(id, member.name, completions, controller.signal.aborted
+          ? cancelled()
+          : {state: quota ? 'quota' : 'failed', message, ...(recoveryRequired ? {recoveryRequired: true} : {})}, {turn:request.lastTurn});
       },
     ).finally(() => {if (this.runningTurns.get(key) === run) this.runningTurns.delete(key);});
     this.schedule(id);
@@ -1017,9 +1095,10 @@ export class TeamBoard {
     const team = this.get(id);
     const member = team.members.find(m => m.name === name);
     const expectedTurn = turn ?? member?.lastTurn;
+    const preserveRecovery = (result?.state === 'failed' || result?.state === 'quota') && result?.recoveryRequired === true;
     if (!member || (turn != null && member.lastTurn !== turn) ||
         (expectedTurn != null && member.lastSettledTurn === expectedTurn) ||
-        (member.recoveryRequired && !recovery)) return false;
+        (member.recoveryRequired && !recovery && !preserveRecovery)) return false;
     const live=this.activity.get(id);
     live?.delete(name);
     if (!live?.size) this.activity.delete(id);
@@ -1033,8 +1112,20 @@ export class TeamBoard {
     const failed = result.state === 'failed' || result.state === 'quota';
     const names = new Set(team.members.filter(activeMember).map(m => m.name));
     member.status = result.state;
-    member.waitFor = result.state === 'waiting' ? [...new Set(result.waitFor)].filter(n => n !== name && names.has(n)) : [];
+    member.waitFor = result.state === 'waiting'
+      ? [...new Set(result.waitFor.map(normalizeTarget))].filter(n => n && n !== name && names.has(n))
+      : [];
     member.waitAfter = result.state === 'waiting' ? completions : {};
+    delete member.inputRequired;
+    if (preserveRecovery) {
+      member.recoveryRequired = true;
+      const message = result.message.slice(0, 6000);
+      this.record(team, name, message);
+      this.save(team);
+      this.signals.emit('activity:'+id);
+      this.schedule(id);
+      return true;
+    }
     if (failed) member.inbox = [...(member.inFlight ?? []), ...member.inbox].slice(-24);
     if (result.state === 'done') member.completed = (member.completed ?? 0) + 1;
     delete member.inFlight;
@@ -1050,7 +1141,20 @@ export class TeamBoard {
       this.record(team, 'system', '@' + member.name + ' retired after turn.', [member.name]);
     }
     const message = result.message.slice(0, 6000);
-    if (failed) this.record(team, name, message);
+    if (failed) {
+      this.record(team, name, message);
+      const fallback = member.fallbackModel ?? team.fallbackModel;
+      const activeModel = member.model ?? team.model;
+      if (result.state === 'quota' && fallback && fallback !== activeModel && activeMember(member)) {
+        member.model = fallback;
+        member.effort = member.fallbackEffort !== undefined ? member.fallbackEffort
+          : team.fallbackEffort !== undefined ? team.fallbackEffort : null;
+        delete member.activeModel;
+        delete member.activeEffort;
+        member.status = 'queued';
+        this.record(team, 'system', '@' + member.name + ' hit model quota; switching to fallback model ' + fallback + '.', [member.name]);
+      }
+    }
     else {
       const report = this.deliver(team, name, message, result.notify, postingChannel(team,member));
       if (result.state === 'done') member.lastReport = report;

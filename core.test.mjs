@@ -117,3 +117,41 @@ test('native view waits receive live activity without a new post or model turn',
   assert.equal(value.status.activity.builder.steps.at(-1).label,'Inspect fixture');
   assert.equal(calls.length,1);
 });
+
+test('start_team, add_member and set_member_model validate inherited effort and reset incompatible effort on model switch',async t=>{
+  const directory=mkdtempSync(join(tmpdir(),'hive-core-models-'));
+  const runner={
+    listModels:async()=>[
+      {id:'fixture/heavy',label:'Heavy',efforts:['low','max'],defaultEffort:'max'},
+      {id:'fixture/lite',label:'Lite',efforts:['low'],defaultEffort:'low'},
+    ],
+    run:async()=>({state:'done',message:'[done] Verified.',notify:[],waitFor:[]}),
+    close:async()=>{},
+  };
+  const app=createSwarmApplication({dataDirectory:directory,host:'deepseek-harness',runner,workspaceAllowed:async cwd=>cwd===workspace});
+  t.after(async()=>{await app.close();rmSync(directory,{recursive:true,force:true});});
+  await assert.rejects(app.command('start_team',{cwd:workspace,task:'Check effort validation',model:'fixture/heavy',effort:'max',
+    members:[{name:'builder',brief:'Inspect',model:'fixture/lite'}]}),/effort/i);
+  const created=await app.command('start_team',{cwd:workspace,task:'Check effort switch',model:'fixture/heavy',effort:'max',
+    members:[{name:'builder',brief:'Inspect'}]});
+  await delay(20);
+  await assert.rejects(app.command('add_member',{teamId:created.id,member:{name:'helper',brief:'Check',model:'fixture/lite'}}),/effort/i);
+  const switched=await app.command('set_member_model',{teamId:created.id,member:'builder',model:'fixture/lite'});
+  assert.equal(switched.members[0].model,'fixture/lite');
+  assert.equal(switched.members[0].effort,undefined);
+});
+
+test('resolve_recovery is owner-only and unblocks a member with an unconfirmed run',async t=>{
+  const {app}=fixture(t);
+  const team=await app.command('start_team',startArgs());await delay(10);
+  const saved=app.board.get(team.id);
+  saved.members[0].status='failed';
+  saved.members[0].recoveryRequired=true;
+  saved.members[0].pendingRun={turn:1,requestId:'stuck-1'};
+  app.board.save(saved);
+  await assert.rejects(app.command('resolve_recovery',{teamId:team.id,member:'builder',action:'dismiss'},
+    {actor:{teamId:team.id,member:'builder',turn:1}}),/not available|running turn/i);
+  const resolved=await app.command('resolve_recovery',{teamId:team.id,member:'builder',action:'dismiss'});
+  assert.equal(resolved.members[0].recoveryRequired,false);
+  assert.equal(resolved.members[0].status,'failed');
+});

@@ -357,3 +357,38 @@ test('launch strips host MSIX and session variables from the app-server environm
   assert.ok(args.includes('plugins."team-board@local-team-board".enabled=false'));
   assert.deepEqual(seenMethods,['initialize','initialized']);
 });
+
+test('Windows npm codex.cmd shim resolves directly to @openai/codex bin/codex.js without cmd.exe',async t=>{
+  const {mkdtempSync,mkdirSync,writeFileSync,rmSync}=await import('node:fs');
+  const {join}=await import('node:path');
+  const {tmpdir}=await import('node:os');
+  const {resolveCodexLaunch}=await import('./codex.mjs');
+  const dir=mkdtempSync(join(tmpdir(),'hive-codex-cmd-'));
+  t.after(()=>rmSync(dir,{recursive:true,force:true}));
+  const shim=join(dir,'codex.cmd');
+  const pkg=join(dir,'node_modules','@openai','codex');
+  const entry=join(pkg,'bin','codex.js');
+  mkdirSync(join(pkg,'bin'),{recursive:true});
+  writeFileSync(shim,'@echo off\r\n');
+  writeFileSync(join(pkg,'package.json'),JSON.stringify({name:'@openai/codex',bin:{codex:'./bin/codex.js'}}));
+  writeFileSync(entry,'// fixture codex entry\n');
+  const launch=resolveCodexLaunch({env:{HIVE_SWARM_CODEX:shim},platform:'win32'});
+  assert.equal(launch.command,process.execPath);
+  assert.deepEqual(launch.prefixArgs,[entry]);
+});
+
+test('turn inactivity timeout resets on live activity and worker prompt enforces peer handoffs without double-posting',async()=>{
+  const session=fixture(undefined,({id,emit,message,finish})=>{
+    setTimeout(()=>emit('item/started',{turnId:id,item:{type:'commandExecution'}}),35);
+    setTimeout(()=>emit('item/completed',{turnId:id,item:{type:'commandExecution'}}),70);
+    setTimeout(()=>{message(id,JSON.stringify(outcome));finish(id);},105);
+  });
+  session.runner.turnIdleTimeoutMs=60;
+  session.runner.turnMaxTimeoutMs=400;
+  const result=await session.run();
+  assert.deepEqual(result,outcome);
+  const startCall=session.calls.find(call=>call.method==='turn/start');
+  const promptText=startCall.params.input[0].text;
+  assert.match(promptText,/wakeup doorbell|without @/i);
+  assert.match(promptText,/do not.*duplicate|double-post/i);
+});

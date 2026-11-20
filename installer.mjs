@@ -93,20 +93,37 @@ function writeMarker(path, value) {
   writeFileSync(join(path, markerName), JSON.stringify(value) + '\n', {flag: 'wx', mode: 0o600});
 }
 
-function publishDirectory(target, populate) {
+const transientRenameCodes = new Set(['EPERM', 'EBUSY', 'EACCES']);
+
+export async function renameDirectory(from, to, {rename = renameSync, wait = delay, platform = process.platform, attempts = 6} = {}) {
+  for (let attempt = 0; ; attempt++) {
+    if (entry(to)) throw Error('Refusing to overwrite an existing path: ' + to);
+    try {
+      rename(from, to);
+      return;
+    } catch (error) {
+      if (platform === 'win32' && transientRenameCodes.has(error?.code) && attempt + 1 < attempts) {
+        await wait(25 * 2 ** attempt);
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+async function publishDirectory(target, populate) {
   const parent = dirname(target);
   if (entry(target)) throw Error('Refusing to overwrite an existing path: ' + target);
   const staging = mkdtempSync(join(parent, '.hive-stage-'));
   const original = lstatSync(staging);
   try {
     populate(staging);
-    if (entry(target)) throw Error('Refusing to overwrite an existing path: ' + target);
-    renameSync(staging, target);
+    await renameDirectory(staging, target);
   } catch (error) {
     // This is the unique staging directory we created, directly under the checked parent.
     const current = directory(parent) ? entry(staging) : null;
     if (current?.isDirectory() && current.dev === original.dev && current.ino === original.ino) {
-      rmSync(staging, {recursive: true});
+      rmSync(staging, {recursive: true, maxRetries: 5, retryDelay: 50});
     }
     throw error;
   }
@@ -184,10 +201,10 @@ function installedBytes(candidate, nodePath) {
   return bytes;
 }
 
-function stageRelease(store, candidate, nodePath, explicit) {
+async function stageRelease(store, candidate, nodePath, explicit) {
   const target = releaseDirectory(store, candidate.version);
   if (!directory(target)) {
-    publishDirectory(target, staging => {
+    await publishDirectory(target, staging => {
       const packagePath = join(staging, 'marketplace');
       const bytes = installedBytes(candidate, nodePath);
       for (const [file, contents] of bytes) {
@@ -440,7 +457,7 @@ async function stopOwnedService(paths, env) {
  */
 export async function runInstaller(action, {
   home = homedir(), env = process.env, packageDirectory = packageRoot, command, resolveCommand,
-  runCommand = runCodexCommand, afterClose = false, bindNode = false,
+  runCommand = runCodexCommand, afterClose = false, allowUnqualifiedCli = false, bindNode = false,
 } = {}) {
   if (!['install', 'update', 'uninstall'].includes(action)) throw Error('Unknown installer action: ' + action);
   const paths = installPaths(home, env);
@@ -467,7 +484,7 @@ export async function runInstaller(action, {
     managedMarketplace(paths, await host.marketRoot(), false);
     cacheVersions(paths, false);
     if (action === 'uninstall') return {status: 'absent', ...paths};
-    publishDirectory(paths.store, staging => {
+    await publishDirectory(paths.store, staging => {
       mkdirSync(join(staging, 'versions'), {mode: 0o700});
       writeMarker(staging, owner);
     });
@@ -489,7 +506,7 @@ export async function runInstaller(action, {
       return {status: 'uninstalled', ...paths};
     }
     const nodePath = explicitNodePath || (previous?.nodePath && await currentNodePath(packagePath, npmCache));
-    const candidate = stageRelease(paths.store, source, nodePath, bindNode);
+    const candidate = await stageRelease(paths.store, source, nodePath, bindNode);
     if (!previous && cached.length) {
       throw Error('A managed Codex cache remains without its marketplace. Restore its registration in Codex before retrying. Candidate: ' + candidate.path);
     }
@@ -500,10 +517,15 @@ export async function runInstaller(action, {
       if (!afterClose) {
         throw Error(staged + 'Finish Swarm turns and exit Codex, then rerun hive-swarm update --host codex --after-close.');
       }
-      try {
-        if (!await host.canSwitchVersion()) throw Error('Local marketplace switching is qualified for ' + qualifiedUpdateVersion + '.');
-      } catch (error) {
-        throw Error(staged + error.message + ' Use the qualified Codex CLI for the switch. The previous version is still registered.', {cause: error});
+      if (!allowUnqualifiedCli) {
+        try {
+          if (!await host.canSwitchVersion()) {
+            throw Error('Local marketplace switching is qualified for ' + qualifiedUpdateVersion +
+              '. Pass --allow-unqualified-cli to proceed with another Codex CLI version.');
+          }
+        } catch (error) {
+          throw Error(staged + error.message + ' Use the qualified Codex CLI or pass --allow-unqualified-cli for the switch. The previous version is still registered.', {cause: error});
+        }
       }
     }
     if (!switching && previous && cached.includes(candidate.version)) return {status: 'unchanged', ...paths, ...candidate};

@@ -6,7 +6,7 @@ import {openWorktree,removeWorktree,worktreeSource} from './worktrees.mjs';
 
 const reads=new Set(['list_teams','board_status','board_history','read_board','list_models','read_journal','open_swarm_panel','wait_for_board']);
 const workerActions=new Set(['board_status','board_history','read_board','post_to_board','set_turn_outcome','add_member','retire_member','set_member_model','manage_channel']);
-const coordinatorActions=new Set(['list_models','set_team_title']);
+const coordinatorActions=new Set(['list_models','set_team_title','set_team_plan']);
 
 function signature(value) {
   if(value===null||typeof value==='string'||typeof value==='boolean')return JSON.stringify(value);
@@ -32,6 +32,8 @@ export function presentTeam(team,{activity={},actor,host=team.host??'codex'}={})
   const recovery=team.members.filter(m=>m.recoveryRequired).map(m=>({kind:'recovery',member:m.name,text:'@'+m.name+' outcome unconfirmed. Inspect the owned session before continuing.'}));
   const input=team.members.filter(m=>m.inputRequired).map(m=>({kind:'input',member:m.name,text:'@'+m.name+' needs your permission or input in its owned DSH session.'}));
   return {id:team.id,host,title:team.title,cwd:team.cwd,task:team.task,model:team.model,effort:team.effort,
+    ...(team.fallbackModel?{fallbackModel:team.fallbackModel,...(team.fallbackEffort!==undefined?{fallbackEffort:team.fallbackEffort}:{})}:{}),
+    ...(team.threads?.length?{threads:team.threads}:{}),
     paused:team.paused,turns:team.turns,turnLimit:team.turnLimit,phase:teamPhase(team),channels:team.channels,activity,
     attention:[...input,...recovery,...stallIssues(team)],events:events.slice(-60),
     members:team.members.map(member=>({name:member.name,role:member.role,group:member.group,brief:member.brief,
@@ -39,6 +41,7 @@ export function presentTeam(team,{activity={},actor,host=team.host??'codex'}={})
       session:member.threadId?{host,id:member.threadId}:null,waitFor:member.waitFor,pendingWaitFor:pendingWaitFor(team,member),
       worktree:member.worktree,workspace:member.workspace,channels:member.channels,lastTurn:member.lastTurn,
       retireAfterTurn:member.retireAfterTurn,recoveryRequired:member.recoveryRequired===true,
+      ...(member.fallbackModel?{fallbackModel:member.fallbackModel,...(member.fallbackEffort!==undefined?{fallbackEffort:member.fallbackEffort}:{})}:{}),
       model:member.model??member.activeModel??team.model,effort:member.effort??member.activeEffort??configuredEffort(team,member)}))};
 }
 
@@ -82,11 +85,12 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
   }
   async function models() {return normalizeModels(await runner.listModels());}
   async function selections(values) {
-    const chosen=values.filter(value=>value.model);if(!chosen.length)return;
-    const catalog=await models();for(const value of chosen) {
+    const chosen=values.filter(value=>value?.model);if(!chosen.length)return [];
+    const catalog=await models();return chosen.map(value=>{
       const model=catalog.find(m=>m.id===value.model);if(!model)throw Error('Requested host model is unavailable.');
       if(value.effort!=null&&!model.efforts.includes(value.effort))throw Error('Requested reasoning effort is unavailable for this model.');
-    }
+      return model;
+    });
   }
   async function snapshot({teamId}={},context={}) {
     ensureOpen();const actor=actorOf(context.actor,{teamId});const teams=[];
@@ -104,7 +108,12 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
     if(action==='list_teams')return {teams:(await snapshot({},context)).teams};
     if(action==='list_models')return {models:await models()};
     if(action==='start_team') {
-      const cwd=await allowed(args.cwd,context);await selections([args,...(args.members??[])]);
+      const cwd=await allowed(args.cwd,context);
+      const memberChecks=(args.members??[]).flatMap(m=>[
+        (m?.model||(args.model&&m?.effort))?{model:m.model??args.model,effort:m.effort===null?undefined:m.effort??args.effort}:null,
+        m?.fallbackModel?{model:m.fallbackModel,effort:m.fallbackEffort}:null,
+      ]);
+      await selections([args,args.fallbackModel?{model:args.fallbackModel,effort:args.fallbackEffort}:null,...memberChecks]);
       const source=args.members?.some(m=>m.worktree)?await worktreeSource(cwd):undefined;
       return view(board.create({...args,cwd,host},source));
     }
@@ -122,19 +131,27 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
         return board.declareOutcome(id,actor.member,args);
       case 'pause_team':return view(board.pause(id));
       case 'resume_team':return view(board.resume(id,args.extraTurns));
+      case 'resolve_recovery':return view(board.resolveRecovery(id,args.member,{action:args.action}));
       case 'retire_member':return view(board.retireMember(id,args.member,{actor:actor?.member}));
       case 'set_team_title':return view(board.setTeamTitle(id,args.title,actor?.member));
+      case 'set_team_plan':return view(board.setTeamPlan(id,args.threads,actor?.member));
       case 'manage_channel':return board.manageChannel(id,args,actor?.member);
       case 'add_member': {
-        await selections([args.member]);
-        const source=args.member?.worktree?team.worktreeSource??await worktreeSource(team.cwd):undefined;
-        return view(board.addMember(id,args.member,{replaces:args.replaces,fork:args.fork,actor:actor?.member,worktreeSource:source}));
+        const m=args.member;
+        const model=m?.model??team.model;
+        const effort=m?.effort===null?undefined:m?.effort??team.effort;
+        await selections([model&&(m?.model||m?.effort)?{model,effort}:null,
+          m?.fallbackModel?{model:m.fallbackModel,effort:m.fallbackEffort}:null]);
+        const source=m?.worktree?team.worktreeSource??await worktreeSource(team.cwd):undefined;
+        return view(board.addMember(id,m,{replaces:args.replaces,fork:args.fork,actor:actor?.member,worktreeSource:source}));
       }
       case 'set_member_model': {
         const member=board.liveMember(team,args.member);
         if(member.status==='working'&&!actor)throw Error('Wait for this member to finish before changing model.');
-        await selections([{model:args.model,effort:args.effort}]);
-        return view(board.switchModel(id,args.member,args.model,{resume:args.resume,effort:args.effort,actor:actor?.member}));
+        let effort=args.effort===null?null:args.effort??configuredEffort(team,member)??null;
+        const [model]=await selections([{model:args.model,effort:args.effort}]);
+        if(effort&&!model.efforts.includes(effort))effort=null;
+        return view(board.switchModel(id,args.member,args.model,{resume:args.resume,effort,actor:actor?.member}));
       }
       case 'remove_worktree':return view(await board.removeWorktree(id,args.member,({team,member})=>removeWorktree(dataDirectory,team.worktreeSource,team.id,member.name,member.workspace,{force:args.force===true})));
       case 'read_journal': {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync} from 'node:fs';
+import {closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, symlinkSync, writeFileSync} from 'node:fs';
 import {createServer} from 'node:http';
 import {copyFixture as cpSync,removeFixture as rmSync} from './test-support.mjs';
 import {dirname, join} from 'node:path';
@@ -414,4 +414,68 @@ test('failed first activation, failed removal, and unverified package do not rep
   assert.match((await f.run('update', f.next, ['--after-close'])).stderr, /allowlist/);
   assert.equal(existsSync(f.release(f.v2)), false);
   assert.equal(f.state.version, f.v1);
+});
+
+test('update on a newer Codex CLI succeeds when --allow-unqualified-cli is explicitly passed', async t => {
+  const f = fixture(t);
+  success(await f.run('install'));
+  f.state.hostVersion = '0.180.0';
+  const refused = await f.run('update', f.next, ['--after-close']);
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /--allow-unqualified-cli/);
+  success(await f.run('update', f.next, ['--after-close', '--allow-unqualified-cli']));
+  assert.equal(f.state.version, f.v2);
+  assert.equal(f.state.marketplace, f.release(f.v2));
+});
+
+test('renameDirectory retries transient Windows EPERM/EBUSY locks while still refusing overwrite and non-retryable errors', async t => {
+  const {renameDirectory} = await import('./installer.mjs');
+  const f = fixture(t);
+  const base = join(f.codexHome, 'rename-test');
+  mkdirSync(base, {recursive: true});
+  const from = join(base, '.hive-stage-1');
+  const to = join(base, '1.8.0');
+  mkdirSync(from);
+  let calls = 0;
+  const delays = [];
+  await renameDirectory(from, to, {
+    platform: 'win32',
+    wait: async ms => { delays.push(ms); },
+    rename: (src, dst) => {
+      calls++;
+      if (calls === 1) throw Object.assign(Error('EPERM: transient scan lock'), {code: 'EPERM'});
+      if (calls === 2) throw Object.assign(Error('EBUSY: transient lock'), {code: 'EBUSY'});
+      return renameSync(src, dst);
+    },
+  });
+  assert.equal(calls, 3);
+  assert.deepEqual(delays, [25, 50]);
+  assert.equal(existsSync(to), true);
+
+  // If the target appears before a retry, refuse overwrite instead of retrying further.
+  const from2 = join(base, '.hive-stage-2');
+  const to2 = join(base, '1.8.1');
+  mkdirSync(from2);
+  let calls2 = 0;
+  await assert.rejects(renameDirectory(from2, to2, {
+    platform: 'win32',
+    wait: async () => { mkdirSync(to2); },
+    rename: () => {
+      calls2++;
+      throw Object.assign(Error('EPERM'), {code: 'EPERM'});
+    },
+  }), /overwrite/i);
+  assert.equal(calls2, 1);
+
+  // Non-Windows or non-retryable errors fail immediately without delay.
+  const from3 = join(base, '.hive-stage-3');
+  const to3 = join(base, '1.8.2');
+  mkdirSync(from3);
+  let calls3 = 0;
+  await assert.rejects(renameDirectory(from3, to3, {
+    platform: 'linux',
+    wait: async () => { assert.fail('Should not retry on non-Windows'); },
+    rename: () => { calls3++; throw Object.assign(Error('EPERM'), {code: 'EPERM'}); },
+  }), /EPERM/);
+  assert.equal(calls3, 1);
 });
