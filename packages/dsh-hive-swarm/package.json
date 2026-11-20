@@ -1,6 +1,6 @@
 {
   "name": "dsh-hive-swarm",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "description": "Native Hive Swarm coordination, worker sessions and views for DeepSeek Harness.",
   "type": "module",
   "license": "MIT",
@@ -25,7 +25,7 @@
       ]
     }
   },
-  "dependencies": {"hive-swarm": "1.9.0"},
+  "dependencies": {"hive-swarm": "1.9.1"},
   "peerDependencies": {"@deepseek-ai/dsh": "0.2.2-rc.5", "react": "^18.3.1 || ^19.0.0"},
   "devDependencies": {"esbuild": "0.25.12", "react": "18.3.1", "react-dom": "18.3.1", "react-test-renderer": "18.3.1", "jsdom": "26.1.0"},
   "files": ["host.mjs", "native.mjs", "runner.mjs", "routes.mjs", "client/dist.js", "cordis.patch.yml", "skills/hive-swarm/SKILL.md"],

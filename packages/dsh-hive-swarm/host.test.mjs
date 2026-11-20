@@ -115,7 +115,77 @@ test('worker tool visibility hides owner-only tools and effort schema accepts nu
   assert.equal(f.tools.get('hive_swarm_pause_team').options.when({agent:workerAgent}),false);
   assert.equal(f.tools.get('hive_swarm_resolve_recovery').options.when({agent:workerAgent}),false);
   assert.equal(f.tools.get('hive_swarm_post_message').options.when({agent:workerAgent}),true);
+  assert.equal(f.tools.get('hive_swarm_list_models').options.when({agent:workerAgent}),true);
   assert.equal(f.tools.get('hive_swarm_set_turn_outcome').options.when({agent:workerAgent}),true);
-  assert.deepEqual(f.tools.get('hive_swarm_set_member_model').tool.parameters.effort,{type:['string','null']});
-  assert.ok(f.tools.get('hive_swarm_start_team').tool.parameters.members.items.properties?.name);
+  assert.deepEqual(f.tools.get('hive_swarm_set_member_model').tool.parameters.properties.effort,{type:['string','null']});
+  assert.ok(f.tools.get('hive_swarm_start_team').tool.parameters.properties.members.items.properties?.name);
+  assert.match(f.tools.get('hive_swarm_start_team').tool.parameters.properties.members.items.properties.tasks.description,/sharding|parallel worker/i);
+  assert.deepEqual(f.tools.get('hive_swarm_read_board').tool.parameters.properties.limit,{type:['integer','null'],minimum:1,maximum:20});
+  assert.deepEqual(f.tools.get('hive_swarm_board_history').tool.parameters.properties.limit,{type:['integer','null'],minimum:1,maximum:200});
+  assert.deepEqual(f.tools.get('hive_swarm_wait_for_board').tool.parameters.properties.timeoutSec,{type:['integer','null'],minimum:1,maximum:55});
+  for(const [toolName,{tool}] of f.tools) {
+    const schema=tool.parameters;
+    assert.equal(schema.type,'object',toolName+' parameters must be a JSON Schema object');
+    assert.equal(typeof schema.properties,'object',toolName+' parameters must declare properties');
+    assert.equal(schema.additionalProperties,false,toolName+' parameters should forbid unknown fields');
+    assert.equal(schema.title,undefined,toolName+' must not put parameter fields at top-level JSON Schema root');
+    for(const req of schema.required??[])assert.ok(Object.hasOwn(schema.properties,req),toolName+' required key '+req+' must exist in properties');
+    for(const [prop,def] of Object.entries(schema.properties)) {
+      assert.ok(typeof def.type==='string'||Array.isArray(def.type),toolName+'.'+prop+' must have a valid JSON Schema type');
+      if(def.type==='array'||(Array.isArray(def.type)&&def.type.includes('array')))assert.ok(def.items&&typeof def.items==='object',toolName+'.'+prop+' array must declare items');
+    }
+  }
+  assert.deepEqual(f.tools.get('hive_swarm_set_team_title').tool.parameters,{
+    type:'object',properties:{teamId:{type:['string','null']},title:{type:'string'}},required:['title'],additionalProperties:false,
+  });
+});
+
+test('strict-mode null and empty optional fields normalize cleanly without breaking sharding or model lock',async t=>{
+  const f=await fixture(t);
+  const exec={signal:new AbortController().signal,agent:{id:'parent',current:true,session:{header:{cwd:f.root}}}};
+  const created=await f.tools.get('hive_swarm_start_team').tool.execute({
+    cwd:f.root,task:'Strict schema check',title:'Strict test',coordinator:false,model:'p/m',effort:'max',
+    fallbackModel:null,fallbackEffort:null,concurrency:2,turnLimit:12,threads:null,
+    members:[{
+      name:'design',brief:'Inspect layout',group:null,model:'p/m',effort:'max',fallbackModel:'',fallbackEffort:null,
+      writable:false,worktree:false,waitFor:[],channels:[],n:null,tasks:null,
+    }],
+  },exec);
+  assert.equal(created.members.length,1);
+  assert.equal(created.members[0].name,'design');
+  assert.equal(created.fallbackModel,undefined);
+  assert.equal(created.members[0].fallbackModel,undefined);
+  assert.equal(created.members[0].fallbackEffort,undefined);
+  const posts=await f.tools.get('hive_swarm_read_board').tool.execute({teamId:created.id,after:null,limit:null,channel:null,mentionsOnly:null},exec);
+  assert.ok(Array.isArray(posts.posts));
+});
+
+test('all native tool outputs are strictly lossless JSON with no undefined properties',async t=>{
+  const f=await fixture(t);
+  f.native.listModels=async()=>[{id:'p/m',provider:'p',model:'m',label:'P · M',efforts:['max'],defaultEffort:undefined,default:true}];
+  const exec={signal:new AbortController().signal,agent:{id:'parent',current:true,session:{header:{cwd:f.root}}}};
+  const assertLossless=(value,path='root')=>{
+    assert.notEqual(value,undefined,path+' must not be undefined');
+    if(typeof value==='number')assert.ok(Number.isFinite(value)&&!Object.is(value,-0),path+' must be lossless number');
+    if(Array.isArray(value)){value.forEach((item,i)=>assertLossless(item,`${path}[${i}]`));return;}
+    if(value&&typeof value==='object'){
+      for(const [k,v] of Object.entries(value)){
+        assert.notEqual(v,undefined,`${path}.${k} must not have undefined value`);
+        assertLossless(v,`${path}.${k}`);
+      }
+    }
+  };
+  const models=await f.tools.get('hive_swarm_list_models').tool.execute({},exec);
+  assertLossless(models,'list_models');
+  assert.equal(Object.hasOwn(models.models[0],'defaultEffort'),false);
+  f.native.sessionRoute=async agent=>({sessionId:agent.id,cwd:agent.session?.header?.cwd,model:'p/m',effort:undefined});
+  const modelsWithRoute=await f.tools.get('hive_swarm_list_models').tool.execute({},exec);
+  assertLossless(modelsWithRoute,'list_models_route');
+  assert.deepEqual(modelsWithRoute.currentSession,{sessionId:'parent',cwd:f.root,model:'p/m'});
+  const team=await f.tools.get('hive_swarm_start_team').tool.execute(args(f.root),exec);
+  assertLossless(team,'start_team');
+  const status=await f.tools.get('hive_swarm_board_status').tool.execute({teamId:team.id},exec);
+  assertLossless(status,'board_status');
+  const panel=await f.tools.get('hive_swarm_open_swarm_panel').tool.execute({teamId:team.id},exec);
+  assertLossless(panel,'open_swarm_panel');
 });

@@ -90,3 +90,31 @@ test('a preset-local unconfined service cannot be replaced with a secure inherit
   await assert.rejects(f.native.prepare('owned',{cwd:process.cwd(),writable:false,model:{provider:'p',model:'m'}}),/sandbox/);
   assert.equal(f.calls.some(call=>call.kind==='selection'),false);
 });
+
+test('sessionRoute reports host-verified workspace and active model from request/header fallback',async()=>{
+  const f=await fixture();
+  f.ctx.typertGateway.invoke=async request=>{
+    if(request.method==='state')return {active:true};
+    if(request.method==='events')return {records:[{event:{seq:24,type:'request/header',data:{header:{config:{provider:'xingchiapi',model:'gpt-6.1-sol',reasoningEffort:'max'}}}}}]};
+    return {};
+  };
+  const route=await f.native.sessionRoute({id:'parent',session:{header:{cwd:process.cwd()}},model:{}});
+  assert.deepEqual(route,{sessionId:'parent',cwd:process.cwd(),model:'xingchiapi/gpt-6.1-sol',provider:'xingchiapi',modelId:'gpt-6.1-sol',effort:'max'});
+});
+
+test('read-only workers receive skill and web research tools while strictly denying write, subagent, and admin tools',async()=>{
+  const f=await fixture();
+  f.ctx.tools.definitions=()=>['read','read_image','glob','grep','skill','web_search','web_fetch','todo_write','working_directory','job_list','job_output','write','edit','apply_patch','job_kill','pwsh','subagent','create_goal','plugin_manager','schedule_create','workflow','unrelated_admin'].map(name=>({name}));
+  await f.native.prepare('owned',{cwd:process.cwd(),writable:false,model:{provider:'p',model:'m'},effort:'max'});
+  const roAllow=new Set(f.restrictions.at(-1).allow);
+  for(const ok of ['read','read_image','glob','grep','skill','web_search','web_fetch','todo_write','working_directory','job_list','job_output','pwsh'])assert.equal(roAllow.has(ok),true,ok+' should be allowed for read-only workers');
+  for(const denied of ['write','edit','apply_patch','job_kill','subagent','create_goal','plugin_manager','schedule_create','workflow','unrelated_admin'])assert.equal(roAllow.has(denied),false,denied+' must be denied for read-only workers');
+  await f.native.prepare('owned',{cwd:process.cwd(),writable:true,model:{provider:'p',model:'m'},effort:'max'});
+  const rwAllow=new Set(f.restrictions.at(-1).allow);
+  for(const ok of ['write','edit','apply_patch','job_kill','skill','web_search','web_fetch'])assert.equal(rwAllow.has(ok),true,ok+' should be allowed for writable workers');
+  for(const denied of ['subagent','create_goal','plugin_manager','schedule_create','workflow','unrelated_admin'])assert.equal(rwAllow.has(denied),false,denied+' must stay denied for writable workers');
+  const roGuard=f.guards.at(-2),rwGuard=f.guards.at(-1);
+  assert.equal(roGuard({name:'pwsh',args:{command:'pwd'}}),undefined);
+  assert.match(roGuard({name:'pwsh',args:{command:'pwd',sandbox_permissions:'workspace-write'}}),/read-only.*escalate/i);
+  assert.equal(rwGuard({name:'pwsh',args:{command:'pwd',sandbox_permissions:'workspace-write'}}),undefined);
+});

@@ -7,17 +7,18 @@ import {ownerActions,registerRoutes} from './routes.mjs';
 export const name='dsh-hive-swarm';
 export const inject=['connection','typertGateway','sessionController','sessions','agents','agentPresets','llm','sandboxPolicy','fs','shell','workspaceRegistry','tools','skills','profileContext'];
 const hosts=new WeakMap();
-const workerVisible=new Set(['board_status','board_history','read_board','post_message','set_turn_outcome','add_member','retire_member','set_member_model','manage_channel']);
-const coordinatorVisible=new Set([...workerVisible,'list_models','set_team_title','set_team_plan']);
+const workerVisible=new Set(['list_models','board_status','board_history','read_board','post_message','set_turn_outcome','add_member','retire_member','set_member_model','manage_channel']);
+const coordinatorVisible=new Set([...workerVisible,'set_team_title','set_team_plan']);
 const memberSchema={type:'object',properties:{
-  name:{type:'string'},brief:{type:'string'},group:{type:'string'},model:{type:'string'},effort:{type:['string','null']},
-  fallbackModel:{type:'string'},fallbackEffort:{type:['string','null']},writable:{type:'boolean'},worktree:{type:'boolean'},
-  waitFor:{type:'array',items:{type:'string'}},channels:{type:'array',items:{type:'string'}},
-  n:{type:'number'},tasks:{type:'array',items:{type:'string'}},
-}};
+  name:{type:'string'},brief:{type:'string'},group:{type:['string','null']},model:{type:['string','null']},effort:{type:['string','null']},
+  fallbackModel:{type:['string','null']},fallbackEffort:{type:['string','null']},writable:{type:['boolean','null']},worktree:{type:['boolean','null']},
+  waitFor:{type:['array','null'],items:{type:'string'}},channels:{type:['array','null'],items:{type:'string'}},
+  n:{type:['integer','null'],minimum:2,maximum:8,description:'Optional sharding count: spawns name-1..name-n as separate parallel workers in group name. Pass null or omit for a single worker.'},
+  tasks:{type:['array','null'],items:{type:'string'},minItems:2,maxItems:8,description:'Optional sharding targets: spawns one parallel worker per item (name-1..name-k) in group name. Pass null or omit for a single worker; put a single worker checklist in brief.'},
+},required:['name','brief'],additionalProperties:false};
 const threadSchema={type:'object',properties:{
-  id:{type:'string'},title:{type:'string'},goal:{type:'string'},members:{type:'array',items:{type:'string'}},
-}};
+  id:{type:'string'},title:{type:'string'},goal:{type:'string'},members:{type:['array','null'],items:{type:'string'}},
+},required:['id','title','goal'],additionalProperties:false};
 const fields={
   start_team:['cwd','task','title','members','coordinator','model','effort','fallbackModel','fallbackEffort','threads','concurrency','turnLimit'],
   list_teams:[],list_models:[],board_status:['teamId'],board_history:['teamId','after','limit','channel'],
@@ -30,11 +31,20 @@ const fields={
   read_journal:['teamId','member'],wait_for_board:['teamId','since','timeoutSec','channel','mentionsOnly'],
   set_turn_outcome:['turn','state','message','notify','waitFor'],
 };
+const requiredFields={
+  start_team:['cwd','task','members'],
+  open_swarm_panel:['teamId'],pause_team:['teamId'],resume_team:['teamId'],wait_for_board:['teamId'],
+  resolve_recovery:['teamId','member'],remove_worktree:['teamId','member'],read_journal:['teamId','member'],
+  post_message:['text'],set_team_title:['title'],set_team_plan:['threads'],manage_channel:['op'],
+  add_member:['member'],retire_member:['member'],set_member_model:['member','model'],
+  set_turn_outcome:['turn','state','message'],
+};
 const descriptions={
   start_team:'Start a native Hive Swarm only when the user asks. Use this chat as coordinator; assign disjoint file ownership, peer-to-peer handoffs, and optional outcome threads or fallbackModel.',
+  list_models:'List available native models and reasoning efforts, plus host-verified currentSession workspace and active model route.',
   set_turn_outcome:'Submit this owned worker turn result (state, message, notify, waitFor) and conclude the turn. Do not duplicate the same report via hive_swarm_post_message first.',
   post_message:'Post a message on the shared board. Tag @name, @group, @#channel, or @all only for members who must act.',
-  read_board:'Read recent public posts on the board without waking members.',
+  read_board:'Read recent public posts on the board without waking members (limit 1–20).',
   board_history:'Page through saved board history (up to 200 posts per call).',
   board_status:'Read current team status, roster, channels, threads, and stall alerts.',
   resolve_recovery:'Resolve an unconfirmed native worker outcome after inspecting the owned session: action is "dismiss" or "retry".',
@@ -43,9 +53,14 @@ const descriptions={
   manage_channel:'List channels or manage subscriptions (create, list, subscribe, unsubscribe, archive).',
   add_member:'Add or replace a worker, optionally inheriting a teammate chat via fork.',
   retire_member:'Retire a named member or shard group.',
-  wait_for_board:'Wait without polling for matching posts or a stopped phase.',
+  wait_for_board:'Wait without polling for matching posts or a stopped phase (timeoutSec 1–55).',
 };
-const parameter=(action,key)=>['turn','extraTurns','after','limit','concurrency','turnLimit','since','timeoutSec'].includes(key)?{type:'number'}:
+const nullable=(schema,required)=>required||Array.isArray(schema.type)||schema.type==='object'?schema:
+  {...schema,type:[schema.type,'null'],...schema.enum?{enum:[...schema.enum,null]}:{}};
+const baseParameter=(action,key)=>key==='limit'&&action==='read_board'?{type:'integer',minimum:1,maximum:20}:
+  key==='limit'&&action==='board_history'?{type:'integer',minimum:1,maximum:200}:
+  key==='timeoutSec'?{type:'integer',minimum:1,maximum:55}:
+  ['turn','extraTurns','after','limit','concurrency','turnLimit','since'].includes(key)?{type:'integer'}:
   key==='state'?{type:'string',enum:['done','waiting']}:
   key==='op'?{type:'string',enum:['create','list','subscribe','unsubscribe','archive']}:
   key==='action'?{type:'string',enum:['dismiss','retry']}:
@@ -55,7 +70,29 @@ const parameter=(action,key)=>['turn','extraTurns','after','limit','concurrency'
   key==='threads'?{type:'array',items:threadSchema}:
   ['notify','waitFor'].includes(key)?{type:'array',items:{type:'string'}}:
   key==='member'?(action==='add_member'?memberSchema:{type:'string'}):{type:'string'};
+const parameter=(action,key)=>nullable(baseParameter(action,key),Boolean(requiredFields[action]?.includes(key)));
+const keepNull=new Set(['effort','fallbackEffort']);
+const emptyAsOmit=new Set(['teamId','title','group','model','fallbackModel','channel','replaces','fork','topic','member']);
 function plain(value){return value&&typeof value==='object'&&!Array.isArray(value);}
+function cleanObject(obj,required=new Set()) {
+  const out={};
+  for(const [key,value] of Object.entries(obj)) {
+    if(value===undefined)continue;
+    if(value===null&&!keepNull.has(key))continue;
+    if(value===''&&!required.has(key)&&emptyAsOmit.has(key))continue;
+    out[key]=value;
+  }
+  if(!out.fallbackModel&&out.fallbackEffort===null)delete out.fallbackEffort;
+  return out;
+}
+function normalizeArgs(action,args) {
+  const out=cleanObject(args,new Set(requiredFields[action]??[]));
+  if(Array.isArray(out.members))out.members=out.members.map(m=>plain(m)?cleanObject(m,new Set(['name','brief'])):m);
+  if(action==='add_member'&&plain(out.member))out.member=cleanObject(out.member,new Set(['name','brief']));
+  if(Array.isArray(out.threads))out.threads=out.threads.map(t=>plain(t)?cleanObject(t,new Set(['id','title','goal'])):t);
+  return out;
+}
+function lossless(value){return JSON.parse(JSON.stringify(value??null));}
 function navigation(value){const target=value?.navigation;
   return value?.host==='deepseek-harness'&&target?.kind==='hive-swarm'&&typeof target.teamId==='string'&&/^[a-f0-9-]{36}$/.test(target.teamId)?
     {navigation:{kind:'hive-swarm',teamId:target.teamId}}:null;}
@@ -90,11 +127,12 @@ export async function createHost(ctx,{dataDirectory=resolveDataDirectory(ctx),co
       content:readFileSync(new URL('./skills/hive-swarm/SKILL.md',import.meta.url),'utf8')}));
     for(const action of [...ownerActions,'set_turn_outcome']) {
       const tool={name:'hive_swarm_'+action,description:descriptions[action]??('Hive Swarm: '+action.replaceAll('_',' ')+'.'),
-        parameters:Object.fromEntries(fields[action].map(key=>[key,parameter(action,key)])),
+        parameters:{type:'object',properties:Object.fromEntries(fields[action].map(key=>[key,parameter(action,key)])),
+          ...requiredFields[action]?.length?{required:requiredFields[action]}:{},additionalProperties:false},
         output:{schema:{type:'object',additionalProperties:true},render:(_args,value)=>[{type:'text',text:JSON.stringify(value)}],
           ...['start_team','open_swarm_panel'].includes(action)?{presentationMeta:(_args,value)=>navigation(value)}:{}},
-        async execute(args,exec) {
-          checkFields(action,args);exec.signal.throwIfAborted();const agent=exec.agent;
+        async execute(rawArgs,exec) {
+          checkFields(action,rawArgs);exec.signal.throwIfAborted();const args=normalizeArgs(action,rawArgs);const agent=exec.agent;
           if(!native.isCurrentAgent(agent))throw Error('A trusted current native Agent is required.');
           const owned=store.findSession(agent.id);const actor=runner.actorForSession(agent.id);
           if(owned&&!actor)throw Error('This owned worker session has no active Hive turn.');
@@ -103,11 +141,15 @@ export async function createHost(ctx,{dataDirectory=resolveDataDirectory(ctx),co
           if(action==='set_turn_outcome') {
             if(!actor||args.turn!==actor.turn)throw Error('The outcome must match this owned active turn.');
             const value=await application.command(action,args,context);
-            await runner.setOutcome(agent.id,actor.turn,args);exec.concludeTurn();return value;
+            await runner.setOutcome(agent.id,actor.turn,args);exec.concludeTurn();return lossless(value);
           }
           if(!actor&&action==='start_team'&&!same(args.cwd,context.parentWorkspace))throw Error('Use the current native chat workspace.');
           const value=await application.command(actor&&action==='post_message'?'post_to_board':action,args,context);
-          return action==='start_team'?{...value,navigation:{kind:'hive-swarm',teamId:value.id}}:value;
+          if(action==='list_models'&&typeof native.sessionRoute==='function') {
+            const currentSession=await native.sessionRoute(agent,exec.signal);
+            return lossless(currentSession?{...value,currentSession}:value);
+          }
+          return lossless(action==='start_team'?{...value,navigation:{kind:'hive-swarm',teamId:value.id}}:value);
         }};
       releases.push(ctx.tools.register(tool,{when:({agent})=>{
         if(!native.isCurrentAgent(agent))return false;

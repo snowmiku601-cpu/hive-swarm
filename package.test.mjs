@@ -116,7 +116,7 @@ test('pack uses a fresh private stage and preserves existing archive and log lin
   fixtureNpm(t, directory, gzipSync(fixtureTar(source)));
   const outputDirectory = join(directory, 'output');
   mkdirSync(outputDirectory);
-  const names = ['hive-swarm-1.9.0.tgz', 'npm-pack.stdout.log', 'npm-pack.stderr.log'];
+  const names = ['hive-swarm-1.9.1.tgz', 'npm-pack.stdout.log', 'npm-pack.stderr.log'];
   for (const name of names) {
     const target = join(directory, 'retained ' + name);
     writeFileSync(target, 'retained unverified candidate');
@@ -152,17 +152,17 @@ test('failed verification removes only its owned candidate stage', async t => {
   fixtureNpm(t, directory, gzipSync(Buffer.concat([tarEntry('package/unlisted', Buffer.from('bad')), Buffer.alloc(1024)])));
   const outputDirectory = join(directory, 'output');
   mkdirSync(outputDirectory);
-  writeFileSync(join(outputDirectory, 'hive-swarm-1.9.0.tgz'), 'retain original');
+  writeFileSync(join(outputDirectory, 'hive-swarm-1.9.1.tgz'), 'retain original');
   await assert.rejects(packCore({packageDirectory: source, outputDirectory}), /allowlist/);
-  assert.equal(readFileSync(join(outputDirectory, 'hive-swarm-1.9.0.tgz'), 'utf8'), 'retain original');
-  assert.deepEqual(readdirSync(outputDirectory), ['hive-swarm-1.9.0.tgz']);
+  assert.equal(readFileSync(join(outputDirectory, 'hive-swarm-1.9.1.tgz'), 'utf8'), 'retain original');
+  assert.deepEqual(readdirSync(outputDirectory), ['hive-swarm-1.9.1.tgz']);
 });
 
 test('the package exposes an ESM CLI and library without install side effects or runtime dependencies', () => {
   assert.ok(existsSync(join(root, 'package.json')), 'An npm package manifest must exist');
   const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
   assert.equal(manifest.name, 'hive-swarm');
-  assert.equal(manifest.version, '1.9.0');
+  assert.equal(manifest.version, '1.9.1');
   assert.equal(manifest.type, 'module');
   assert.equal(manifest.bin['hive-swarm'], './cli.mjs');
   assert.equal(manifest.exports['./engine'], './engine.mjs');
@@ -229,7 +229,7 @@ test('a real core tarball contains only exact public files and runs from a path 
   const version = runCaptured(directory, process.execPath, [join(packageDirectory, manifest.bin['hive-swarm']), '--version'],
     {cwd: directory, env, encoding: 'utf8', timeout: 10000});
   assert.equal(version.status, 0, version.stderr);
-  assert.equal(version.stdout.trim(), '1.9.0');
+  assert.equal(version.stdout.trim(), '1.9.1');
   const help = runCaptured(directory, process.execPath, [join(packageDirectory, 'cli.mjs'), '--help'],
     {cwd: directory, env, encoding: 'utf8', timeout: 10000});
   assert.equal(help.status, 0, help.stderr);
