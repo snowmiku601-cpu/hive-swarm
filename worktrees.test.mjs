@@ -76,7 +76,7 @@ test('cleanup prunes the checkout registration after its managed parent was remo
   const {source,state,id,git}=await repoFixture(t);
   const checkout=await openWorktree(state,source,id,'missing');
   const target=realpathSync(dirname(checkout.path));
-  assert.equal(target,realpathSync(join(state,'worktrees',id)));
+  assert.equal(realpathSync.native(target),realpathSync.native(join(state,'worktrees',id)));
   rmSync(target,{recursive:true});
   await worktrees.removeWorktree(state,source,id,'missing',checkout);
   assert.ok(!git('worktree','list','--porcelain').toString().includes(id));
