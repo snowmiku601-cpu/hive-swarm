@@ -12,7 +12,7 @@ import { openWorktree, removeWorktree, worktreeSource } from './worktrees.mjs';
 
 const boardUri = 'ui://hive-swarm/board.html';
 const asset = name => readFileSync(new URL(name,import.meta.url),'utf8');
-const {version} = JSON.parse(asset('.codex-plugin/plugin.json'));
+const {version} = JSON.parse(asset('package.json'));
 const html = asset('board.html').replace('<!-- hive-style -->', () => '<style>'+asset('board.css')+'</style>')
   .replace('<!-- hive-scripts -->', () => ['hive-graph.js','hive-bees.js','board.js'].map(name => '<script>'+asset(name)+'</script>').join('\n'));
 const root = process.env.HIVE_SWARM_DATA || process.env.TEAM_BOARD_DATA || join(process.env.LOCALAPPDATA || homedir(), 'CodexTeamBoard');

@@ -1,7 +1,9 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import {readFileSync} from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { childEnvironment, configuredEffort, extractReportMessage } from './engine.mjs';
+const {version}=JSON.parse(readFileSync(new URL('./package.json',import.meta.url),'utf8'));
 
 const fields = ['state', 'message', 'notify', 'waitFor'];
 const names = {type: 'array', items: {type: 'string'}};
@@ -192,7 +194,7 @@ export class CodexRunner {
     child.once('exit', () => this.disconnect(child, 'Codex app-server closed.'));
     createInterface({input: child.stdout}).on('line', line => this.receive(line));
     await this.rpc('initialize', {
-      clientInfo: {name: 'hive_swarm', version: '1.7.4'},
+      clientInfo: {name: 'hive_swarm', version},
       capabilities: {experimentalApi: true},
     });
     this.send({method: 'initialized', params: {}});

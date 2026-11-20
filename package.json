@@ -1,0 +1,61 @@
+{
+  "name": "hive-swarm",
+  "version": "1.8.0",
+  "description": "Local multi-agent coordination, dependent tasks, and a shared Swarm board.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/snowmiku601-cpu/hive-swarm.git"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.2.0"
+  },
+  "bin": {
+    "hive-swarm": "./cli.mjs"
+  },
+  "exports": {
+    "./engine": "./engine.mjs",
+    "./worktrees": "./worktrees.mjs",
+    "./core": "./core.mjs",
+    "./run-store": "./run-store.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    ".agents/plugins/marketplace.json",
+    ".codex-plugin/plugin.json",
+    ".mcp.json",
+    "assets/hive-swarm-banner.svg",
+    "assets/hive-swarm-flow.svg",
+    "assets/hive-swarm-icon.png",
+    "assets/hive-swarm-icon.svg",
+    "board.css",
+    "board.html",
+    "board.js",
+    "cli.mjs",
+    "codex.mjs",
+    "core.mjs",
+    "engine.mjs",
+    "hive-bees.js",
+    "hive-graph.js",
+    "installer.mjs",
+    "run-store.mjs",
+    "server.mjs",
+    "skills/swarm/SKILL.md",
+    "skills/swarm/agents/openai.yaml",
+    "worktrees.mjs"
+  ],
+  "scripts": {
+    "test": "node --test --test-concurrency=2 ./*.test.mjs packages/dsh-hive-swarm/*.test.mjs",
+    "pack:core": "node scripts/pack-core.mjs",
+    "pack:dsh": "node scripts/pack-dsh.mjs",
+    "build:dsh": "node scripts/build-dsh-client.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-test-renderer": "18.3.1",
+    "jsdom": "26.1.0"
+  }
+}

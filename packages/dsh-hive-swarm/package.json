@@ -1,0 +1,33 @@
+{
+  "name": "dsh-hive-swarm",
+  "version": "1.8.0",
+  "description": "Native Hive Swarm coordination, worker sessions and views for DeepSeek Harness.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {"type": "git", "url": "git+https://github.com/snowmiku601-cpu/hive-swarm.git"},
+  "engines": {"node": "^22.19.0 || >=24.2.0"},
+  "main": "./host.mjs",
+  "exports": {".": "./host.mjs", "./client": "./client/dist.js", "./package.json": "./package.json"},
+  "dsh": {
+    "engines": {"dsh": "0.2.2-rc.5"},
+    "bundle": {"patch": "./cordis.patch.yml"},
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-tool",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  },
+  "dependencies": {"hive-swarm": "1.8.0"},
+  "peerDependencies": {"@deepseek-ai/dsh": "0.2.2-rc.5", "react": "^18.3.1 || ^19.0.0"},
+  "devDependencies": {"esbuild": "0.25.12", "react": "18.3.1", "react-dom": "18.3.1", "react-test-renderer": "18.3.1", "jsdom": "26.1.0"},
+  "files": ["host.mjs", "native.mjs", "runner.mjs", "routes.mjs", "client/dist.js", "cordis.patch.yml", "skills/hive-swarm/SKILL.md"],
+  "scripts": {"build": "node ../../scripts/build-dsh-client.mjs", "test": "node --test client.test.mjs"}
+}

@@ -1,0 +1,24 @@
+{
+  "checkedAt": "2026-11-20T08:01:55.375Z",
+  "account": "snowmiku601",
+  "packages": [
+    {
+      "name": "hive-swarm",
+      "version": "1.8.0",
+      "distTag": "latest",
+      "integrity": "sha512-EPQv5pwrlHU5PsW+b2LF6Nn6fwPdhRpkkvFgHMoZI1ACMOHfhuPJDeXLxaJ4ThhMRmE4IT1cMe21/USXPp5srQ==",
+      "tarballBytes": 85756,
+      "verifiedFiles": 25
+    },
+    {
+      "name": "dsh-hive-swarm",
+      "version": "1.8.0",
+      "distTag": "next",
+      "integrity": "sha512-74nNoZ7sh2OrjvDFMOnY19FSwTOgRqLFPcoI5kAlvF3HDi0EY+rtiYGquo/okQyZMB07GLfQdZSFpML1i7YlWQ==",
+      "tarballBytes": 31666,
+      "verifiedFiles": 10
+    }
+  ],
+  "ciRun": "https://github.com/snowmiku601-cpu/hive-swarm/actions/runs/44700608834",
+  "finalCommit": "09c0cbbb3a2d81c1480026827046ce3011257b75"
+}

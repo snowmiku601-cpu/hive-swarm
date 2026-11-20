@@ -1,0 +1,25 @@
+{
+  "version": "1.8.0",
+  "status": "both packages published; registry SHA-512 verified",
+  "artifacts": [
+    {
+      "name": "hive-swarm",
+      "filename": "hive-swarm-1.8.0.tgz",
+      "size": 85756,
+      "integrity": "sha512-EPQv5pwrlHU5PsW+b2LF6Nn6fwPdhRpkkvFgHMoZI1ACMOHfhuPJDeXLxaJ4ThhMRmE4IT1cMe21/USXPp5srQ==",
+      "files": 25
+    },
+    {
+      "name": "dsh-hive-swarm",
+      "filename": "dsh-hive-swarm-1.8.0.tgz",
+      "size": 31666,
+      "integrity": "sha512-74nNoZ7sh2OrjvDFMOnY19FSwTOgRqLFPcoI5kAlvF3HDi0EY+rtiYGquo/okQyZMB07GLfQdZSFpML1i7YlWQ==",
+      "files": 10,
+      "loaderBytes": 56336
+    }
+  ],
+  "registryTags": {
+    "hiveSwarm": "latest",
+    "dshHiveSwarm": "next"
+  }
+}

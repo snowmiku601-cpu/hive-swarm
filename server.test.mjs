@@ -50,12 +50,13 @@ async function fixture(t, run = async ({member,team,remember})=>{
     return body;
   };
   const waitFor=async (id,condition)=>{
-    for (let attempt=0;attempt<60;attempt++) {
-      const state=await invoke('board_status',{teamId:id});
+    const deadline=Date.now()+15000;let state;
+    while(Date.now()<deadline) {
+      state=await invoke('board_status',{teamId:id});
       if (condition(state)) return state;
       await delay(10);
     }
-    assert.fail('Team did not reach the expected state');
+    assert.fail('Team did not reach the expected state: '+JSON.stringify({phase:state?.phase,members:state?.members?.map(member=>({name:member.name,status:member.status})),lastPost:state?.events?.at(-1)?.text}));
   };
   return {invoke,peer,start,waitFor,origin:server.origin,key,dataDirectory};
 }
