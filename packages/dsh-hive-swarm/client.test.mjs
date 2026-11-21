@@ -5,6 +5,7 @@ import {createRequire} from 'node:module';
 import {runInNewContext} from 'node:vm';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
+const textOf = node => typeof node==='string'||typeof node==='number'?String(node):Array.isArray(node)?node.map(textOf).join(''):node?.children?textOf(node.children):'';
 const controllerModule = () => import('./client/controller.mjs');
 const team = (id = 'one', seq = 8) => ({id, host:'deepseek-harness', title:'Release qualification', cwd:'D:/fixture project',
   task:'Qualify the native package', paused:false, phase:'working', turns:2, turnLimit:8,
@@ -153,7 +154,7 @@ test('refreshing a read feed never cancels or repeats an in-flight user command'
   assert.equal(t.calls.filter(call=>call.method==='command').length,1);off();c.dispose();
 });
 
-async function loadClient() {
+async function loadClient(extras={}) {
   const {buildClient}=await import('../../scripts/build-dsh-client.mjs');
   const result=await buildClient({write:false});
   const require=[new URL('../../package.json',import.meta.url),import.meta.url,new URL('../../.tmp/dsh-ui-build/package.json',import.meta.url)]
@@ -165,7 +166,7 @@ async function loadClient() {
   const React=require('react');let client;
   runInNewContext(result.code,{window:{__ModuleLoader__:{load:({id,factory})=>{
     assert.equal(id,'dsh-hive-swarm');client=factory(name=>{assert.equal(name,'react');return React;});
-  }}},AbortController,AbortSignal,DOMException,URL,crypto:globalThis.crypto,setTimeout,clearTimeout,queueMicrotask,console});
+  }}},AbortController,AbortSignal,DOMException,URL,Blob:globalThis.Blob,crypto:globalThis.crypto,setTimeout,clearTimeout,queueMicrotask,console,...extras});
   return {client,React,renderer:require('react-test-renderer'),require};
 }
 
@@ -314,9 +315,13 @@ test('native render switches four real views, opens Journal and expands with the
   const picker=view.root.findByProps({'aria-label':'Team'});
   await renderer.act(async()=>{await picker.props.onChange({target:{value:'one'}});await tick()});
   const tabs=()=>view.root.findAll(x=>x.props.role==='tab');assert.equal(tabs().length,4);
+  assert.equal(tabs().find(x=>x.children.includes('Board')).findByProps({className:'dsh-hive-tab-count'}).children.join(''),'2');
+  assert.equal(tabs().find(x=>x.children.includes('Members')).findByProps({className:'dsh-hive-tab-count'}).children.join(''),'1');
   await renderer.act(async()=>tabs().find(x=>x.children.includes('Board')).props.onClick());
   assert.ok(JSON.stringify(view.toJSON()).includes('Package verified'));
   await renderer.act(async()=>tabs().find(x=>x.children.includes('Graph')).props.onClick());
+  assert.ok(view.root.findByProps({'aria-label':'Hive cluster graph'}));
+  await renderer.act(async()=>view.root.findAllByType('button').find(b=>b.children.join('')==='Mentions').props.onClick());
   assert.ok(view.root.findByProps({'aria-label':'Message flow graph'}));
   assert.ok(view.root.findAll(x=>x.type==='path'&&x.props['data-hive-edge']).length>0);
   await renderer.act(async()=>tabs().find(x=>x.children.includes('Members')).props.onClick());
@@ -411,7 +416,7 @@ test('native controls post, pause, resume, switch model, add, retire and open th
   }});client.apply(f.ctx);
   const entry=f.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let view;
   await renderer.act(async()=>{view=renderer.create(React.createElement(entry.component,entry.options.inject('parent')));await tick()});
-  const findButton=label=>view.root.findAllByType('button').find(button=>button.children.join('')===label);
+  const findButton=label=>view.root.findAllByType('button').find(button=>button.children.join('')===label||(button.props.role==='tab'&&button.children.includes(label)));
   const click=async label=>renderer.act(async()=>{const button=findButton(label);assert.ok(button,label);assert.notEqual(button.props.disabled,true,label);await button.props.onClick?.({currentTarget:null});await tick()});
   const field=async (node,value)=>renderer.act(async()=>{node.props.onChange({target:{value}});});
   try {
@@ -517,11 +522,12 @@ test('the native client reaches the exact Host POST routes with correlated Conne
   assert.equal(launches,0);
 });
 
-test('native UI renders safe Markdown, clickable #seq jumps, outcome threads, progress bars, milestones, and recovery controls',async()=>{
+test('native UI renders safe Markdown, clickable #seq jumps, outcome threads with progress bars, Task Summary, The team, and recovery controls',async()=>{
   const {client,React,renderer}=await loadClient();
   let current={
     ...team(),
     phase:'stalled',
+    attention:[{kind:'recovery',member:'alpha',seq:1,text:'@alpha outcome unconfirmed.'}],
     threads:[
       {id:'t-done',title:'Docs update',goal:'Sync README',members:['beta']},
       {id:'t-blocked',title:'Native runner',goal:'Fix recovery',members:['alpha']},
@@ -550,12 +556,15 @@ test('native UI renders safe Markdown, clickable #seq jumps, outcome threads, pr
   try{
     await renderer.act(async()=>{view=renderer.create(React.createElement(entry.component,entry.options.inject('parent')));await tick();});
     await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
-    // Overview: progress bars, outcome threads ordered blocked -> done, milestones, recovery controls
+    // Overview: Task Summary Card, Needs you alerts, Threads ordered blocked -> done with inline progress bars, The team card
     assert.equal(view.root.findAllByType('progress').length,2);
-    const overviewText=JSON.stringify(view.toJSON());
+    const overviewText=textOf(view.toJSON());
+    assert.ok(overviewText.includes('1 of 2 tasks done'));
     assert.ok(overviewText.includes('Native runner')&&overviewText.includes('Docs update'));
     assert.ok(overviewText.indexOf('Native runner')<overviewText.indexOf('Docs update'));
-    assert.ok(overviewText.includes('Milestones'));
+    assert.ok(overviewText.includes('Needs you'));
+    assert.ok(overviewText.includes('The team'));
+    assert.ok(overviewText.includes('Coordinator'));
     const retryBtn=findButton('Retry fresh turn for @alpha');
     assert.ok(retryBtn,'Expected recovery retry control');
     await renderer.act(async()=>{await retryBtn.props.onClick();await tick();});
@@ -664,15 +673,17 @@ test('native Members renders executionMode badges, passes SubagentAddress on Ope
   }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
 });
 
-test('native Graph clips every SVG edge strictly outside wrapped multi-line node cards and renders mention count pills',async()=>{
+test('native Graph defaults to Hive mode, persists mode in sessionStorage, and clips Mentions edges outside capsule pills',async()=>{
   await import('../../hive-graph.js');
   const Graph=globalThis.HiveGraph;
-  const {client,React,renderer}=await loadClient();
+  const store=new Map();
+  const sessionStorage={getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,String(v))};
+  const {client,React,renderer}=await loadClient({sessionStorage});
   const sixNodeTeam={
     ...team(),
     members:[
       {name:'design-research',status:'done',brief:'Design research',model:'sol',writable:false},
-      {name:'asset-research',status:'done',brief:'Asset research',model:'sol',writable:false},
+      {name:'asset-research',status:'retired',brief:'Asset research',model:'sol',writable:false},
       {name:'builder',status:'working',brief:'Build app',model:'sol',writable:true},
       {name:'qa',status:'waiting',brief:'QA app',model:'sol',writable:false},
       {name:'user',status:'observer',brief:'Human',model:'sol',writable:false},
@@ -695,12 +706,41 @@ test('native Graph clips every SVG edge strictly outside wrapped multi-line node
     await renderer.act(async()=>{view=renderer.create(React.createElement(entry.component,entry.options.inject('parent')));await tick();});
     await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
     await renderer.act(async()=>{view.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Graph')).props.onClick();await tick();});
+    // Default mode is Hive
+    const hiveBtn=view.root.findAllByType('button').find(b=>b.children.join('')==='Hive');
+    const mentionsBtn=view.root.findAllByType('button').find(b=>b.children.join('')==='Mentions');
+    assert.equal(hiveBtn.props['aria-pressed'],true);
+    assert.equal(mentionsBtn.props['aria-pressed'],false);
+    assert.ok(view.root.findByProps({'aria-label':'Hive cluster graph'}));
+    assert.ok(view.root.findAllByProps({className:'dsh-hive-hex-poly'}).length>=2);
+    assert.equal(view.root.findByType('marker').props.markerUnits,'userSpaceOnUse');
+    // Switch to Mentions -> persists in sessionStorage, renders switches + capsule pills
+    await renderer.act(async()=>{mentionsBtn.props.onClick();await tick();});
+    assert.equal(store.get('hive-swarm:dsh:graph-mode'),'mentions');
+    assert.equal(view.root.findAllByProps({role:'switch'}).length,2);
     const svg=view.root.findByType('svg');
     const [,,wStr,hStr]=svg.props.viewBox.split(' ');
     const width=Number(wStr),height=Number(hStr);
-    const narrow=width<440,cardWidth=narrow?94:112;
+    const narrow=width<440;
     const projection=Graph.project(sixNodeTeam.events,sixNodeTeam.members,8,{});
-    const points=Graph.layout(projection.nodes,width,height);
+    const points=(typeof Graph.layoutMentions==='function'?Graph.layoutMentions(projection.nodes,width,height):(()=>{
+      const res=new Map();
+      const coordIdx=projection.nodes.findIndex(n=>n.role==='coordinator'||n.name==='coordinator');
+      const ordered=coordIdx>=0?[projection.nodes[coordIdx],...projection.nodes.filter((_,i)=>i!==coordIdx)]:projection.nodes;
+      const topPad=42,bottomPad=42,sidePad=Math.min(92,Math.max(58,width*0.14));
+      const cx=width/2,cy=(topPad+(height-bottomPad))/2;
+      const rx=Math.max(56,Math.min(width*0.38,width/2-sidePad)),ry=Math.max(46,(height-topPad-bottomPad)/2);
+      ordered.forEach((n,i)=>{const a=-Math.PI/2+i*(Math.PI*2/ordered.length);res.set(n.name,{x:cx+Math.cos(a)*rx,y:cy+Math.sin(a)*ry});});
+      return res;
+    })());
+    const pillBoxFor=node=>{
+      if(typeof Graph.nodeBox==='function'){
+        const b=Graph.nodeBox(node,{variant:'pill',narrow});
+        if(b&&b.radius>=b.halfH-1)return b;
+      }
+      const halfH=narrow?14:16;
+      return {halfW:Math.max(44,Math.min(96,24+String(node.name).length*4.1)),halfH,offsetX:0,offsetY:0,radius:halfH};
+    };
     const edges=view.root.findAll(x=>x.type==='path'&&x.props['data-hive-edge']);
     assert.equal(edges.length,7);
     for(const path of edges){
@@ -709,24 +749,190 @@ test('native Graph clips every SVG edge strictly outside wrapped multi-line node
       assert.ok(m,'valid quadratic path for '+path.props['data-hive-edge']+': '+path.props.d);
       const sx=Number(m[1]),sy=Number(m[2]),ex=Number(m[5]),ey=Number(m[6]);
       const fromPt=points.get(from),toPt=points.get(to);
-      const fromBox=Graph.nodeBox(projection.nodes.find(n=>n.name===from),{variant:'card',cardWidth,narrow});
-      const toBox=Graph.nodeBox(projection.nodes.find(n=>n.name===to),{variant:'card',cardWidth,narrow});
+      const fromBox=pillBoxFor(projection.nodes.find(n=>n.name===from));
+      const toBox=pillBoxFor(projection.nodes.find(n=>n.name===to));
       const dStart=Graph.roundedRectSignedDistance(sx,sy,{cx:fromPt.x,cy:fromPt.y,halfW:fromBox.halfW,halfH:fromBox.halfH,radius:fromBox.radius});
       const dEnd=Graph.roundedRectSignedDistance(ex,ey,{cx:toPt.x,cy:toPt.y,halfW:toBox.halfW,halfH:toBox.halfH,radius:toBox.radius});
-      assert.ok(dStart>=1.5,'SVG start outside source card for '+from+'->'+to+': '+dStart);
-      assert.ok(dEnd>=2.5,'SVG arrowhead tip outside target card for '+from+'->'+to+': '+dEnd);
+      assert.ok(dStart>=1.5,'SVG start outside source pill for '+from+'->'+to+': '+dStart);
+      assert.ok(dEnd>=2.5,'SVG arrowhead tip outside target pill for '+from+'->'+to+': '+dEnd);
     }
-    // Single marker contract preserved
     assert.equal(view.root.findAllByType('marker').length,1);
     assert.equal(view.root.findByType('marker').props.markerUnits,'userSpaceOnUse');
-    // Multi-mention badge pill renders for qa->builder (2 mentions)
     const pills=view.root.findAllByProps({className:'dsh-hive-edge-pill'});
     assert.ok(pills.length>=1,'expected mention count pill(s) on SVG graph');
-    // Focus dimming on clicking a node
-    const qaBtn=view.root.findAllByProps({className:'dsh-hive-graph-node'}).find(b=>b.findByType('strong').children.join('')==='qa');
+    // Retired strikethrough + capsule focus dimming
+    const retiredBtn=view.root.findAllByProps({className:'dsh-hive-graph-pill'}).find(b=>b.props['data-retired']==='true');
+    assert.ok(retiredBtn,'expected retired member pill attribute');
+    const qaBtn=view.root.findAllByProps({className:'dsh-hive-graph-pill'}).find(b=>b.findByProps({className:'dsh-hive-graph-pill-name'}).children.join('')==='qa');
     await renderer.act(async()=>{qaBtn.props.onClick();});
-    const assetBtn=view.root.findAllByProps({className:'dsh-hive-graph-node'}).find(b=>b.findByType('strong').children.join('')==='asset-research');
+    const assetBtn=view.root.findAllByProps({className:'dsh-hive-graph-pill'}).find(b=>b.findByProps({className:'dsh-hive-graph-pill-name'}).children.join('')==='asset-research');
     assert.equal(qaBtn.props['aria-pressed'],true);
     assert.equal(assetBtn.props['data-dimmed'],'true');
+  }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
+});
+
+test('Overview renders goalLine, Task Summary accordion, auto-synthesized Tasks thread, Goal [done] summary, omits empty Needs you, and opens Screenshots lightbox',async()=>{
+  const {client,React,renderer}=await loadClient();
+  const richTeam={
+    ...team('one',12),
+    goalLine:'Ship Hive Swarm 2.1.0 UI and backend fixes',
+    task:'Full detailed prompt\nLine two of full brief',
+    phase:'done',
+    turns:5,turnLimit:12,
+    threads:[],
+    attention:[],
+    members:[
+      {name:'alpha',status:'done',taskLabel:'Build Overview accordion',brief:'You are Hive Swarm member alpha for Hive Swarm 2.1.0.',model:'sol',writable:true,
+        session:{host:'deepseek-harness',id:'owned-alpha'},threadId:'owned-alpha'},
+      {name:'beta',status:'done',brief:'You are Hive Swarm worker beta. Verify Board Author dedup for Hive Swarm 2.0.0.',model:'sol',writable:false,
+        session:{host:'deepseek-harness',id:'owned-beta'},threadId:'owned-beta'},
+    ],
+    events:[
+      {seq:10,kind:'message',author:'alpha',text:'[done] Built collapsible Task Summary and Threads',targets:['user'],channel:'main'},
+      {seq:11,kind:'message',author:'user',text:'[done] Goal release verified cleanly across all checks.',targets:[],channel:'main'},
+    ],
+    screenshots:[
+      {id:'10:0',seq:10,index:0,author:'alpha',caption:'Overview expanded view',time:'2026-11-21T10:00:00Z',url:'/api/hive-swarm/v1/screenshot?teamId=one&seq=10&index=0'},
+    ],
+  };
+  const f=fakeContext({
+    snapshot:({teamId})=>({teams:[richTeam],team:teamId?richTeam:null}),
+    command:({action,args})=>action==='read_journal'?{member:args.member,threadId:'owned-'+args.member,turns:[{turn:1,status:'done',report:'Verified'}]}:richTeam,
+  });
+  client.apply(f.ctx);
+  const entry=f.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let view;
+  try{
+    await renderer.act(async()=>{view=renderer.create(React.createElement(entry.component,entry.options.inject('parent')));await tick();});
+    await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
+    const text=JSON.stringify(view.toJSON());
+    // goalLine + Full brief disclosure
+    assert.ok(text.includes('Ship Hive Swarm 2.1.0 UI and backend fixes'));
+    assert.ok(text.includes('Full brief'));
+    // No empty "No blockers reported" or "Needs you" section
+    assert.equal(text.includes('No blockers reported'),false);
+    assert.equal(text.includes('Needs you'),false);
+    // Task Summary Card starts collapsed (2 of 2 tasks done), expands on summary click
+    const summaryDetails=()=>view.root.findAllByType('details').find(d=>d.props.className==='dsh-hive-task-card');
+    assert.equal(summaryDetails().props.open,false);
+    await renderer.act(async()=>{summaryDetails().findByProps({className:'dsh-hive-task-summary'}).props.onClick({preventDefault(){}});});
+    assert.equal(summaryDetails().props.open,true);
+    // Task titles use explicit taskLabel & cleaned smartTaskLabel
+    const expandedText=textOf(view.toJSON());
+    assert.ok(expandedText.includes('2 of 2 tasks done'));
+    assert.ok(expandedText.includes('Build Overview accordion'));
+    // Auto-synthesized default Tasks thread group
+    assert.ok(expandedText.includes('Tasks'));
+    assert.ok(expandedText.includes('2/2'));
+    // The team Goal [done] summary from user
+    assert.ok(expandedText.includes('Goal release verified cleanly across all checks.'));
+    // Colored bee pill click opens Journal
+    const alphaPill=view.root.findAllByProps({className:'dsh-hive-bee-pill'}).find(b=>b.props['aria-label']==='Inspect journal for @alpha');
+    assert.ok(alphaPill);
+    await renderer.act(async()=>{alphaPill.props.onClick({currentTarget:null});await tick();});
+    assert.equal(view.root.findAllByType('dialog').length,1);
+    await renderer.act(async()=>{view.root.findByProps({'aria-label':'Close Journal'}).props.onClick();});
+    // Screenshots timeline strip & accessible lightbox <dialog>
+    const thumbBtn=view.root.findByProps({'aria-label':'Preview screenshot: Overview expanded view'});
+    await renderer.act(async()=>{thumbBtn.props.onClick({currentTarget:null});});
+    let lightbox=view.root.findByType('dialog');
+    assert.equal(lightbox.findByType('img').props.src,'/api/hive-swarm/v1/screenshot?teamId=one&seq=10&index=0');
+    await renderer.act(async()=>{view.root.findByProps({'aria-label':'Close Overview expanded view'}).props.onClick();});
+    assert.equal(view.root.findAllByType('dialog').length,0);
+    await renderer.act(async()=>{thumbBtn.props.onClick({currentTarget:null});});
+    lightbox=view.root.findByType('dialog');
+    await renderer.act(async()=>{lightbox.findByProps({'aria-label':'Jump to post #10'}).props.onClick();});
+    assert.equal(view.root.findAllByType('dialog').length,0,'Lightbox closes on #seq jump');
+    assert.equal(view.root.findByProps({'aria-selected':true}).children[0],'Board');
+  }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
+});
+
+test('The team renders +8 turns on budget stop and sessionStorage restores Mentions mode on remount',async()=>{
+  await import('../../hive-graph.js');
+  const store=new Map([['hive-swarm:dsh:graph-mode','mentions']]);
+  const sessionStorage={getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,String(v))};
+  const {client,React,renderer}=await loadClient({sessionStorage});
+  const budgetTeam={...team(),phase:'budget',turns:8,turnLimit:8};
+  const f=fakeContext({snapshot:({teamId})=>({teams:[budgetTeam],team:teamId?budgetTeam:null})});
+  client.apply(f.ctx);
+  const entry=f.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let view;
+  try{
+    await renderer.act(async()=>{view=renderer.create(React.createElement(entry.component,entry.options.inject('parent')));await tick();});
+    await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
+    const plusBtn=view.root.findAllByType('button').find(b=>b.children.join('')==='+8 turns');
+    assert.ok(plusBtn,'Expected +8 turns button on budget stop');
+    await renderer.act(async()=>{await plusBtn.props.onClick();await tick();});
+    const resumeCmd=f.ctx.calls.find(c=>c.method==='command'&&c.payload.action==='resume_team');
+    assert.equal(resumeCmd.payload.args.extraTurns,8);
+    await renderer.act(async()=>{view.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Graph')).props.onClick();});
+    const mentionsBtn=view.root.findAllByType('button').find(b=>b.children.join('')==='Mentions');
+    assert.equal(mentionsBtn.props['aria-pressed'],true);
+  }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
+});
+
+test('Board Author filter includes You (user), deduplicates coordinator, and filters posts',async()=>{
+  const {client,React,renderer}=await loadClient();
+  const dupCoordTeam={
+    ...team(),
+    members:[
+      {name:'coordinator',role:'coordinator',status:'waiting',brief:'Lead',model:'sol',writable:false},
+      {name:'alpha',status:'done',brief:'Work',model:'sol',writable:false},
+    ],
+    events:[
+      {seq:1,kind:'message',author:'user',text:'User guidance post',targets:['coordinator'],channel:'main'},
+      {seq:2,kind:'message',author:'coordinator',text:'Coordinator plan post',targets:['alpha'],channel:'main'},
+      {seq:3,kind:'message',author:'alpha',text:'Alpha report post',targets:['coordinator'],channel:'main'},
+    ],
+  };
+  const f=fakeContext({snapshot:({teamId})=>({teams:[dupCoordTeam],team:teamId?dupCoordTeam:null})});
+  client.apply(f.ctx);
+  const entry=f.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let view;
+  try{
+    await renderer.act(async()=>{view=renderer.create(React.createElement(entry.component,entry.options.inject('parent')));await tick();});
+    await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
+    await renderer.act(async()=>{view.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Board')).props.onClick();});
+    const authorSelect=view.root.findByProps({'aria-label':'Author'});
+    const optionValues=authorSelect.findAllByType('option').map(o=>o.props.value);
+    const optionLabels=authorSelect.findAllByType('option').map(o=>o.children.join(''));
+    assert.equal(optionValues.filter(v=>v==='coordinator').length,1,'coordinator must never be listed twice');
+    assert.ok(optionValues.includes('user'));
+    assert.ok(optionLabels.includes('You (user)'));
+    await renderer.act(async()=>{authorSelect.props.onChange({target:{value:'user'}});});
+    const feedPosts=view.root.findAllByProps({className:'dsh-hive-post'});
+    assert.equal(feedPosts.length,1);
+    assert.ok(textOf(feedPosts[0]).includes('User guidance post'));
+  }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
+});
+
+test('Graph Export GIF button invokes HiveGif.exportGraphReplayGif with active mode/options and announces completion',async()=>{
+  const exportCalls=[];
+  const mockGif={
+    exportGraphReplayGif(opts){
+      exportCalls.push(opts);
+      return {bytes:new Uint8Array([0x47,0x49,0x46,0x38,0x39,0x61,0x3b]),frameCount:6,width:opts.width,height:opts.height};
+    },
+  };
+  const {client,React,renderer}=await loadClient({HiveGif:mockGif});
+  const f=fakeContext();client.apply(f.ctx);
+  const entry=f.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let view;
+  try{
+    await renderer.act(async()=>{view=renderer.create(React.createElement(entry.component,entry.options.inject('parent')));await tick();});
+    await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
+    await renderer.act(async()=>{view.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Graph')).props.onClick();await tick();});
+    const exportBtn=()=>view.root.findByProps({className:'dsh-hive-export-gif'});
+    await renderer.act(async()=>{await exportBtn().props.onClick();await tick();});
+    assert.equal(exportCalls.length,1);
+    assert.equal(exportCalls[0].mode,'hive');
+    assert.equal(exportCalls[0].pacing,'even');
+    assert.equal(exportCalls[0].speed,1);
+    assert.ok(JSON.stringify(view.toJSON()).includes('release-qualification-graph.gif'));
+    // Switch to Mentions, adjust pacing & speed, export again
+    await renderer.act(async()=>{view.root.findAllByType('button').find(b=>b.children.join('')==='Mentions').props.onClick();});
+    await renderer.act(async()=>{view.root.findByProps({'aria-label':'Pacing'}).props.onChange({target:{value:'real'}});});
+    await renderer.act(async()=>{view.root.findByProps({'aria-label':'Speed'}).props.onChange({target:{value:'2'}});});
+    await renderer.act(async()=>{await exportBtn().props.onClick();await tick();});
+    assert.equal(exportCalls.length,2);
+    assert.equal(exportCalls[1].mode,'mentions');
+    assert.equal(exportCalls[1].pacing,'real');
+    assert.equal(exportCalls[1].speed,2);
   }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
 });
