@@ -5,8 +5,8 @@
 
   <p>
     <a href="https://github.com/snowmiku601-cpu/hive-swarm/actions/workflows/ci.yml"><img src="https://github.com/snowmiku601-cpu/hive-swarm/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
-    <a href="https://www.npmjs.com/package/hive-swarm"><img src="https://img.shields.io/badge/npm-hive--swarm%401.9.1-f6bc55?style=flat-square" alt="npm hive-swarm 1.9.1" /></a>
-    <a href="https://www.npmjs.com/package/dsh-hive-swarm"><img src="https://img.shields.io/badge/DSH%20(next)-dsh--hive--swarm%401.9.1-9a7138?style=flat-square" alt="npm dsh-hive-swarm 1.9.1 next" /></a>
+    <a href="https://www.npmjs.com/package/hive-swarm"><img src="https://img.shields.io/badge/npm-hive--swarm%402.0.0-f6bc55?style=flat-square" alt="npm hive-swarm 2.0.0" /></a>
+    <a href="https://www.npmjs.com/package/dsh-hive-swarm"><img src="https://img.shields.io/badge/DSH%20(next)-dsh--hive--swarm%402.0.0-9a7138?style=flat-square" alt="npm dsh-hive-swarm 2.0.0 next" /></a>
     <img src="https://img.shields.io/badge/runtime-Node.js%2022.19%20%7C%2024.2%2B-75baef?style=flat-square" alt="Node.js 22.19 or 24.2 and newer" />
     <img src="https://img.shields.io/badge/core_runtime_dependencies-0-55cbb2?style=flat-square" alt="Zero core runtime dependencies" />
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-b3ce64?style=flat-square" alt="MIT license" /></a>
@@ -29,8 +29,8 @@ Hive Swarm is a lightweight **multi-agent coordination engine and UI** for AI co
 
 The coordination core (`engine.mjs`, `core.mjs`, `run-store.mjs`) is harness-agnostic:
 
-- **Codex Desktop & Codex CLI (`hive-swarm@1.9.1`, npm `latest`)** — full MCP server, per-member Codex `app-server` sessions, inline MCP App, and standalone four-tab board UI.
-- **DeepSeek Harness Desktop `0.2.2-rc.5` (`dsh-hive-swarm@1.9.1`, npm `next`, experimental)** — native DSH sessions, permission-scoped tools, bee-marked **Swarm** Start card, right-dock tab, and full React panel.
+- **Codex Desktop & Codex CLI (`hive-swarm@2.0.0`, npm `latest`)** — full MCP server, attached child threads on Codex `0.171+` (`fork: "coordinator"`, graceful `0.169.1` fallback), strict model locks, inline MCP App, and standalone four-tab board UI.
+- **DeepSeek Harness Desktop `0.2.2-rc.5` (`dsh-hive-swarm@2.0.0`, npm `next`, experimental)** — hidden native DSH subagent workers (zero sidebar clutter), permission-scoped tools, bee-marked **Swarm** Start card, right-dock tab, and full React panel.
 
 The core runtime uses **Node.js ESM**, built-in `node:sqlite`, and **zero third-party runtime dependencies**. Pinned `devDependencies` are only used to build and test the DSH client bundle (React is supplied by DSH at runtime).
 
@@ -40,8 +40,8 @@ Requires **Node.js `^22.19.0 || >=24.2.0`** and either **Codex Desktop / Codex C
 
 | Host | Published package | Status | Worker & UI model |
 | --- | --- | --- | --- |
-| **Codex Desktop / CLI** | `hive-swarm@1.9.1` (`latest`) | Production adapter; lifecycle qualified on CLI `0.169.1` | Per-member Codex sessions, inline MCP App & standalone 4-tab board |
-| **DeepSeek Harness `0.2.2-rc.5`** | `dsh-hive-swarm@1.9.1` (`next`) | Experimental; hardened via live multi-worker DSH stress testing | Native DSH sessions, Start card, right tab & full React panel |
+| **Codex Desktop / CLI** | `hive-swarm@2.0.0` (`latest`) | Production adapter; attached threads on `0.171+` & qualified on `0.169.1` | Attached/per-member Codex threads, inline MCP App & standalone 4-tab board |
+| **DeepSeek Harness `0.2.2-rc.5`** | `dsh-hive-swarm@2.0.0` (`next`) | Experimental; native subagent swarms & fail-closed tool sandboxing | Hidden native DSH subagents, Start card, right tab & full React panel |
 
 ### 1. Codex Desktop / CLI (via npm — recommended)
 
@@ -77,7 +77,7 @@ After installing or updating, open a **new Codex Desktop chat** so the fresh MCP
 DSH manages plugins through its own profile manager. Close DSH Desktop, then run:
 
 ```sh
-dsh plugin --profile desktop add dsh-hive-swarm@1.9.1
+dsh plugin --profile desktop add dsh-hive-swarm@2.0.0
 ```
 
 - `npx hive-swarm@latest install --host dsh` prints this command and never edits a DSH profile directly.

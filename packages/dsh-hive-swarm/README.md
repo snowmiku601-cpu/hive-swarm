@@ -2,12 +2,12 @@
 
 Native worker sessions and a bee-marked **Swarm** Start card, right tab, and full panel for **DSH 0.2.2-rc.5**. The package pins the matching `hive-swarm` core. React and native SDK services are supplied by the Host.
 
-This is the **experimental `1.9.1` release** for DSH `0.2.2-rc.5` (hardened via live 4-worker, 43-turn end-to-end stress testing with OpenAI Responses strict-mode nullable tool schemas, lossless JSON outputs, host-verified `currentSession` + Journal route proof, read-only research/skill tools, and fixed Graph/Overview/Members UI). The core/build/native test suite passes on Windows, macOS, and Linux; live DSH Desktop qualification is Windows-specific.
+This is the **experimental `2.0.0` release** for DSH `0.2.2-rc.5` (native hidden child subagents via `ctx.subagents.startActivation` and `ctx.agents.resume` Turn 2+ continuations with zero workspace sidebar clutter, synchronous fail-closed sandbox & tool-restriction locks, `fork: "coordinator"`, exact box-clipped Graph arrows, and Design DNA UI overhaul). The core/build/native test suite passes on Windows, macOS, and Linux; live DSH Desktop qualification is Windows-specific.
 
 Close Desktop and let DSH manage its profile:
 
 ```sh
-dsh plugin --profile desktop add dsh-hive-swarm@1.9.1
+dsh plugin --profile desktop add dsh-hive-swarm@2.0.0
 ```
 
 Use the native `/hive-swarm` skill for requested teams. Opening Swarm or reading a Journal does not start a model. Select an exact team in its workspace; the four views are **Overview** (progress, outcome threads, milestones, alerts), **Board** (safe Markdown, `#seq` jumps, channels, live activity), **Members** (model controls, recovery, worktree cleanup), and **Graph** (animated replay and flow inspection). Native tool results can open their Host-verified team directly.
