@@ -893,7 +893,7 @@
       // Only thread title uses <strong> to keep thread heading structure clear and testable.
       left.append(dot,node('strong','',thread.title),node('span','thread-status-text',state.label));
       const threadMembers=(thread.members??[]).map(name=>roster.find(member=>member.name===name)??{name,status:'queued'});
-      const threadDone=threadMembers.filter(member=>member.status==='done').length;
+      const threadDone=threadMembers.filter(member=>['done','retired'].includes(member.status)).length;
       const threadTotal=threadMembers.length;
       const pct=threadTotal?Math.round(threadDone/threadTotal*100):0;
       const right=node('span','thread-progress-wrap');
@@ -1401,9 +1401,13 @@
     }
     return Number.isFinite(bestT)?{x:origin.x+dx*bestT,y:origin.y+dy*bestT}:origin;
   }
-  function rayClipHex(fromCell,toCell) {
-    const start=clipRayToHex(fromCell,toCell,fromCell.vertices);
-    const end=clipRayToHex(toCell,fromCell,toCell.vertices);
+  function rayClipHex(fromCell,toCell,offset=0) {
+    const angle=Math.atan2(toCell.y-fromCell.y,toCell.x-fromCell.x);
+    const nx=-Math.sin(angle),ny=Math.cos(angle);
+    const fromPt=offset?{x:fromCell.x+nx*offset,y:fromCell.y+ny*offset}:fromCell;
+    const toPt=offset?{x:toCell.x+nx*offset,y:toCell.y+ny*offset}:toCell;
+    const start=clipRayToHex(fromPt,toPt,fromCell.vertices);
+    const end=clipRayToHex(toPt,fromPt,toCell.vertices);
     return {start,end};
   }
   function drawHexCell(ctx,cell,palette,title,subtitle) {
@@ -1450,8 +1454,10 @@
     for (const conn of connectors) {
       const fromCell=hiveLayout.cellsById.get(conn.from);
       const toCell=hiveLayout.cellsById.get(conn.to);
-      if (!fromCell||!toCell) continue;
-      const {start,end}=rayClipHex(fromCell,toCell);
+      if (!fromCell||!toCell||fromCell===toCell) continue;
+      const offset=conn.kind==='message'?8:conn.kind==='waiting'?-8:0;
+      const {start,end}=rayClipHex(fromCell,toCell,offset);
+      if (Math.hypot(end.x-start.x,end.y-start.y)<1) continue;
       const stroke=conn.kind==='done'?color.good:conn.kind==='message'?color.purple:color.gold;
       ctx.strokeStyle=stroke;
       ctx.lineWidth=conn.kind==='message'?2.2:1.8;

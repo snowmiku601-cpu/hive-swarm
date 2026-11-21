@@ -29,7 +29,16 @@ class ViewNode {
   focus() {this.focused=true;}
   showModal() {this.open=true;}
   close() {this.open=false;}
-  getContext() {return new Proxy({}, {get:(target,key)=>target[key]??(()=>{}),set:(target,key,value)=>(target[key]=value,true)});}
+  getContext() {
+    if (this._ctx) return this._ctx;
+    const ops=this.canvasOps??=[];
+    const rec=(op,args)=>ops.push({op,args});
+    this._ctx=new Proxy({}, {
+      get:(target,key)=>target[key]??((...args)=>{rec(key,args);}),
+      set:(target,key,value)=>(target[key]=value,rec('set:'+key,[value]),true),
+    });
+    return this._ctx;
+  }
   scrollIntoView() {this.scrolled=true;}
   querySelector(selector) {
     const sequence=/^\[data-seq="(\d+)"\]$/.exec(selector)?.[1];
@@ -47,7 +56,7 @@ function memStorage(seed={}) {
   };
 }
 
-async function boardView(initial,{path='/board/'+initial.id,request,live=false,darkMatches=false,localStore=memStorage(),sessionStore=memStorage(),hiveGif}={}) {
+async function boardView(initial,{path='/board/'+initial.id,request,live=false,darkMatches=false,localStore=memStorage(),sessionStore=memStorage(),hiveGif,hiveGraphExt}={}) {
   const elements=new Map();
   const element=id=>{
     if (!elements.has(id)) elements.set(id,new ViewNode(id));
@@ -110,7 +119,9 @@ async function boardView(initial,{path='/board/'+initial.id,request,live=false,d
       (await request?.(url,options))??(url.includes('/history?')
         ? {posts:state.events,head:state.events.at(-1)?.seq??0} : url==='/swarm/teams'?{teams:[]}:state)}),
   };
-  runInNewContext(read('hive-graph.js')+'\n'+read('board.js'),screen);
+  const extCode=hiveGraphExt?'globalThis.HiveGraph = { ...globalThis.HiveGraph, ...globalThis.__EXT__ };\n':'';
+  if (hiveGraphExt) screen.__EXT__=hiveGraphExt;
+  runInNewContext(read('hive-graph.js')+'\n'+extCode+read('board.js'),screen);
   await new Promise(resolve=>setImmediate(resolve));
   return {element,docElement,navigation,streams,downloads,createdUrls,revokedUrls,localStore,sessionStore,
     update:async next=>{state=next;await poll();},
@@ -799,4 +810,58 @@ test('graph defaults to Hive mode, persists Mentions mode in sessionStorage, ren
   const rawGif=second.createdUrls[0].blob.parts[0];
   assert.equal(Buffer.from(rawGif.slice(0,6)).toString('ascii'),'GIF89a');
   assert.equal(rawGif[rawGif.length-1],0x3B);
+});
+
+test('threads count retired members as done and Hive connectors skip self-loops while offsetting concurrent edges',async()=>{
+  const state={
+    id:'team',title:'Connector & Thread Audit',cwd:'fixture',phase:'working',turns:2,turnLimit:8,
+    threads:[{id:'t-retired',title:'Retired stream',goal:'Done work',members:['legacy']}],
+    members:[
+      {name:'coordinator',role:'coordinator',status:'waiting'},
+      {name:'legacy',status:'retired'},
+      {name:'waiter',status:'waiting',pendingWaitFor:['legacy']},
+    ],
+    events:[
+      {seq:1,kind:'message',author:'legacy',targets:['coordinator'],text:'[done] Retired after completing.',time:'2026-11-21T10:00:00Z'},
+    ],
+  };
+  const customGraph={
+    projectHive:()=>({
+      currentSeq:1,lastPost:{seq:1},
+      coordinator:{name:'coordinator',role:'coordinator',status:'waiting',doneCount:1,totalWorkers:1,phase:'working'},
+      clusters:[
+        {id:'done',label:'Done',tone:'done',count:1,members:[{name:'legacy',status:'retired',role:'worker'}]},
+        {id:'waiting',label:'Waiting',tone:'waiting',count:1,members:[{name:'waiter',status:'waiting',role:'worker'}]},
+      ],
+      connectors:[
+        {from:'done',to:'coordinator',kind:'done',label:'Tasks done'},
+        {from:'done',to:'coordinator',kind:'message',label:'Message just sent',seq:1},
+        {from:'waiting',to:'waiting',kind:'waiting',label:'Self loop'},
+      ],
+    }),
+    layoutHive:(_m,w,h)=>{
+      const verts=(cx,cy,r)=>Array.from({length:6},(_,k)=>({x:cx+r*Math.cos(k*Math.PI/3),y:cy+r*Math.sin(k*Math.PI/3)}));
+      const doneCell={id:'done',label:'Done',tone:'done',count:1,x:140,y:120,radius:70,vertices:verts(140,120,70),slots:[{member:{name:'legacy',status:'retired'},x:140,y:120}]};
+      const waitCell={id:'waiting',label:'Waiting',tone:'waiting',count:1,x:280,y:120,radius:70,vertices:verts(280,120,70),slots:[{member:{name:'waiter',status:'waiting'},x:280,y:120}]};
+      const coordCell={id:'coordinator',x:210,y:270,radius:70,vertices:verts(210,270,70),model:{doneCount:1,totalWorkers:1,phase:'working'}};
+      return {width:w,height:h,radius:70,coordinator:coordCell,clusters:[doneCell,waitCell],
+        cellsById:new Map([['done',doneCell],['waiting',waitCell],['coordinator',coordCell]])};
+    },
+    hiveMinimumHeight:()=>420,
+  };
+  const view=await boardView(state,{hiveGraphExt:customGraph});
+  view.element('tab-overview').onclick();
+  assert.match(view.element('overview-threads').textContent,/Done/);
+  assert.ok(childrenOf(view.element('overview-threads')).some(n=>n.className==='thread-fraction mono'&&n.textContent==='1/1'));
+
+  view.element('tab-graph').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  const ops=view.element('graph-canvas').canvasOps;
+  const moves=ops.filter(item=>item.op==='moveTo').map(item=>item.args);
+  assert.equal(moves.length>=2,true);
+  const [mDone,mMsg]=moves;
+  const dist=Math.hypot(mMsg[0]-mDone[0],mMsg[1]-mDone[1]);
+  assert.ok(dist>=7.5&&dist<=9.5,'Expected ~8px lateral offset between concurrent done and message connectors, got '+dist);
+  const dashedWires=ops.filter(item=>item.op==='setLineDash'&&item.args[0]?.length>0);
+  assert.equal(dashedWires.length,0);
 });
