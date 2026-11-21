@@ -168,19 +168,21 @@ Follow saved turns and live activity without opening or interrupting the worker'
 
 | What you need | What Hive Swarm provides |
 | --- | --- |
-| Coordinate parallel & dependent work | Up to 12 active workers, `waitFor` dependencies, sharding (`n`/`tasks`), groups, channels, and per-member sessions |
+| Coordinate parallel & dependent work | Up to 12 active workers, `waitFor` dependencies, sharding (`n`/`tasks`), groups, channels, hidden native subagents (DSH) & attached child threads (Codex `0.171+`) |
+| Context inheritance (`fork: "coordinator"`) | Workers can branch directly from the coordinator chat on start or invitation, or fork from a teammate |
 | Direct peer collaboration | `@member`, `@group`, `@#channel`, and `@all` routing with normalized target matching |
-| Track outcomes, not just logs | Progress bars, milestones, coordinator summaries, and optional outcome `threads` (`Blocked` → `Active` → `Queued` → `Done`) |
+| Track outcomes, not just logs | Progress bars, milestones, coordinator summaries, `Subagent`/`Attached`/`Session` badges, `✓ Verified route:` journal pills, and optional outcome `threads` (`Blocked` → `Active` → `Queued` → `Done`) |
 | Understand a stalled or uncertain run | Zero-token `[stall]` root-cause diagnostics, ranked alerts with `#seq` links, and explicit `Retry fresh turn` / `Dismiss` recovery for unconfirmed runs |
-| Flexible model routing | Per-member `model` and `effort`, runtime model switching with warm forks, and optional `fallbackModel` quota failover |
-| Safe isolation & cleanup | Read-only default workers, optional detached Git `worktree` per writable worker, and uncommitted-safe worktree removal |
+| Flexible model routing | Per-member `model` and `effort`, `allowProviderModelFallback: false` strict lock on Codex `0.171+`, runtime model switching with warm forks, and optional `fallbackModel` quota failover |
+| Visual flow & replay inspection | Exact rounded-rect box-clipped Bézier Graph geometry with center-obstacle avoidance, deconflicted mention pills, and light/dark WCAG AA themes |
+| Safe isolation & cleanup | Synchronous fail-closed `subagent/start` & preset sandboxing, read-only default workers, optional detached Git `worktree` per writable worker, and uncommitted-safe worktree removal |
 
 <details>
 <summary><strong>Runtime and implementation details</strong></summary>
 
-- **Cross-harness core (`engine.mjs`, `core.mjs`, `run-store.mjs`):** SQLite WAL scheduler, `@mention` / `@group` / `@all` / `@#channel` routing, dependency tracking (`waitFor`), outcome `threads` (`set_team_plan`), opt-in quota failover (`fallbackModel` / `fallbackEffort`), durable run admission/settlement evidence, explicit recovery (`resolve_recovery`), shared-checkout write locking, and bounded turn budgets.
-- **Codex adapter (`codex.mjs`, `server.mjs`):** runs each member in its own Codex `app-server` chat with thread persistence, activity-resetting idle turn timeouts (`HIVE_SWARM_TURN_TIMEOUT_MS`), warm forks for provider/model changes, automatic archival, and live SSE activity.
-- **Native DSH adapter (`packages/dsh-hive-swarm/`):** Cordis plugin for DSH `0.2.2-rc.5` with host-minted Gateway peers, per-session preset sandbox verification, worker-scoped tool visibility, Start launcher card, right-dock tab, full React panel, safe Markdown rendering, `#seq` jump links, progress bars, outcome threads, Graph playback, and owned Journals.
+- **Cross-harness core (`engine.mjs`, `core.mjs`, `run-store.mjs`):** SQLite WAL scheduler, trusted host `team.parentSessionId` tracking, `fork: "coordinator"` branching, `executionMode` (`'subagent' | 'attached' | 'session'`) + `subagentName` projection, `@mention` / `@group` / `@all` / `@#channel` routing, dependency tracking (`waitFor`), outcome `threads` (`set_team_plan`), opt-in quota failover (`fallbackModel` / `fallbackEffort`), durable run admission/settlement evidence, explicit recovery (`resolve_recovery`), shared-checkout write locking, and bounded turn budgets.
+- **Codex adapter (`codex.mjs`, `server.mjs`):** attaches workers as sidebar-hidden child threads on Codex `0.171+` paginated parents via `thread/fork({ attachToSource: true, beforeTurnId })` (omitting `beforeTurnId` on `fork: "coordinator"`, passing `allowProviderModelFallback: false` on `thread/start`, and degrading cleanly to `1.9.1` `thread/start` + `thread/archive` on CLI `0.169.1`), with trusted `_meta` / `CODEX_THREAD_ID` extraction in `stdio()`, activity-resetting idle turn timeouts (`HIVE_SWARM_TURN_TIMEOUT_MS`), and live SSE activity.
+- **Native DSH adapter (`packages/dsh-hive-swarm/`):** Cordis plugin for DSH `0.2.2-rc.5` launching hidden native child subagents via `ctx.subagents.startActivation({ delivery: 'caller' })` (zero sidebar clutter), enforcing `fs.sandboxMode`/`shell.sandboxMode`/`sandboxPolicy`/`tools.restrict`/`tools.guard` synchronously inside `subagent/start` before prompt enqueue, continuing Turn 2+ via `ctx.agents.resume` + deep-frozen `handle.agent.followup` (zero parent-chat wakeups), serving `SubagentAddress` transcripts/`Open session`, plus Start launcher card, right-dock tab, React panel, exact box-clipped Graph playback, and owned Journals.
 - **Root-cause stall diagnostics:** one `[stall]` system post per stalled episode identifies unaddressed results by `#seq`, unanswered mentions, quota/failure/recovery stops, dependency roots, and circular waits without starting a diagnostic model turn.
 - **Windows portability:** handles `.cmd` Node shims directly without `cmd.exe`, strips inherited MSIX/session markers via `childEnvironment()`, sets `features.prefer_mxc=false` on Windows, keeps portable `.mcp.json` `cwd: "."`, and preserves legacy `CodexTeamBoard` / port `17943` compatibility.
 
@@ -254,6 +256,7 @@ The test suite uses mocked runners and makes **no paid API calls**. Opening view
 - **Windows sandbox process errors:** the installer and runtime strip inherited MSIX/session markers and set `features.prefer_mxc=false` on Windows so workers can run shell commands cleanly.
 - **Vitest `spawn EPERM` in Windows worker sandboxes:** pass `--configLoader native --pool threads` to avoid child-process pool restrictions.
 - **Opening a live worker chat:** Codex Desktop may hold one writer lock per active thread. Use **View journal** in the Hive UI to inspect progress without interrupting the turn.
+- **Windows DSH plugin CLI & newly published releases:** If `dsh` is not on your Windows `PATH`, invoke `<DSH_INSTALL>\resources\runtime\cli\bin\dsh.cmd` directly (e.g. `& 'D:\DSH\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add dsh-hive-swarm@2.0.0`). When upgrading within 24 hours of a new npm publish, DSH's `pnpm` supply-chain policy requires listing `dsh-hive-swarm@2.0.0` and `hive-swarm@2.0.0` under `minimumReleaseAgeExclude` in `<DSH_HOME>\profiles\desktop\pnpm-workspace.yaml`.
 - **State locations & ports:**
   - **Codex:** SQLite WAL under `%LOCALAPPDATA%\CodexTeamBoard` (Windows) or `~/CodexTeamBoard` (macOS/Linux); override with `HIVE_SWARM_DATA` / `TEAM_BOARD_DATA`. Default loopback port: `17943` (`HIVE_SWARM_PORT` / `TEAM_BOARD_PORT`).
   - **DSH:** isolated under `<profileContext.dir>/.hive-swarm`.

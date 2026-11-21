@@ -1,6 +1,8 @@
 # Changelog
 
-## 2.0.0
+## 2.0.0 — published
+
+Published on npm as `hive-swarm@2.0.0` (`latest`, 25 files, SHA-512 `sha512-TNJfBd1fKE15j4n9YX1yThkEtmsT2tZoEUDrzWblKSXVQ8xyBQHgew94BxVFzDmQ3LnslFGfx4+2kQLrc92XUQ==`) and `dsh-hive-swarm@2.0.0` (`next`, 10 files, SHA-512 `sha512-WuHgRIzwqdOuuFzVF6IBxfalOG+3qF/JU/hA+QngwQ80WEPxVybgcQO51sZJZHLfF986xpyzYI5TOnOJrG3mJQ==`), tagged `v2.0.0` ([PR #6](https://github.com/snowmiku601-cpu/hive-swarm/pull/6) `08c5ad1`). Verified across 12/12 CI checks (Windows, macOS, Linux × Node 22.19.0, 24.2.0, 24.x, LTS; 299/299 tests) plus live Chromium inspection of isolated DSH `0.2.2-rc.5` and Codex Standalone UIs.
 
 Major release bringing Antigravity-style **Native Subagent Swarms** to DeepSeek Harness `0.2.2-rc.5`, **Attached Child Threads & Coordinator Forking** to Codex `0.171+`, aligned Native Swarm `SKILL.md` coordination discipline, and an **Exact Box-Clipped Graph & Design DNA UI Overhaul**.
 
@@ -21,7 +23,7 @@ Major release bringing Antigravity-style **Native Subagent Swarms** to DeepSeek 
 - Add 24-point Bézier obstacle avoidance around center nodes (e.g. `coordinator`), automatic midpoint mention-count badge deconfliction, symmetric opposite-bowing bidirectional edges, interactive focus dimming, and full un-truncated `@design-research` / `@asset-research` Codex hex labels.
 - Upgrade **Overview**, **Board**, **Members**, **Graph**, and **Journal** across DSH React UI and Codex standalone/MCP UI with `Subagent` / `Attached` / `Session` badges, `✓ Verified route:` journal badges, WCAG AA `light-dark()` tokens, `@media (forced-colors: active)` fallbacks, reactive `prefers-color-scheme` listeners, and scoped `prefers-reduced-motion` transitions.
 
-## 1.9.1
+## 1.9.1 — published
 
 Hardening and bugfix release based on live end-to-end multi-worker stress testing on DeepSeek Harness `0.2.2-rc.5` (4 workers, 43 turns, 175 board posts, verified strict model lock).
 
