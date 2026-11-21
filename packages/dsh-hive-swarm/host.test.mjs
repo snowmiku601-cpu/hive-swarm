@@ -189,3 +189,138 @@ test('all native tool outputs are strictly lossless JSON with no undefined prope
   const panel=await f.tools.get('hive_swarm_open_swarm_panel').tool.execute({teamId:team.id},exec);
   assertLossless(panel,'open_swarm_panel');
 });
+
+test('host injects subagents, forwards trusted parentSessionId only from parent owner, and exposes nullable fork schema',async t=>{
+  const {createHost,inject}=await import('./host.mjs');
+  assert.equal(inject.includes('subagents'),true);
+  const root=mkdtempSync(join(tmpdir(),'hive-host-contract-'));
+  const seen=[];const tools=new Map();
+  const fakeApp={snapshot:async()=>({teams:[],team:null}),close:async()=>({quiescent:true}),
+    board:{db:{prepare:()=>({all:()=>[]})},get:()=>({members:[{name:'builder',role:'worker'}]})},
+    command:async(action,cmdArgs,context)=>{seen.push({action,cmdArgs,context});return {id:'78963630-4947-4a29-93cb-959632ec9471',host:'deepseek-harness',members:cmdArgs.members??[]};}};
+  const native={listModels:async()=>[],create:async()=>'w',prepare:async()=>{},prompt:async()=>{},wait:async()=>({reason:'idle'}),
+    currentTurn:()=>({}),events:async()=>[],flush:async()=>{},cancel:async()=>{},dispose:async()=>{},isCurrentAgent:agent=>agent?.current===true};
+  const ctx={connection:{fetch:{register:()=>async()=>{}}},workspaceRegistry:{list:()=>[{id:'w',path:root}]},
+    skills:{register:()=>()=>{}},tools:{register:(tool,options)=>{tools.set(tool.name,{tool,options});return()=>tools.delete(tool.name)}}};
+  const host=await createHost(ctx,{dataDirectory:join(root,'state'),coreFactory:()=>fakeApp,storeFactory:file=>new RunStore(file),nativeFactory:()=>native});
+  t.after(async()=>{await host.close();rmSync(root,{recursive:true,force:true});});
+
+  const startTool=tools.get('hive_swarm_start_team').tool;
+  const addTool=tools.get('hive_swarm_add_member').tool;
+  assert.deepEqual(startTool.parameters.properties.members.items.properties.fork.type,['string','null']);
+  assert.deepEqual(addTool.parameters.properties.member.properties.fork.type,['string','null']);
+  assert.equal(Object.hasOwn(startTool.parameters.properties,'parentSessionId'),false);
+
+  const exec={signal:new AbortController().signal,agent:{id:'parent-chat-1',current:true,session:{header:{cwd:root}}},callId:'call-1'};
+  await assert.rejects(startTool.execute({...args(root),parentSessionId:'spoofed-parent'},exec),/invalid command fields|identity/i);
+  await startTool.execute({cwd:root,task:'Fork parent context',members:[
+    {name:'lead_check',brief:'Check coordinator context',fork:'coordinator'},
+    {name:'fresh',brief:'Fresh worker',fork:null},
+    {name:'empty_fork',brief:'Empty fork omitted',fork:''},
+  ]},exec);
+  assert.equal(seen.length,1);
+  assert.equal(seen[0].context.parentSessionId,'parent-chat-1');
+  assert.equal(seen[0].cmdArgs.members[0].fork,'coordinator');
+  assert.equal(Object.hasOwn(seen[0].cmdArgs.members[1],'fork'),false);
+  assert.equal(Object.hasOwn(seen[0].cmdArgs.members[2],'fork'),false);
+
+  await addTool.execute({teamId:'t1',member:{name:'helper',brief:'Check parent',fork:'coordinator'},fork:'coordinator'},exec);
+  assert.equal(seen[1].context.parentSessionId,undefined);
+  assert.equal(seen[1].cmdArgs.fork,'coordinator');
+  assert.equal(seen[1].cmdArgs.member.fork,'coordinator');
+});
+
+test('host executes native subagent activation end-to-end when ctx.subagents is provided',async t=>{
+  const {createHost}=await import('./host.mjs');
+  const root=mkdtempSync(join(tmpdir(),'hive-host-subagent-'));
+  const tools=new Map(),listeners=new Map(),events=[];
+  let mode='read-only',seq=1,childAgent,childSession,restrictions=[],guards=[],subagentPrompt,releaseIdle;
+  const parentSession={id:'parent-chat',header:{cwd:root,delegationDepth:0},append:()=>{}};
+  const parentAgent={id:'parent-chat',current:true,session:parentSession,options:{subagentDepth:0}};
+  const agents=new Map([['parent-chat',parentAgent]]);
+  const sessions=new Map([['parent-chat',parentSession]]);
+  const emit=(topic,info)=>{for(const fn of listeners.get(topic)??[])fn(info);};
+  const ctx={
+    connection:{createPeer:()=>({principal:{kind:'owner'},dispose:async()=>{}}),fetch:{register:()=>async()=>{}}},
+    typertGateway:{invoke:async({namespace,method,args:req})=>{
+      if(method==='modelCatalog')return {default:{provider:'p',model:'m'},groups:[{id:'p',models:[{id:'m',name:'M',reasoning:{efforts:[{id:'max'}],defaultEffort:'max'}}]}]};
+      if(namespace==='session'&&method==='events'){
+        assert.deepEqual(req.request.address,{kind:'subagent',parentSessionId:'parent-chat',childSessionId:childAgent.id,mode:'continuable'});
+        return {cursor:seq,records:events.map(event=>({type:'event',event})),hasMore:false};
+      }
+      if(namespace==='session'&&method==='state')return {active:false,running:false,queue:[],pendingInput:[]};
+      if(namespace==='session'&&method==='wait'){await new Promise(resolve=>{releaseIdle=resolve;});return {reason:'idle',state:{running:false,active:true,queue:[],pendingInput:[]}};}
+      return {accepted:true};
+    }},
+    sessions:{get:id=>sessions.get(id),flush:async()=>true},
+    agents:{get:id=>agents.get(id),turnBoundaryOf:()=>({lastTurn:2,openTurnStartSeq:2})},
+    sandboxPolicy:{resolve:()=>({mode,workspaceRoot:root})},
+    fs:{sandboxMode:'read-only'},shell:{sandboxMode:'read-only'},
+    workspaceRegistry:{list:()=>[{id:'w',path:root}]},
+    skills:{register:()=>()=>{}},
+    tools:{
+      definitions:()=>['read','write','bash','subagent','hive_swarm_post_message','hive_swarm_set_turn_outcome','hive_swarm_start_team'].map(name=>({name})),
+      register:(tool,options)=>{tools.set(tool.name,{tool,options});return()=>tools.delete(tool.name);},
+    },
+    on:(topic,fn)=>{const set=listeners.get(topic)??new Set();set.add(fn);listeners.set(topic,set);return()=>set.delete(fn);},
+    subagents:{
+      startActivation:async spec=>{
+        assert.equal(spec.provider,'spawn');assert.equal(spec.delivery,'caller');assert.equal(spec.maxDepth,1);
+        subagentPrompt=spec.prompt[0].text;
+        childSession={id:spec.childId,header:{cwd:root,origin:'subagent',parentSession:'parent-chat'},append:(type,data)=>{if(type==='sandbox/mode')mode=data.mode;}};
+        childAgent={id:spec.childId,current:true,session:childSession,
+          ctx:{tools:{definitions:()=>ctx.tools.definitions(),restrict:f=>{restrictions.push(f);return()=>{};},guard:fn=>{guards.push(fn);return()=>{};}}},
+          model:{select:()=>{}},whenIdle:async()=>{}};
+        agents.set(spec.childId,childAgent);sessions.set(spec.childId,childSession);
+        emit('subagent/start',{id:spec.childId,parentSessionId:'parent-chat',provider:'spawn'});
+        events.push(
+          {seq:seq++,type:'agent/inbox/spliced',data:{target:'next-turn',start:0,inserted:[{id:'msg-1',source:{kind:'user'}}]}},
+          {seq:seq++,type:'turn/start',data:{turn:2}},
+          {seq:seq++,type:'agent/inbox/spliced',data:{target:'next-turn',start:0,removedCount:1,inserted:[]}},
+          {seq:seq++,type:'request/header',data:{header:{config:{provider:'p',model:'m',reasoningEffort:'max'}}}},
+        );
+        return {childId:spec.childId,name:spec.name,messageId:'msg-1',result:Promise.resolve({status:'completed'}),dispose:async()=>{}};
+      },
+    },
+  };
+  const compatCoreFactory=options=>{
+    const app=createSwarmApplication(options);
+    const origCreate=app.board.create.bind(app.board);
+    let nextParentId;
+    app.board.create=(input,wsSource,opts)=>{
+      const p=opts?.parentSessionId??nextParentId;
+      const team=origCreate(input,wsSource,opts);
+      if(p&&!team.parentSessionId){team.parentSessionId=p;app.board.save(team);}
+      return team;
+    };
+    const origCmd=app.command.bind(app);
+    return {...app,command:async(action,cmdArgs,context={})=>{
+      nextParentId=action==='start_team'?context.parentSessionId:undefined;
+      try{return await origCmd(action,cmdArgs,context);}finally{nextParentId=undefined;}
+    }};
+  };
+  const host=await createHost(ctx,{dataDirectory:join(root,'state'),coreFactory:compatCoreFactory,storeFactory:file=>new RunStore(file)});
+  t.after(async()=>{await host.close();rmSync(root,{recursive:true,force:true});});
+
+  const parentExec={signal:new AbortController().signal,agent:parentAgent};
+  const team=await tools.get('hive_swarm_start_team').tool.execute(args(root),parentExec);
+  for(let i=0;i<200&&!host.runner.actorForSession(childAgent?.id);i++)await delay(5);
+  assert.ok(childAgent,'subagent activation should have started');
+  assert.match(subagentPrompt,/Goal: Owned native smoke/);
+  assert.equal(tools.get('hive_swarm_start_team').options.when({agent:childAgent}),false);
+  assert.equal(tools.get('hive_swarm_set_turn_outcome').options.when({agent:childAgent}),true);
+  assert.equal(restrictions[0].allow.includes('subagent'),false);
+  assert.equal(restrictions[0].allow.includes('write'),false);
+
+  const workerExec={signal:new AbortController().signal,agent:childAgent,concludeTurn:()=>{workerExec.concluded=true;}};
+  const res=await tools.get('hive_swarm_set_turn_outcome').tool.execute({turn:1,state:'done',message:'[done] Subagent finished',notify:[],waitFor:[]},workerExec);
+  assert.equal(res.accepted,true);assert.equal(workerExec.concluded,true);
+  events.push({seq:seq++,type:'turn/end',data:{turn:2,reason:{kind:'completed'}}});
+  for(let i=0;i<200&&!releaseIdle;i++)await delay(5);
+  releaseIdle();
+  for(let i=0;i<200&&host.application.board.get(team.id).members[0].status==='working';i++)await delay(5);
+  const finalMember=host.application.board.get(team.id).members[0];
+  assert.equal(finalMember.status,'done');
+  assert.equal(finalMember.executionMode,'subagent');
+  assert.match(finalMember.subagentName,/^builder-/);
+});

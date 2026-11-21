@@ -1,6 +1,14 @@
 import {randomUUID} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 
+function isOwnedUserMessage(run,item) {
+  const source=item?.source;
+  if(source?.kind!=='user')return false;
+  if(run.requestId&&source.rpcId===run.requestId)return true;
+  if(run.messageId&&item?.id===run.messageId)return true;
+  return false;
+}
+
 /** Correlate only durable events belonging to one admitted prompt. Never infer completion from a receipt. */
 export function correlateRun(run,records) {
   const unique=new Map();
@@ -16,10 +24,10 @@ export function correlateRun(run,records) {
       const removed=queue.splice(data.start,data.removedCount??0,...(data.inserted??[]));
       for(const message of data.inserted??[]) {
         const source=message.source;
-        if(source?.kind==='user'&&source.rpcId===run.requestId)acceptedSeq=acceptedSeq||event.seq;
+        if(isOwnedUserMessage(run,message))acceptedSeq=acceptedSeq||event.seq;
         else if((acceptedSeq||claimSeq)&&source?.kind==='user')throw Error('Foreign user admission; outcome unconfirmed.');
       }
-      for(const message of removed)if(message.source?.kind==='user'&&message.source.rpcId===run.requestId) {
+      for(const message of removed)if(isOwnedUserMessage(run,message)) {
         if(data.outcome==='canceled')throw Error('Owned prompt was canceled before claim; outcome unconfirmed.');
         if(claimSeq||!Number.isSafeInteger(turn))throw Error('Owned prompt claim is ambiguous.');
         claimSeq=event.seq;claimedTurn=turn;
@@ -27,8 +35,8 @@ export function correlateRun(run,records) {
     }
     if(type==='turn/start')turn=data.turn;
     if(type==='user/message'&&data.source?.kind==='user') {
-      if(data.source.rpcId!==run.requestId&&(acceptedSeq||claimSeq))throw Error('Foreign user admission; outcome unconfirmed.');
-      if(data.source.rpcId===run.requestId&&claimedTurn!==turn)throw Error('User message belongs to another native turn.');
+      if(!isOwnedUserMessage(run,data)&&(acceptedSeq||claimSeq))throw Error('Foreign user admission; outcome unconfirmed.');
+      if(isOwnedUserMessage(run,data)&&claimedTurn!==turn)throw Error('User message belongs to another native turn.');
     }
     if(type==='request/header'||type==='model/selection'||type==='model/selected') {
       const cfg=type==='request/header'?data.header?.config:data;
@@ -62,13 +70,15 @@ export class NativeRunner {
     if(this.closed)throw Error('Native runner is closing.');
     if(!result||!['done','waiting'].includes(result.state))throw Error('Worker outcome state must be done or waiting.');
     const active=this.active.get(sessionId)??this.recoveries.get(sessionId);if(!active||active.run.turn!==turn)throw Error('No matching owned active worker turn.');
-    const records=await this.native.events(sessionId);const proof=correlateRun(active.run,records);
+    const records=await this.native.events(sessionId,undefined,{parentSessionId:active.run.parentSessionId,executionMode:active.run.executionMode});
+    const proof=correlateRun(active.run,records);
     const boundary=this.native.currentTurn(sessionId);
     if(!proof.claimSeq||proof.turnEndSeq||!boundary||boundary.openTurnStartSeq==null||boundary.lastTurn!==proof.claimedTurn)throw Error('The scoped report does not match the active claimed native turn.');
     return this.store.setOutcome(active.run,result).outcome;
   }
   async evidence(run,signal) {
-    const events=await this.native.events(run.sessionId,signal);const proof=correlateRun(run,events);
+    const events=await this.native.events(run.sessionId,signal,{parentSessionId:run.parentSessionId,executionMode:run.executionMode});
+    const proof=correlateRun(run,events);
     const patch=Object.fromEntries(['acceptedSeq','claimSeq','turnEndSeq'].filter(key=>proof[key]>0).map(key=>[key,proof[key]]));
     if(Object.keys(patch).length)this.store.patch(run,patch);
     let current=this.store.read(run);
@@ -89,17 +99,8 @@ export class NativeRunner {
     const selected=catalog.find(model=>model.id===id);if(!selected)throw Error('Requested native model is unavailable.');
     const effort=(member.effort===null?undefined:member.effort??team.effort)??selected.defaultEffort;
     if(effort&&!selected.efforts?.includes(effort))throw Error('Requested native model effort is unavailable.');
-    const workspace=member.workspace?.cwd??team.cwd;let sessionId=member.threadId;
-    if(sessionId){const owner=this.store.findSession(sessionId);if(!owner||owner.teamId!==team.id||owner.member!==member.name||owner.workspace!==workspace)throw Error('Session ownership or workspace does not match.');}
-    else if(member.forkFrom){const source=this.store.findSession(member.forkFrom);
-      if(!source||source.teamId!==team.id)throw Error('A native fork must use a session owned by this team.');
-      if(source.workspace!==workspace)throw Error('A native history fork cannot change its immutable workspace.');
-      sessionId=await this.native.fork(member.forkFrom,signal);remember({threadId:sessionId,forkFrom:null});
-    }
-    else {sessionId=await this.native.create({cwd:workspace},signal);remember({threadId:sessionId});}
-    const identity={teamId:team.id,member:member.name,turn:member.lastTurn,requestId:randomUUID(),sessionId,workspace};
-    const run=this.store.begin(identity);let admitted=false,inputRequired=false,finish;const entry={run,controller,done:new Promise(resolve=>{finish=resolve})};
-    const cancellation=()=>{void this.cancelEntry(entry).catch(()=>{});};
+    const workspace=member.workspace?.cwd??team.cwd;
+    const workerLabel='🐝 @'+member.name+(team.title?' · '+team.title:'');
     const peers=(team.members??[]).filter(m=>m.name!==member.name&&m.status!=='retired')
       .map(m=>'@'+m.name+(m.group?' in @'+m.group:'')+(m.channels?.length?' ['+m.channels.map(c=>'#'+c).join(', ')+']':'')+(m.workspace?.cwd?' at '+m.workspace.cwd:'')).join(', ');
     const promptLines=[
@@ -110,16 +111,75 @@ export class NativeRunner {
       'Work only in the assigned workspace and permissions. Do not create another scheduler or launch subagents.',
       'Coordinate directly with teammates using scoped hive_swarm tools (teamId: '+team.id+'). Tag @name directly for peer-to-peer handoffs instead of routing through @coordinator. Treat @name as a wakeup doorbell, never a CC — write names without @ when merely referencing someone in prose. Use @#channel for channel subscribers and @all only for team-wide rules.',
       'Reserve hive_swarm_post_message for mid-turn peer questions or handoffs; do not double-post your final report via hive_swarm_post_message right before calling hive_swarm_set_turn_outcome.',
-      'Finish by calling hive_swarm_set_turn_outcome for turn '+run.turn+' with state ("done" or "waiting"), a concise message (start finished reports with [done] and cite prior posts with #seq), notify (peer names who must act next), and waitFor (peer names you need a new report from). The outcome tool concludes this turn.',
+      'Finish by calling hive_swarm_set_turn_outcome for turn '+member.lastTurn+' with state ("done" or "waiting"), a concise message (start finished reports with [done] and cite prior posts with #seq), notify (peer names who must act next), and waitFor (peer names you need a new report from). The outcome tool concludes this turn.',
       'Incoming board messages: '+JSON.stringify(member.inbox??[]),
     ].filter(Boolean).join('\n\n');
+
+    let sessionId=member.threadId,executionMode=member.executionMode??'session',initialMessageId,startedSubagent=false;
+    if(sessionId) {
+      const owner=this.store.findSession(sessionId);
+      if(!owner||owner.teamId!==team.id||owner.member!==member.name||owner.workspace!==workspace)throw Error('Session ownership or workspace does not match.');
+      if(executionMode==='subagent')this.native.registerSubagent?.(sessionId,team.parentSessionId);
+    } else if(member.forkFrom) {
+      const source=this.store.findSession(member.forkFrom);
+      if(!source||source.teamId!==team.id)throw Error('A native fork must use a session owned by this team.');
+      if(source.workspace!==workspace)throw Error('A native history fork cannot change its immutable workspace.');
+      sessionId=await this.native.fork(member.forkFrom,signal);executionMode='session';
+      await this.native.rename?.(sessionId,workerLabel,signal);
+      remember({threadId:sessionId,executionMode,forkFrom:null,...(member.forkSource?{forkSource:null}:{})});
+    } else {
+      const forkCoordinator=member.forkSource==='coordinator';
+      if(forkCoordinator&&member.worktree)throw Error('A native history fork cannot change its immutable workspace.');
+      if(!member.worktree&&team.parentSessionId&&typeof this.native.startSubagent==='function') {
+        const started=await this.native.startSubagent({
+          teamId:team.id,parentSessionId:team.parentSessionId,memberName:member.name,label:workerLabel,
+          cwd:workspace,writable:member.writable===true,model:selected,effort,forkCoordinator,prompt:promptLines,
+        },signal);
+        if(started) {
+          startedSubagent=true;sessionId=started.sessionId;initialMessageId=started.messageId;
+          executionMode=started.executionMode??'subagent';
+          remember({threadId:sessionId,executionMode,...(started.subagentName?{subagentName:started.subagentName}:{}),...(member.forkSource?{forkSource:null}:{})});
+        }
+      }
+      if(!sessionId) {
+        if(forkCoordinator) {
+          if(!team.parentSessionId||typeof this.native.forkParent!=='function')throw Error('Coordinator history is unavailable to fork.');
+          sessionId=await this.native.forkParent(team.parentSessionId,{cwd:workspace},signal);
+        } else {
+          sessionId=await this.native.create({cwd:workspace},signal);
+        }
+        executionMode='session';
+        await this.native.rename?.(sessionId,workerLabel,signal);
+        remember({threadId:sessionId,executionMode,...(member.forkSource?{forkSource:null}:{})});
+      }
+    }
+
+    const identity={teamId:team.id,member:member.name,turn:member.lastTurn,requestId:randomUUID(),sessionId,workspace};
+    const baseRun=this.store.begin(identity);
+    const run={...baseRun,...(initialMessageId?{messageId:initialMessageId}:{}),...(team.parentSessionId?{parentSessionId:team.parentSessionId}:{}),executionMode};
+    let admitted=false,inputRequired=false,finish;const entry={run,controller,done:new Promise(resolve=>{finish=resolve})};
+    const cancellation=()=>{void this.cancelEntry(entry).catch(()=>{});};
     try {
-      await this.native.prepare(sessionId,{cwd:workspace,writable:member.writable===true,model:selected,effort},signal);
-      signal?.throwIfAborted();
-      remember({pendingRun:{requestId:run.requestId,turn:run.turn}});
-      this.active.set(sessionId,entry);signal?.addEventListener('abort',cancellation,{once:true});
-      admitted=true;
-      await this.native.prompt({sessionId,requestId:run.requestId,mode:'queue',content:[{type:'text',text:promptLines}]},signal);
+      if(startedSubagent) {
+        signal?.throwIfAborted();
+        remember({pendingRun:{requestId:run.requestId,turn:run.turn,...(initialMessageId?{messageId:initialMessageId}:{})}});
+        this.active.set(sessionId,entry);signal?.addEventListener('abort',cancellation,{once:true});
+        admitted=true;
+      } else if(executionMode==='subagent'&&typeof this.native.prepareSubagentTurn==='function') {
+        await this.native.prepareSubagentTurn(sessionId,{parentSessionId:team.parentSessionId,cwd:workspace,writable:member.writable===true,model:selected,effort},signal);
+        signal?.throwIfAborted();
+        remember({pendingRun:{requestId:run.requestId,turn:run.turn}});
+        this.active.set(sessionId,entry);signal?.addEventListener('abort',cancellation,{once:true});
+        admitted=true;
+        await this.native.promptSubagentTurn({sessionId,requestId:run.requestId,parentSessionId:team.parentSessionId,cwd:workspace,writable:member.writable===true,model:selected,effort,prompt:promptLines},signal);
+      } else {
+        await this.native.prepare(sessionId,{cwd:workspace,writable:member.writable===true,model:selected,effort},signal);
+        signal?.throwIfAborted();
+        remember({pendingRun:{requestId:run.requestId,turn:run.turn}});
+        this.active.set(sessionId,entry);signal?.addEventListener('abort',cancellation,{once:true});
+        admitted=true;
+        await this.native.prompt({sessionId,requestId:run.requestId,mode:'queue',content:[{type:'text',text:promptLines}]},signal);
+      }
       for(;;) {
         signal?.throwIfAborted();const value=await this.native.wait(sessionId,signal);signal?.throwIfAborted();
         let current=await this.evidence(run,signal);
@@ -138,6 +198,7 @@ export class NativeRunner {
         const stopped=await this.native.state(sessionId,signal);signal?.throwIfAborted();
         if(stopped.running||stopped.queue?.length||stopped.pendingInput?.length)continue;
         if(!current.claimSeq||!current.turnEndSeq||!current.outcome)throw Error('Native outcome unconfirmed: missing matching durable claim, turn end or scoped report.');
+        await this.native.settleTurn?.(sessionId);
         this.store.patch(run,{hostIdle:true});const result=this.store.finish(run).run.outcome;
         return result;
       }
@@ -149,12 +210,18 @@ export class NativeRunner {
         throw wrapped;
       }
       throw error;
-    } finally {signal?.removeEventListener('abort',cancellation);await entry.cancellation?.catch(()=>{});
-      if(this.active.get(sessionId)===entry)this.active.delete(sessionId);finish();}
+    } finally {
+      signal?.removeEventListener('abort',cancellation);await entry.cancellation?.catch(()=>{});
+      await this.native.releaseTurn?.(sessionId);
+      if(this.active.get(sessionId)===entry)this.active.delete(sessionId);finish();
+    }
   }
   cancelEntry(entry){
-    if(!entry.cancellation){const promise=Promise.resolve().then(()=>this.native.cancel(entry.run.sessionId));entry.cancellation=promise;
-      this.cancellations.add(promise);promise.then(()=>this.cancellations.delete(promise),()=>{});}
+    if(!entry.cancellation){
+      const promise=Promise.resolve().then(()=>this.native.cancel(entry.run.sessionId,{executionMode:entry.run.executionMode,parentSessionId:entry.run.parentSessionId}));
+      entry.cancellation=promise;
+      this.cancellations.add(promise);promise.then(()=>this.cancellations.delete(promise),()=>{});
+    }
     return entry.cancellation;
   }
   async reconcile(board) {
@@ -162,8 +229,10 @@ export class NativeRunner {
     const saved=board.db.prepare('SELECT value FROM teams').all();let settled=0;
     for(const row of saved){const team=JSON.parse(row.value);for(const member of team.members){
       if(member.status==='retired'||!member.recoveryRequired||!member.pendingRun||!member.threadId)continue;
-      const run=this.store.findSession(member.threadId);
-      if(!run||run.teamId!==team.id||run.member!==member.name||run.turn!==member.lastTurn||run.turn!==member.pendingRun.turn||run.requestId!==member.pendingRun.requestId)continue;
+      const stored=this.store.findSession(member.threadId);
+      if(!stored||stored.teamId!==team.id||stored.member!==member.name||stored.turn!==member.lastTurn||stored.turn!==member.pendingRun.turn||stored.requestId!==member.pendingRun.requestId)continue;
+      const run={...stored,...(member.pendingRun.messageId?{messageId:member.pendingRun.messageId}:{}),...(team.parentSessionId?{parentSessionId:team.parentSessionId}:{}),...(member.executionMode?{executionMode:member.executionMode}:{})};
+      if(member.executionMode==='subagent')this.native.registerSubagent?.(run.sessionId,team.parentSessionId);
       try{const state=await this.native.state(run.sessionId);if(state.running||state.queue?.length||state.pendingInput?.length){
           if(!this.recoveries.has(run.sessionId)) {
             this.recoveryStatus(board,run,'working');
