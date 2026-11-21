@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
+import './hive-bees.js';
 import './hive-graph.js';
 
 const {project,isPost} = globalThis.HiveGraph;
@@ -203,6 +206,241 @@ test('clipEdge and routeEdges keep every arrow and arrowhead cleanly outside nod
             'pills '+i+' & '+j+' do not collide at '+variant+'/'+width);
         }
       }
+    }
+  }
+});
+
+test('smartTaskLabel prefers taskLabel and strips boilerplate, markdown, and dangling prepositions', () => {
+  const { smartTaskLabel } = globalThis.HiveGraph;
+  assert.equal(smartTaskLabel({ name: 'alpha', taskLabel: '  Build graph engine & GIF export  ', brief: 'Ignored' }),
+    'Build graph engine & GIF export');
+  const boilerplate = 'You are Hive Swarm member "core-codex" for Hive Swarm 2.0.0.\n' +
+    'Your assignment (recorded on the board as #40 for @core-codex):\n' +
+    'You own **engine.mjs**, `core.mjs`, and [server](http://example.com) for Hive Swarm 2.0.0 in your shared worktree.';
+  const label = smartTaskLabel({ name: 'core-codex', brief: boilerplate });
+  assert.ok(label.length <= 64, 'label within 64 chars: ' + label);
+  assert.doesNotMatch(label, /You are Hive Swarm|Your assignment|You own|for Hive Swarm|\*\*|`/i);
+  assert.match(label, /engine\.mjs/i);
+  assert.doesNotMatch(label, /\b(for|in|on|to|with|of|by|and)$/i);
+
+  const dangling = smartTaskLabel({ name: 'ui', brief: 'Refactor the Overview accordion and Threads progress bar for' });
+  assert.equal(dangling, 'Refactor the Overview accordion and Threads progress bar');
+
+  const fallback = smartTaskLabel({ name: 'probe', brief: '' });
+  assert.equal(fallback, 'probe');
+});
+
+test('layoutMentions places coordinator at 12 o clock with no center blocker and clips arrows to capsule pills', () => {
+  const { layoutMentions, mentionsMinimumHeight, nodeBox, routeEdges, roundedRectSignedDistance } = globalThis.HiveGraph;
+  for (const width of [340, 380, 420, 480, 680, 960]) for (const count of [1, 2, 4, 6, 8, 12, 14]) {
+    const nodes = Array.from({ length: count }, (_, i) => ({
+      name: i === 0 ? 'coordinator' : 'worker-' + i,
+      role: i === 0 ? 'coordinator' : 'worker',
+      posts: 2,
+    }));
+    const narrow = width < 465;
+    const height = Math.max(360, mentionsMinimumHeight(count, width));
+    const points = layoutMentions(nodes, width, height);
+    assert.equal(points.size, count);
+
+    const coord = points.get('coordinator');
+    const isGrid = count > 12 || (count > 5 && width < 380) || (count > 8 && width < 465);
+    if (count > 1 && !isGrid) {
+      assert.ok(Math.abs(coord.x - width / 2) < 1e-6, 'coordinator centered horizontally at 12 o clock');
+      assert.ok(coord.y < height / 2, 'coordinator sits in top half (12 o clock)');
+      // Verify no node sits near the ellipse center when count >= 3
+      if (count >= 3) {
+        const centerY = (36 + (height - 40)) / 2;
+        for (const [name, pt] of points) {
+          assert.ok(Math.hypot(pt.x - width / 2, pt.y - centerY) >= 40, name + ' stays on outer ring for count=' + count + ' w=' + width);
+        }
+      }
+    }
+
+    // Verify no pill boxes overlap across 1..14 nodes
+    const boxes = nodes.map(n => {
+      const b = nodeBox(n, { variant: 'pill', narrow });
+      const pt = points.get(n.name);
+      return { name: n.name, cx: pt.x, cy: pt.y, ...b };
+    });
+    for (const b of boxes) {
+      assert.equal(b.offsetX, 0);
+      assert.equal(b.offsetY, 0);
+      assert.equal(b.radius, b.halfH);
+      assert.ok(b.cx - b.halfW >= 0 && b.cx + b.halfW <= width, b.name + ' inside X bounds w=' + width);
+      assert.ok(b.cy - b.halfH >= 0 && b.cy + b.halfH <= height, b.name + ' inside Y bounds w=' + width);
+    }
+    for (let i = 0; i < boxes.length; i++) {
+      for (let j = i + 1; j < boxes.length; j++) {
+        const dx = Math.abs(boxes[i].cx - boxes[j].cx) - (boxes[i].halfW + boxes[j].halfW);
+        const dy = Math.abs(boxes[i].cy - boxes[j].cy) - (boxes[i].halfH + boxes[j].halfH);
+        assert.ok(dx >= 2 || dy >= 2, `pills ${boxes[i].name} and ${boxes[j].name} do not overlap for count=${count} w=${width}`);
+      }
+    }
+  }
+
+  // Test capsule clipping with 6-node Screenshot 2 topology
+  const ringNodes = [
+    { name: 'coordinator', role: 'coordinator', posts: 5, unmentioned: 0, mentions: 4, broadcasts: 1 },
+    { name: 'core-codex', role: 'worker', status: 'done', posts: 7 },
+    { name: 'dsh-backend', role: 'worker', status: 'done', posts: 6 },
+    { name: 'probe', role: 'worker', status: 'done', posts: 8 },
+    { name: 'ui-polish', role: 'worker', status: 'done', posts: 4 },
+    { name: 'verifier', role: 'worker', status: 'done', posts: 9 },
+  ];
+  const ringLinks = [
+    { from: 'coordinator', to: 'verifier', count: 8, direct: 8, broadcast: 0, lastSeq: 30 },
+    { from: 'verifier', to: 'coordinator', count: 3, direct: 3, broadcast: 0, lastSeq: 31 },
+    { from: 'coordinator', to: 'core-codex', count: 5, direct: 5, broadcast: 0, lastSeq: 32 },
+    { from: 'probe', to: 'dsh-backend', count: 7, direct: 7, broadcast: 0, lastSeq: 33 },
+    { from: 'probe', to: 'coordinator', count: 4, direct: 4, broadcast: 0, lastSeq: 34 },
+  ];
+  const pts = layoutMentions(ringNodes, 680, 440);
+  const routed = routeEdges({ nodes: ringNodes, links: ringLinks }, pts, { variant: 'pill', marginStart: 4, marginEnd: 6, obstacleMargin: 10 });
+  assert.equal(routed.length, ringLinks.length);
+  for (const { link, edge } of routed) {
+    const fromBox = nodeBox(ringNodes.find(n => n.name === link.from), { variant: 'pill' });
+    const toBox = nodeBox(ringNodes.find(n => n.name === link.to), { variant: 'pill' });
+    const fAbs = { cx: pts.get(link.from).x, cy: pts.get(link.from).y, halfW: fromBox.halfW, halfH: fromBox.halfH, radius: fromBox.radius };
+    const tAbs = { cx: pts.get(link.to).x, cy: pts.get(link.to).y, halfW: toBox.halfW, halfH: toBox.halfH, radius: toBox.radius };
+    assert.ok(roundedRectSignedDistance(edge.start.x, edge.start.y, fAbs) >= 3.5);
+    assert.ok(roundedRectSignedDistance(edge.end.x, edge.end.y, tAbs) >= 5.5);
+  }
+});
+
+test('projectHive and layoutHive build 1-cluster and multi-cluster honeycombs with inner bee slots inside hexes', () => {
+  const { projectHive, layoutHive } = globalThis.HiveGraph;
+  const doneMembers = [
+    { name: 'coordinator', role: 'coordinator', status: 'waiting' },
+    { name: 'core-codex', status: 'done' },
+    { name: 'dsh-backend', status: 'done' },
+    { name: 'probe', status: 'done' },
+    { name: 'ui-polish', status: 'done' },
+    { name: 'verifier', status: 'done' },
+  ];
+  const donePosts = [
+    { seq: 1, kind: 'brief', author: 'coordinator', targets: ['core-codex'], text: 'Start' },
+    { seq: 2, kind: 'message', author: 'verifier', targets: ['coordinator'], text: '[done] All done.' },
+  ];
+  const model1 = projectHive(donePosts, doneMembers, 2);
+  assert.equal(model1.clusters.length, 1);
+  assert.equal(model1.clusters[0].id, 'done');
+  assert.equal(model1.clusters[0].count, 5);
+  assert.ok(model1.clusters[0].members.every(m => m.muted === true));
+  assert.equal(model1.coordinator.doneCount, 5);
+  assert.equal(model1.coordinator.totalWorkers, 5);
+  assert.equal(model1.coordinator.phase, 'done');
+  assert.ok(model1.connectors.some(c => c.kind === 'done' && c.from === 'done' && c.to === 'coordinator'));
+  assert.ok(model1.connectors.some(c => c.kind === 'message' && c.from === 'done' && c.to === 'coordinator'));
+
+  const lay1 = layoutHive(model1, 680, 460);
+  assert.equal(lay1.clusters.length, 1);
+  assert.equal(lay1.clusters[0].vertices.length, 6);
+  assert.equal(lay1.coordinator.vertices.length, 6);
+  assert.ok(Math.abs(lay1.clusters[0].x - lay1.coordinator.x) < 1e-6, '1-cluster stacks directly above coordinator');
+  assert.ok(lay1.clusters[0].y < lay1.coordinator.y, 'Done hex sits above Coordinator hex');
+  // Flat-top regular hexagon check: vertices 4 and 5 share top horizontal y
+  assert.ok(Math.abs(lay1.clusters[0].vertices[4].y - lay1.clusters[0].vertices[5].y) < 1e-6);
+
+  // Multi-cluster honeycomb check + waiting dependency + 1..12 inner slot containment
+  const multiMembers = [
+    { name: 'coordinator', role: 'coordinator', status: 'working' },
+    { name: 'w1', status: 'working' },
+    { name: 'w2', status: 'waiting', pendingWaitFor: ['w1'] },
+    { name: 'w3', status: 'failed', recoveryRequired: true },
+    { name: 'w4', status: 'done' },
+  ];
+  const multiModel = projectHive([
+    { seq: 1, kind: 'message', author: 'w1', targets: ['coordinator'], text: 'Working' },
+  ], multiMembers, 1);
+  assert.deepEqual(multiModel.clusters.map(c => c.id), ['working', 'waiting', 'needs', 'done']);
+  assert.equal(multiModel.coordinator.phase, 'stalled');
+  assert.ok(multiModel.connectors.some(c => c.kind === 'waiting' && c.from === 'waiting' && c.to === 'working'));
+
+  const lay4 = layoutHive(multiModel, 680, 500);
+  const allCells = [lay4.coordinator, ...lay4.clusters];
+  const minDist = Math.sqrt(3) * lay4.radius * 0.99;
+  for (let i = 0; i < allCells.length; i++) {
+    for (const v of allCells[i].vertices) {
+      assert.ok(v.x >= 0 && v.x <= 680 && v.y >= 0 && v.y <= 500, 'hex vertex inside stage');
+    }
+    for (let j = i + 1; j < allCells.length; j++) {
+      assert.ok(Math.hypot(allCells[i].x - allCells[j].x, allCells[i].y - allCells[j].y) >= minDist,
+        `hexes ${allCells[i].id} and ${allCells[j].id} do not overlap`);
+    }
+  }
+
+  // Verify 1..12 worker bee slots stay strictly inside flat-top hexagon bounds
+  for (let n = 1; n <= 12; n++) {
+    const swarm = Array.from({ length: n }, (_, i) => ({ name: 'bee-' + i, status: 'done' }));
+    const m = projectHive([], swarm, 0);
+    const l = layoutHive(m, 640, 460);
+    const cell = l.clusters[0];
+    assert.equal(cell.slots.length, n);
+    const apothem = (Math.sqrt(3) / 2) * cell.radius;
+    for (const slot of cell.slots) {
+      const dx = Math.abs(slot.x - cell.x);
+      const dy = Math.abs(slot.y - cell.y);
+      assert.ok(dy <= apothem - 4, `slot y inside hex for n=${n}`);
+      assert.ok(0.8660254 * dx + 0.5 * dy <= apothem - 4, `slot diagonal inside hex for n=${n}`);
+    }
+  }
+});
+
+test('HiveBee muted sprites omit Zzz and renderGrayscale while renderGraphFrame renders hive and mentions modes', () => {
+  const canvases = [];
+  const doc = {
+    createElement(tag) {
+      const pixels = new Map();
+      const ctx = {
+        fillStyle: '',
+        fillRect(x, y, w, h) {
+          for (let dx = 0; dx < w; dx++) for (let dy = 0; dy < h; dy++) pixels.set(`${x + dx},${y + dy}`, this.fillStyle);
+        },
+      };
+      const c = { tagName: tag, width: 20, height: 18, dataset: {}, attributes: {}, setAttribute(k, v) { this.attributes[k] = v; }, getContext: () => ctx, pixels };
+      canvases.push(c);
+      return c;
+    },
+  };
+  const vm = { document: doc };
+  runInNewContext(readFileSync(new URL('./hive-bees.js', import.meta.url), 'utf8'), vm);
+  const mutedBee = vm.HiveBee.sprite('worker', { status: 'done', tint: 0, muted: true });
+  assert.equal(mutedBee.dataset.muted, 'true');
+  assert.equal(mutedBee.dataset.pose, 'muted');
+  assert.ok(![...mutedBee.pixels.values()].includes('#d7dcff'), 'muted bee omits sleeping Zzz');
+  assert.ok(![...mutedBee.pixels.values()].includes('#75baef'), 'muted bee uses grayscale instead of blue tint');
+
+  const accent = vm.HiveBee.tintStyle('worker', false, 0);
+  assert.equal(accent.base, '#75baef');
+  assert.match(accent.bg, /^rgba\(/);
+  assert.match(accent.border, /^rgba\(/);
+
+  // Verify renderGraphFrame works in both hive & mentions modes and dark/light themes
+  const { renderGraphFrame } = globalThis.HiveGraph;
+  const members = [
+    { name: 'coordinator', role: 'coordinator', status: 'working' },
+    { name: 'alpha', status: 'done' },
+    { name: 'beta', status: 'working' },
+  ];
+  const posts = [
+    { seq: 1, kind: 'brief', author: 'coordinator', targets: ['alpha', 'beta'], text: 'Go' },
+    { seq: 2, kind: 'message', author: 'alpha', targets: ['coordinator'], text: '[done] Ready' },
+  ];
+  for (const mode of ['hive', 'mentions']) {
+    for (const theme of ['light', 'dark']) {
+      const texts = [];
+      const rects = [];
+      const ctx = new Proxy({
+        fillStyle: '', strokeStyle: '', lineWidth: 1, globalAlpha: 1, font: '', textAlign: '', textBaseline: '',
+        fillRect: (...args) => rects.push(args),
+        fillText: (text) => texts.push(text),
+      }, { get: (t, k) => t[k] ?? (() => {}) });
+      renderGraphFrame(ctx, { mode, theme, posts, members, width: 680, height: 460, bees: globalThis.HiveBee });
+      assert.ok(rects.length > 5, `${mode}/${theme} drew background and bee pixels`);
+      assert.ok(texts.length > 0, `${mode}/${theme} drew labels and legend`);
+      if (mode === 'hive') assert.ok(texts.includes('Coordinator') && texts.includes('Tasks done'));
+      else assert.ok(texts.includes('coordinator') && texts.includes('@mention, width = count'));
     }
   }
 });
