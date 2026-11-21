@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.0.0
+
+Major release bringing Antigravity-style **Native Subagent Swarms** to DeepSeek Harness `0.2.2-rc.5`, **Attached Child Threads & Coordinator Forking** to Codex `0.171+`, aligned Native Swarm `SKILL.md` coordination discipline, and an **Exact Box-Clipped Graph & Design DNA UI Overhaul**.
+
+### Native DeepSeek Harness Subagent Swarm (`dsh-hive-swarm@2.0.0`)
+- Execute non-worktree DSH workers as hidden native child subagents via `ctx.subagents.startActivation({ provider: 'spawn' | 'fork', maxDepth: parentDepth + 1, delivery: 'caller', childId })` (`executionMode: 'subagent'`, zero workspace sidebar clutter).
+- Enforce permissions synchronously inside `ctx.on('subagent/start', info)` before Turn 1 prompt enqueue — validating `fs.sandboxMode`, `shell.sandboxMode`, `sandboxPolicy.resolve({ session })`, empty `additionalWritableRoots`, strict `tools.restrict` + `tools.guard` (blocking read-only shell `sandbox_permissions` escalation), and fail-closed activation disposal on any security violation.
+- Continue Turn 2+ via `ctx.agents.resume({ resumeSessionId, agentOptions, setup })` + deep-frozen `UserMessage` (`handle.agent.followup`) after awaiting `activation.result` lock release (with clean flush & disposal outside `runMaintenance`), eliminating `subagents/prompt` `delivery: 'parent'` parent-chat wakeups while keeping `subagents/prompt` as a fallback when `ctx.agents?.resume` is unavailable.
+- Route subagent transcripts through `{ kind: 'subagent', parentSessionId, childSessionId, mode: 'continuable' }` in `session/events` and `uiWorkspace.openSession(...)` (falling back gracefully to `Journal`), while keeping `worktree: true` and subagent-capacity/legacy fallbacks on `session/create` with UTF-8 `<= 80`-byte `session/rename` titles (`executionMode: 'session'`).
+
+### Codex Attached Child Threads, Coordinator Fork & Protocol Hardening (`hive-swarm@2.0.0`)
+- Pass trusted `team.parentSessionId` via MCP `_meta` / `CODEX_THREAD_ID` in `stdio()` (rejecting caller-supplied `parentSessionId` arguments and never reading shared HTTP daemon env), enabling `fork: "coordinator"` on `start_team` and `add_member` (while blocking non-coordinator peer workers from forking coordinator).
+- Attach workers cleanly on Codex `0.171+` paginated parents using `thread/fork({ attachToSource: true, beforeTurnId })` (`executionMode: 'attached'`, omitting `beforeTurnId` on `fork: "coordinator"`), skipping `thread/unarchive`/`thread/archive` churn on attached threads, never calling `holdThread`/`thread/archive` on `team.parentSessionId`, never combining `attachToSource` with `ephemeral`, and falling back gracefully to `thread/start` + `thread/archive` on Codex `0.169.1` or non-paginated parents.
+- Pass `allowProviderModelFallback: false` on `thread/start` for explicit model selection, latching `supportsModelFallbackFlag` / `supportsAttachToSource` only on unsupported-parameter errors.
+- Align both `skills/swarm/SKILL.md` and `packages/dsh-hive-swarm/skills/hive-swarm/SKILL.md` with Antigravity Native Swarm coordination discipline (lean sizing, `#seq` referencing, peer-to-peer handoffs, coordinator-stays-coordinating, `[done]`/`[stall]` conventions) while keeping host tool names strictly separated.
+
+### Exact Box-Clipped Graph & Design DNA UI Overhaul
+- Rewrite graph geometry in shared `hive-graph.js` (`nodeBox`, `roundedRectSignedDistance`, `clipEdge`, `routeEdges`) using rounded-rectangle SDF + quadratic Bézier blossom clipping against measured DOM card bounds and asymmetric Codex hex + multi-line label bounds — eliminating arrows and arrowheads hidden behind bee icons or wrapped multi-line labels.
+- Add 24-point Bézier obstacle avoidance around center nodes (e.g. `coordinator`), automatic midpoint mention-count badge deconfliction, symmetric opposite-bowing bidirectional edges, interactive focus dimming, and full un-truncated `@design-research` / `@asset-research` Codex hex labels.
+- Upgrade **Overview**, **Board**, **Members**, **Graph**, and **Journal** across DSH React UI and Codex standalone/MCP UI with `Subagent` / `Attached` / `Session` badges, `✓ Verified route:` journal badges, WCAG AA `light-dark()` tokens, `@media (forced-colors: active)` fallbacks, reactive `prefers-color-scheme` listeners, and scoped `prefers-reduced-motion` transitions.
+
 ## 1.9.1
 
 Hardening and bugfix release based on live end-to-end multi-worker stress testing on DeepSeek Harness `0.2.2-rc.5` (4 workers, 43 turns, 175 board posts, verified strict model lock).

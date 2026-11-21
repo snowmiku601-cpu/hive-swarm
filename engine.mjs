@@ -19,6 +19,7 @@ function integer(value, min, max, label) {
 
 const reserved = new Set(['all', 'coordinator', 'system', 'user']);
 const efforts = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+const executionModes = new Set(['subagent', 'attached', 'session']);
 const workerLimit = 12;
 const main = {name:'main',archived:false};
 const wakePhases = new Set(['done','stalled','budget','paused','retired']);
@@ -98,6 +99,19 @@ function postingChannel(team, member, requested) {
 
 function normalizeTarget(value) {
   return typeof value === 'string' ? value.trim().replace(/^@/, '').toLowerCase() : '';
+}
+
+function sessionId(value, label) {
+  const id = text(value, label, 256);
+  if (id.includes('\0')) throw Error(label + ' contains invalid characters.');
+  return id;
+}
+
+function forkTarget(value) {
+  if (value == null) return undefined;
+  const target = normalizeTarget(text(value, 'Fork source', 30));
+  if (!target) throw Error('Fork source must be a member name or coordinator.');
+  return target;
 }
 
 function addressesIn(body,names) {
@@ -258,7 +272,10 @@ function restore(team) {
   numberPosts(team);
   team.host ??= 'codex';
   team.channels ??= [{...main}];
-  for (const member of team.members) member.channels ??= [];
+  for (const member of team.members) {
+    member.channels ??= [];
+    if (member.threadId && !executionModes.has(member.executionMode)) member.executionMode = 'session';
+  }
   delete team.overview;
   const removed = new Set(team.members.filter(member=>member.role==='narrator').map(member=>member.name));
   if (removed.size) {
@@ -485,14 +502,25 @@ export class TeamBoard {
     }
   }
 
-  create(input, worktreeSource) {
+  create(input, worktreeSource, {parentSessionId} = {}) {
     if (input.host != null && input.host !== this.host) throw Error('A team cannot change its worker host.');
+    if (Object.hasOwn(input, 'parentSessionId')) throw Error('Parent session must be supplied by the host.');
+    const parent = parentSessionId == null ? undefined : sessionId(parentSessionId, 'Parent session');
     const cwd = realpathSync(text(input.cwd, 'Workspace', 1024));
     if (!statSync(cwd).isDirectory()) throw Error('Workspace must be a directory.');
     if (!Array.isArray(input.members) || input.members.length < 1 || input.members.length > workerLimit) {
       throw Error('Choose between 1 and '+workerLimit+' workers.');
     }
-    const members = input.members.flatMap(spec=>expandMember(spec));
+    const members = input.members.flatMap(spec=>{
+      const added = expandMember(spec);
+      const source = forkTarget(spec?.fork);
+      if (source) {
+        if (source !== 'coordinator') throw Error('Initial members can only fork from "coordinator".');
+        if (!parent) throw Error('Forking from the coordinator requires an active parent session.');
+        for (const entry of added) entry.forkSource = 'coordinator';
+      }
+      return added;
+    });
     if (members.length > workerLimit) throw Error('A team can have up to '+workerLimit+' active workers.');
     validateRoster(members);
     validateDependencies(members, members);
@@ -502,6 +530,7 @@ export class TeamBoard {
     const threads = normalizeThreads(input.threads, members);
     const team = {
       id: randomUUID(), host: this.host, cwd, task, title: text(input.title ?? task.slice(0, 95), 'Title', 95),
+      ...(parent ? {parentSessionId: parent} : {}),
       ...(input.model ? {model: text(input.model, 'Model', 100)} : {}),
       effort: reasoningEffort(input.effort),
       ...(input.fallbackModel ? {fallbackModel: text(input.fallbackModel, 'Fallback model', 100)} : {}),
@@ -575,10 +604,29 @@ export class TeamBoard {
       }
       for (const entry of added) entry.addedBy = peer.name;
     }
-    if (fork != null) {
-      const source = team.members.find(entry => entry.name === fork);
-      if (!source?.threadId) throw Error('The fork source must be a member with a saved chat in this team.');
-      for (const entry of added) entry.forkFrom = source.threadId;
+    const topFork = forkTarget(fork);
+    const specFork = forkTarget(spec.fork);
+    if (topFork && specFork && topFork !== specFork) {
+      throw Error('Specify matching fork sources or pass fork in only one place.');
+    }
+    const requestedFork = topFork ?? specFork;
+    if (requestedFork) {
+      if (requestedFork === 'coordinator') {
+        if (peer && peer.role !== 'coordinator') {
+          throw Error('Only the coordinator can fork from the coordinator conversation.');
+        }
+        if (team.parentSessionId) {
+          for (const entry of added) entry.forkSource = 'coordinator';
+        } else {
+          const coordinator = team.members.find(entry => entry.name === 'coordinator' && entry.threadId);
+          if (!coordinator) throw Error('Forking from the coordinator requires an active parent session.');
+          for (const entry of added) entry.forkFrom = coordinator.threadId;
+        }
+      } else {
+        const source = team.members.find(entry => entry.name === requestedFork);
+        if (!source?.threadId) throw Error('The fork source must be a member with a saved chat in this team.');
+        for (const entry of added) entry.forkFrom = source.threadId;
+      }
     }
     if (previous && spec.waitFor == null) {
       member.waitFor = previous.waitFor.filter(name => {
@@ -1020,8 +1068,20 @@ export class TeamBoard {
       if (this.closed) return;
       const fresh = this.get(id);
       const current = fresh.members.find(m => m.name === member.name);
-      Object.assign(current, typeof details === 'string' ? {threadId: details} : details);
+      const patch = typeof details === 'string' ? {threadId: details} : details ? {...details} : null;
+      if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw Error('Invalid member update.');
+      if (patch.executionMode !== undefined && patch.executionMode !== null && !executionModes.has(patch.executionMode)) {
+        throw Error('Unrecognized execution mode.');
+      }
+      if (patch.subagentName !== undefined && patch.subagentName !== null) {
+        patch.subagentName = text(patch.subagentName, 'Subagent name', 120);
+      }
+      Object.assign(current, patch);
       if (current.forkFrom === null) delete current.forkFrom;
+      if (current.forkSource === null) delete current.forkSource;
+      if (current.executionMode === null) delete current.executionMode;
+      if (current.subagentName === null) delete current.subagentName;
+      if (current.threadId && !current.executionMode) current.executionMode = 'session';
       this.save(fresh);
     };
     const declaredOutcome = () => this.get(id).members.find(entry=>entry.name===member.name &&

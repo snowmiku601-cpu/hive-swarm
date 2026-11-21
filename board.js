@@ -7,6 +7,7 @@
   const tabs=['overview','board','members','graph'];
   const states={queued:'Queued',working:'Working',waiting:'Waiting',done:'Done',failed:'Failed',
     quota:'Quota limit',retired:'Retired',observer:'Observer'};
+  const executionModes={subagent:'Subagent',attached:'Attached',session:'Session'};
   const turnStates={completed:'Completed',inProgress:'Running',interrupted:'Interrupted',failed:'Failed'};
   const phases={working:'Live',queued:'Queued',paused:'Paused',done:'Done',
     stalled:'Needs you',budget:'Turn limit',retired:'Retired'};
@@ -32,6 +33,13 @@
   }
   function author(name) {return Object.hasOwn(authors,name)?authors[name]:'@'+name;}
   function condition(member) {return member.retireAfterTurn?'Retiring after turn':states[member.status]??member.status;}
+  function modeBadge(member) {
+    if (!member?.executionMode || !Object.hasOwn(executionModes,member.executionMode)) return null;
+    const pill=node('span','mode-badge',executionModes[member.executionMode]);
+    pill.dataset.mode=member.executionMode;
+    if (member.subagentName) pill.title='Subagent: '+member.subagentName;
+    return pill;
+  }
   function notice(text='',error=false) {
     $('notice').textContent=text;
     $('notice').dataset.error=String(error);
@@ -477,7 +485,16 @@
         row.append(heading);
         if (turn.steps.length) {
           const steps=node('ul','transcript-steps');
-          steps.append(...turn.steps.map(step=>node('li','',step)));
+          steps.append(...turn.steps.map(step=>{
+            const text=String(step??'');
+            const route=/^Verified route:\s*(.+)$/i.exec(text);
+            if (route) {
+              const item=node('li','transcript-route');
+              item.append(node('span','route-pill','Verified route: '),node('code','',route[1]));
+              return item;
+            }
+            return node('li','',text);
+          }));
           row.append(steps);
         }
         if (turn.report) {
@@ -646,7 +663,11 @@
       const heading=node('div','member-top');
       const status=node('span','status-word',condition(member));
       status.dataset.status=member.status;
-      heading.append(node('strong','',author(member.name)),status);
+      const mode=modeBadge(member);
+      const right=node('span','member-pills');
+      if (mode) right.append(mode);
+      right.append(status);
+      heading.append(node('strong','',author(member.name)),right);
       row.append(heading);
       const now=node('p','now-summary',memberNow(member));
       nowSlots.set(member.name,now);
@@ -807,7 +828,11 @@
     const line=node('div','member-top');
     const badge=node('span','status-word',condition(member));
     badge.dataset.status=member.status;
-    line.append(node('h3','member-name',author(member.name)),badge);
+    const mode=modeBadge(member);
+    const pills=node('span','member-pills');
+    if (mode) pills.append(mode);
+    pills.append(badge);
+    line.append(node('h3','member-name',author(member.name)),pills);
     info.append(line);
     if (member.role==='coordinator'&&['stalled','budget'].includes(team.phase)) {
       card.dataset.needsYou='true';
@@ -995,6 +1020,8 @@
       button.dataset.role=member.role??'worker';
       button.dataset.status=member.status;
       button.dataset.muted=String(!member.posts&&!projection.links.some(edge=>edge.to===member.name));
+      button.dataset.dimmed=String(Boolean(focusedNode&&focusedNode!==member.name&&
+        !projection.links.some(edge=>(edge.from===focusedNode&&edge.to===member.name)||(edge.to===focusedNode&&edge.from===member.name))));
       button.dataset.unmentioned=String(graph.unmentionedNode(member));
       button.title=author(member.name)+' · '+condition(member)+
         (graph.unmentionedNode(member)?' · Posted with no mention':'');
@@ -1174,6 +1201,11 @@
     try {localStorage.setItem('team-board-color',theme);} catch {}
   };
   setTheme(initialTheme());
+  const colorSchemeQuery=matchMedia('(prefers-color-scheme:light)');
+  colorSchemeQuery.addEventListener?.('change',event=>{
+    try {if (localStorage.getItem('team-board-color')) return;} catch {}
+    setTheme(event.matches?'light':'dark');
+  });
   for (const [index,name] of tabs.entries()) {
     const tab=$('tab-'+name);
     tab.onclick=()=>selectTab(name);

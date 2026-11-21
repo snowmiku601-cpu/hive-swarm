@@ -22,7 +22,7 @@ function parse(endpoint,value) {
   if(endpoint==='command') {
     exact(value,['action','args','requestId']);short(value.requestId,'request identity',{max:160});
     if(!ownerActions.has(value.action)||!object(value.args))throw Error('Unknown command or invalid arguments.');
-    if(['actor','principal','sessionId','dataDirectory','host'].some(key=>Object.hasOwn(value.args,key)))throw Error('Host identity cannot be supplied by the client.');
+    if(['actor','principal','sessionId','dataDirectory','host','parentSessionId'].some(key=>Object.hasOwn(value.args,key)))throw Error('Host identity cannot be supplied by the client.');
     return value;
   }
   throw Error('Unknown Hive Swarm endpoint.');

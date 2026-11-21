@@ -28,6 +28,7 @@ const teamId = {teamId: string};
 const memberForm = shape({
   name: string, brief: string, group: string, model: string, effort: string,
   fallbackModel: string, fallbackEffort: {type:['string','null']},
+  fork: string,
   writable:boolean,worktree:boolean,waitFor:strings,channels:strings,
   n:{...integer,minimum:2,maximum:8,description:'Spawn N homogeneous shard copies (<name>-1..<name>-N); omit for a single worker.'},
   tasks:{...strings,minItems:2,maxItems:8,description:'Shard this member into N copies (<name>-1..<name>-N), one per slice; omit for a single worker.'},
@@ -35,7 +36,7 @@ const memberForm = shape({
 const threadForm = shape({id:string,title:string,goal:string,members:strings}, ['id','title','goal']);
 const tools = [
   {
-    name: 'start_team', title: 'Start a team', description: 'Start a user-requested team in a local workspace. Workers wait for their dependencies and mentions. Each member has its own Codex chat. Set writable only for members authorized to edit. Optionally pass threads (outcome groups) and fallbackModel (quota failover).',
+    name: 'start_team', title: 'Start a team', description: 'Start a user-requested team in a local workspace. Workers wait for their dependencies and mentions. Set writable only for members authorized to edit. Pass fork: "coordinator" on a member to inherit the current conversation. Optionally pass threads (outcome groups) and fallbackModel (quota failover).',
     inputSchema: shape({title: string, cwd: string, task: string, model: string, effort: string,
       fallbackModel: string, fallbackEffort: {type:['string','null']},
       threads: {type:'array',items:threadForm}, coordinator:boolean,
@@ -99,7 +100,7 @@ const tools = [
   },
   {
     name: 'add_member', title: 'Add or replace a member',
-    description: 'Add a named member to a team. Set replaces to transfer an idle member’s unfinished dependencies. Set fork to the name of a member in this team to start from their saved chat. Set worktree for a separate Git checkout.',
+    description: 'Add a named member to a team. Set replaces to transfer an idle member’s unfinished dependencies. Set fork to "coordinator" or the name of a member in this team to start from that conversation. Set worktree for a separate Git checkout.',
     inputSchema: shape({...teamId, member: memberForm, replaces:string, fork:string}, ['teamId','member']),
   },
   {
@@ -191,6 +192,23 @@ function panelLink(team, origin) {
   };
 }
 
+export function extractParentSessionId(meta, env = process.env) {
+  const m = meta && typeof meta === 'object' ? meta : null;
+  const candidates = [
+    m?.['codex/threadId'],
+    m?.threadId,
+    m?.thread_id,
+    m?.codex && typeof m.codex === 'object' ? m.codex.threadId : undefined,
+    env?.CODEX_THREAD_ID,
+  ];
+  for (const raw of candidates) {
+    if (typeof raw !== 'string') continue;
+    const value = raw.trim();
+    if (value && value.length <= 256 && !value.includes('\0')) return value;
+  }
+  return undefined;
+}
+
 function present(team, origin, activity, actor) {
   const {id,title,cwd,task,model,effort,paused,turns,turnLimit,channels} = team;
   const phase=teamPhase(team);
@@ -201,14 +219,18 @@ function present(team, origin, activity, actor) {
   const events=visible?team.events.filter(event=>visible.includes(event.channel??'main')):team.events;
   return {
     id,title,cwd,task,model,effort,paused,turns,turnLimit,channels,activity,phase,
+    ...(team.parentSessionId?{parentSessionId:team.parentSessionId}:{}),
     ...(team.fallbackModel?{fallbackModel:team.fallbackModel,...(team.fallbackEffort!==undefined?{fallbackEffort:team.fallbackEffort}:{})}:{}),
     ...(team.threads?.length?{threads:team.threads}:{}),
     attention:phase==='stalled'?issues:phase==='budget'?
       [{kind:'budget',text:'Turn limit reached ('+turns+'/'+turnLimit+'). Add 8 turns to continue.'},...blockers]:blockers,
     ...panelLink(team, origin),
     members: team.members.map(member => {
-      const {name,role,group,brief,threadId,status,writable,waitFor,retireAfterTurn,worktree,workspace,addedBy,channels,lastTurn,fallbackModel,fallbackEffort} = member;
+      const {name,role,group,brief,threadId,status,writable,waitFor,retireAfterTurn,worktree,workspace,addedBy,channels,lastTurn,fallbackModel,fallbackEffort,subagentName} = member;
+      const executionMode = member.executionMode ?? (threadId ? 'session' : undefined);
       return {name,role,group,brief,threadId,status,writable,waitFor,retireAfterTurn,worktree,workspace,addedBy,channels,lastTurn,
+        ...(executionMode?{executionMode}:{}),
+        ...(subagentName?{subagentName}:{}),
         ...(fallbackModel?{fallbackModel,...(fallbackEffort!==undefined?{fallbackEffort}:{})}:{}),
         ...(member.recoveryRequired?{recoveryRequired:true}:{}),
         pendingWaitFor:pendingWaitFor(team,member),
@@ -411,7 +433,7 @@ export async function service({dataDirectory = root, listenPort = port, runner} 
         return send(res,200,{service:'codex-team-board',version,stopping:true});
       }
       if (req.method !== 'POST' || !(pathname === '/tool' || peerRequest)) return send(res, 404, {error: 'Route not found.'});
-      const {name, arguments: values = {}, scope} = await readBody(req);
+      const {name, arguments: values = {}, scope, context} = await readBody(req);
       let args = values;
       let actor;
       if (peerRequest) {
@@ -457,6 +479,9 @@ export async function service({dataDirectory = root, listenPort = port, runner} 
       let team;
       switch (name) {
         case 'start_team': {
+          if (Object.hasOwn(args, 'parentSessionId')) {
+            throw Error('Host identity cannot be supplied in tool arguments.');
+          }
           const members = Array.isArray(args.members) ? args.members : [];
           const selections = members.flatMap(member => [
             member?.model || (args.model && member?.effort)
@@ -471,7 +496,11 @@ export async function service({dataDirectory = root, listenPort = port, runner} 
             verifyModels(runner,selections),
           ]);
           if (res.destroyed) return;
-          team = board.create(args, source);
+          const trustedParent = !peerRequest && context && typeof context === 'object' &&
+            context.parentSessionId != null && context.parentSessionId !== ''
+            ? context.parentSessionId
+            : undefined;
+          team = board.create(args, source, {parentSessionId: trustedParent});
           break;
         }
         case 'add_member': {
@@ -618,6 +647,7 @@ function stdio() {
   } : null;
   const sendRpc = value => process.stdout.write(JSON.stringify({jsonrpc: '2.0', ...value}) + '\n');
   const calls=new Map();
+  let initMeta;
   const input=createInterface({input:process.stdin});
   input.on('close',()=>{for (const controller of calls.values()) controller.abort();});
   input.on('line', async line => {
@@ -632,6 +662,7 @@ function stdio() {
     const error = (code, message) => sendRpc({id: msg.id, error: {code, message}});
     switch (msg.method) {
       case 'initialize':
+        initMeta = msg.params?._meta;
         return reply({
           protocolVersion: msg.params?.protocolVersion || '2025-11-25',
           serverInfo: {name: peer ? 'hive-swarm-peer' : 'hive-swarm', version},
@@ -653,9 +684,13 @@ function stdio() {
         const controller=new AbortController();
         calls.set(msg.id,controller);
         try {
-          const {name, arguments: args} = msg.params ?? {};
+          const {name, arguments: args, _meta} = msg.params ?? {};
           if (!peer && !tools.some(tool => tool.name === name)) throw Error('Tool is not available in this chat.');
-          const data = await toolCall({name,arguments:args},peer,controller.signal);
+          const parentSessionId = !peer && name === 'start_team'
+            ? extractParentSessionId(_meta, {}) ?? extractParentSessionId(initMeta, process.env)
+            : undefined;
+          const payload = {name, arguments: args, ...(parentSessionId ? {context: {parentSessionId}} : {})};
+          const data = await toolCall(payload, peer, controller.signal);
           const summary = name === 'open_swarm_panel'
             ? data.title + '\n[' + data.openLabel + '](' + data.url + ')'
             : name==='wait_for_board'

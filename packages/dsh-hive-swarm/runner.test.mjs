@@ -209,3 +209,118 @@ test('runner preserves Verified route across reused multi-turn sessions, clears 
   assert.ok(labels.includes('Verified route: xingchiapi/gpt-6.1-sol · max'),'subsequent turns without a new request/header must keep verified route');
   assert.equal(labels.filter(l=>l==='Native worker remains active').length,1,'consecutive timeout heartbeats must not spam the durable journal');
 });
+
+test('runner executes Turn 1 subagent via messageId, prevents parent fork route leakage, and continues Turn 2 on same childId',async t=>{
+  const {NativeRunner,correlateRun}=await import('./runner.mjs');
+  const {RunStore}=await import('../../run-store.mjs');
+  const store=new RunStore();t.after(()=>store.close());
+  const events=[],calls=[];let seq=1,releaseWait;
+  const push=(type,data)=>events.push({seq:seq++,type,data});
+  // Seeded parent history before fork turn
+  push('agent/inbox/spliced',{target:'next-turn',start:0,inserted:[{id:'p-msg',source:{kind:'user',rpcId:'p-rpc'}}]});
+  push('turn/start',{turn:1});
+  push('agent/inbox/spliced',{target:'next-turn',start:0,removedCount:1,inserted:[]});
+  push('user/message',{id:'p-msg',source:{kind:'user',rpcId:'p-rpc'}});
+  push('request/header',{header:{config:{provider:'parentP',model:'parentM',reasoningEffort:'low'}}});
+  push('turn/end',{turn:1,reason:{kind:'completed'}});
+
+  const native={
+    listModels:async()=>[{id:'p/m',provider:'p',model:'m',efforts:['max'],defaultEffort:'max'}],
+    registerSubagent:(id,p)=>calls.push(['registerSubagent',id,p]),
+    startSubagent:async spec=>{
+      calls.push(['startSubagent',spec.forkCoordinator,spec.parentSessionId]);
+      push('model/selection',{provider:'p',model:'m',reasoningEffort:'max'});
+      push('agent/inbox/spliced',{target:'next-turn',start:0,inserted:[{id:'msg-sub-1',source:{kind:'user'}}]});
+      return {sessionId:'child-1',subagentName:'builder-t1',messageId:'msg-sub-1',executionMode:'subagent'};
+    },
+    prepareSubagentTurn:async(id,opts)=>{calls.push(['prepareSubagentTurn',id,opts.parentSessionId]);},
+    promptSubagentTurn:async req=>{
+      calls.push(['promptSubagentTurn',req.sessionId,req.requestId]);
+      push('agent/inbox/spliced',{target:'next-turn',start:0,inserted:[{id:'msg-sub-2',source:{kind:'user',rpcId:req.requestId}}]});
+      return {accepted:true};
+    },
+    settleTurn:async id=>calls.push(['settleTurn',id]),
+    releaseTurn:async id=>calls.push(['releaseTurn',id]),
+    wait:async()=>{await new Promise(r=>{releaseWait=r;});return {reason:'idle',state:{running:false,queue:[],pendingInput:[]}};},
+    events:async(_id,_sig,opts)=>{calls.push(['events',opts?.executionMode,opts?.parentSessionId]);return events;},
+    currentTurn:()=>({lastTurn:2,openTurnStartSeq:8}),
+    state:async()=>({running:false,queue:[],pendingInput:[]}),
+    flush:async()=>{},cancel:async()=>releaseWait?.(),dispose:async()=>{},
+  };
+  const runner=new NativeRunner({native,store});
+  const member={name:'builder',lastTurn:1,writable:false,forkSource:'coordinator',model:'p/m',effort:'max'};
+  const team={id:'team-1',parentSessionId:'parent-1',cwd:process.cwd(),task:'Subagent task',title:'Team One'};
+  const remember=patch=>{Object.assign(member,patch);if(member.forkSource===null)delete member.forkSource;};
+
+  const turn1=runner.run({team,member,remember,signal:new AbortController().signal,onActivity:()=>{}});
+  await until(()=>releaseWait);
+  assert.equal(member.threadId,'child-1');assert.equal(member.executionMode,'subagent');
+  assert.equal(member.subagentName,'builder-t1');assert.equal(member.forkSource,undefined);
+  assert.equal(member.pendingRun.messageId,'msg-sub-1');
+  push('turn/start',{turn:2});push('agent/inbox/spliced',{target:'next-turn',start:0,removedCount:1,inserted:[]});
+  push('user/message',{id:'msg-sub-1',source:{kind:'user'}});
+  push('request/header',{header:{config:{provider:'p',model:'m',reasoningEffort:'max'}}});
+  await runner.setOutcome('child-1',1,{state:'waiting',message:'Need turn 2',notify:[],waitFor:[]});
+  push('turn/end',{turn:2,reason:{kind:'completed'}});
+  releaseWait();releaseWait=null;
+  assert.equal((await turn1).state,'waiting');
+
+  const proof1=correlateRun({requestId:member.pendingRun.requestId,messageId:'msg-sub-1'},events);
+  assert.deepEqual(proof1.routes,['p/m · max'],'parent route must never leak into worker Verified route');
+
+  // Turn 2 reuses child-1 without creating another subagent
+  delete member.pendingRun;member.lastTurn=2;
+  native.currentTurn=()=>({lastTurn:3,openTurnStartSeq:14});
+  const turn2=runner.run({team,member,remember,signal:new AbortController().signal,onActivity:()=>{}});
+  await until(()=>releaseWait);
+  assert.equal(calls.filter(c=>c[0]==='startSubagent').length,1);
+  assert.equal(calls.some(c=>c[0]==='prepareSubagentTurn'&&c[1]==='child-1'),true);
+  push('turn/start',{turn:3});push('agent/inbox/spliced',{target:'next-turn',start:0,removedCount:1,inserted:[]});
+  push('user/message',{id:'msg-sub-2',source:{kind:'user',rpcId:member.pendingRun.requestId}});
+  await runner.setOutcome('child-1',2,{state:'done',message:'[done] Complete',notify:[],waitFor:[]});
+  push('turn/end',{turn:3,reason:{kind:'completed'}});
+  releaseWait();
+  assert.equal((await turn2).state,'done');
+  const journal=runner.readTranscript('child-1');
+  assert.equal(journal.length,2);
+  assert.ok(journal[0].items.some(i=>i.label==='Verified route: p/m · max'));
+  assert.ok(journal[1].items.some(i=>i.label==='Verified route: p/m · max'));
+  assert.equal(calls.filter(c=>c[0]==='settleTurn').length,2);
+});
+
+test('runner falls back to create/forkParent with clean title when subagent is unavailable, and fails closed on security denial',async t=>{
+  const {NativeRunner}=await import('./runner.mjs');
+  const {RunStore}=await import('../../run-store.mjs');
+  const store=new RunStore();t.after(()=>store.close());
+  const calls=[];let releaseWait;
+  const native={
+    listModels:async()=>[{id:'p/m',provider:'p',model:'m',efforts:['max']}],
+    startSubagent:async()=>{return null;},
+    create:async()=>{calls.push('create');return 'fallback-sess';},
+    forkParent:async id=>{calls.push(['forkParent',id]);return 'forked-parent-sess';},
+    rename:async(id,title)=>{calls.push(['rename',id,title]);},
+    prepare:async()=>{calls.push('prepare');},
+    prompt:async()=>{calls.push('prompt');},
+    wait:async()=>{await new Promise(r=>{releaseWait=r;});return {reason:'idle',state:{running:false,queue:[],pendingInput:[]}};},
+    events:async()=>[],currentTurn:()=>({lastTurn:1,openTurnStartSeq:1}),state:async()=>({running:false,queue:[],pendingInput:[]}),
+    flush:async()=>{},cancel:async()=>releaseWait?.(),dispose:async()=>{},
+  };
+  const runner=new NativeRunner({native,store});
+  const abort=new AbortController();
+  const member={name:'worker',lastTurn:1,writable:false,forkSource:'coordinator',model:'p/m',effort:'max'};
+  const team={id:'team-fb',parentSessionId:'parent-1',cwd:process.cwd(),task:'Task',title:'Fallback Team'};
+  const runPromise=runner.run({team,member,remember:p=>Object.assign(member,p),signal:abort.signal});
+  await until(()=>releaseWait);
+  assert.deepEqual(calls[0],['forkParent','parent-1']);
+  assert.deepEqual(calls[1],['rename','forked-parent-sess','🐝 @worker · Fallback Team']);
+  assert.equal(member.executionMode,'session');
+  abort.abort();await assert.rejects(runPromise);
+
+  // Security rejection fails closed before admission with zero fallback to create
+  const callsBefore=calls.length;
+  native.startSubagent=async()=>{throw Object.assign(Error('Security enforcement rejected preset'),{securityViolation:true});};
+  const blockedMember={name:'blocked',lastTurn:1,writable:false,model:'p/m',effort:'max'};
+  await assert.rejects(runner.run({team,member:blockedMember,remember:p=>Object.assign(blockedMember,p),signal:new AbortController().signal}),/Security enforcement/);
+  assert.equal(calls.length,callsBefore);
+  assert.equal(blockedMember.recoveryRequired,undefined);
+});

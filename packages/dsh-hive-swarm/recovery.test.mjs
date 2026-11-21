@@ -115,3 +115,58 @@ test('reconcile keeps observing when an early idle event still reports active wo
   await until(()=>host.application.board.get(team.id).members[0].completed===1);
   assert.equal(host.application.board.get(team.id).members[0].status,'done');
 });
+
+test('reconcile recovers an interrupted Turn 1 subagent via messageId and subagent events address',async t=>{
+  const root=mkdtempSync(join(tmpdir(),'hive-native-subagent-recovery-'));
+  let board=new TeamBoard(join(root,'teams.sqlite'),()=>new Promise(()=>{}),{host:'deepseek-harness'});
+  const team=board.create({cwd:root,task:'Subagent recovery fixture',members:[{name:'builder',brief:'Work'}]});
+  await until(()=>board.get(team.id).members[0].status==='working');
+  const saved=board.get(team.id);
+  saved.parentSessionId='parent-chat';
+  saved.members[0].threadId='child-sub-1';
+  saved.members[0].executionMode='subagent';
+  saved.members[0].pendingRun={turn:1,requestId:'run-1',messageId:'msg-sub-1'};
+  board.save(saved);
+  const store=new RunStore(join(root,'runs.sqlite'));
+  store.begin({teamId:team.id,member:'builder',turn:1,requestId:'run-1',sessionId:'child-sub-1',workspace:root});
+  board.close();store.close();
+
+  const records=[
+    {seq:1,type:'agent/inbox/spliced',data:{target:'next-turn',start:0,inserted:[{id:'msg-sub-1',source:{kind:'user'}}]}},
+    {seq:2,type:'turn/start',data:{turn:4}},
+    {seq:3,type:'agent/inbox/spliced',data:{target:'next-turn',start:0,removedCount:1,inserted:[]}},
+  ];
+  let running=true,inputSeen=false,releaseWait;const seen=[];
+  const native={
+    listModels:async()=>[],isCurrentAgent:agent=>agent?.current===true,
+    registerSubagent:(id,p)=>seen.push(['registerSubagent',id,p]),
+    create:async()=>{throw Error('No create');},prompt:async()=>{throw Error('No prompt');},
+    state:async()=>({active:running,running,queue:[],pendingInput:inputSeen?[]:[{kind:'permission'}]}),
+    currentTurn:()=>({lastTurn:4,openTurnStartSeq:2}),
+    wait:async()=>{
+      if(!inputSeen){inputSeen=true;return {reason:'input-required'};}
+      await new Promise(resolve=>{releaseWait=resolve;});
+      running=false;
+      records.push({seq:4,type:'turn/end',data:{turn:4,reason:{kind:'completed'}}});
+      return {reason:'idle',state:{active:true,running:false,queue:[]}};
+    },
+    events:async(_id,_sig,opts)=>{seen.push(['events',opts]);return records;},
+    flush:async()=>{},cancel:async()=>{releaseWait?.();},dispose:async()=>{},
+  };
+  const {createHost}=await import('./host.mjs');
+  const tools=new Map();
+  const ctx={connection:{fetch:{register:()=>async()=>{}}},workspaceRegistry:{list:()=>[{path:root}]},
+    tools:{register:tool=>{tools.set(tool.name,tool);return()=>tools.delete(tool.name);}},skills:{register:()=>()=>{}}};
+  const host=await createHost(ctx,{dataDirectory:root,coreFactory:createSwarmApplication,storeFactory:file=>new RunStore(file),nativeFactory:()=>native});
+  t.after(async()=>{await host.close();rmSync(root,{recursive:true,force:true});});
+
+  await until(()=>releaseWait);
+  assert.equal(seen.some(x=>x[0]==='registerSubagent'&&x[1]==='child-sub-1'&&x[2]==='parent-chat'),true);
+  const exec={signal:new AbortController().signal,agent:{id:'child-sub-1',current:true},concludeTurn:()=>{exec.concluded=true;}};
+  const res=await tools.get('hive_swarm_set_turn_outcome').execute({turn:1,state:'done',message:'[done] Subagent recovered cleanly.',notify:[],waitFor:[]},exec);
+  assert.equal(res.accepted,true);assert.equal(exec.concluded,true);
+  assert.equal(seen.some(x=>x[0]==='events'&&x[1]?.executionMode==='subagent'&&x[1]?.parentSessionId==='parent-chat'),true);
+  releaseWait();
+  await until(()=>host.application.board.get(team.id).members[0].completed===1);
+  assert.equal(host.application.board.get(team.id).members[0].status,'done');
+});

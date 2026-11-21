@@ -188,6 +188,18 @@ function deliverTurnEvent(turn, event) {
   if (step) turn.onActivity({...step,detail,time});
 }
 
+function isUnsupportedParam(error, name) {
+  const msg = String(error?.message ?? error);
+  if (name && new RegExp(name, 'i').test(msg)) return true;
+  return /unknown field|unrecognized field|unexpected field|not supported|unsupported/i.test(msg);
+}
+
+function isAttachFallbackError(error) {
+  const msg = String(error?.message ?? error);
+  return isUnsupportedParam(error, 'attachToSource') ||
+    /beforeTurnId|paginated parent|no rollout found|turn not found|method not found|thread not found|not found/i.test(msg);
+}
+
 export class CodexRunner {
   constructor({ephemeral = false, spawnProcess = spawn, turnIdleTimeoutMs, turnMaxTimeoutMs} = {}) {
     this.pending = new Map();
@@ -195,6 +207,8 @@ export class CodexRunner {
     this.loadedThreads = new Map();
     this.threadHolds = new Map();
     this.modelProviders = new Map();
+    this.supportsAttachToSource = true;
+    this.supportsModelFallbackFlag = true;
     this.sequence = 0;
     this.ephemeral = ephemeral;
     this.spawnProcess = spawnProcess;
@@ -240,6 +254,8 @@ export class CodexRunner {
     this.child = null;
     this.ready = null;
     this.loadedThreads.clear();
+    this.supportsAttachToSource = true;
+    this.supportsModelFallbackFlag = true;
     for (const request of this.pending.values()) request.reject(Error(message));
     for (const turn of this.turns.values()) turn.reject(Error(message));
   }
@@ -363,8 +379,84 @@ export class CodexRunner {
     };
   }
 
-  async forkThread(threadId, scope) {
-    return this.rpc('thread/fork', {threadId, ...scope, excludeTurns:true, ephemeral:this.ephemeral});
+  async ensureModelProvider(scope, cwd) {
+    if (scope.modelProvider) return scope;
+    const {config} = await this.rpc('config/read', {cwd, includeLayers: false});
+    return {...scope, modelProvider: config.model_provider ?? 'openai'};
+  }
+
+  async parentSupportsAttach(parentId) {
+    if (this.ephemeral || !parentId || !this.supportsAttachToSource) return false;
+    try {
+      const info = await this.rpc('thread/read', {threadId: parentId, includeTurns: false});
+      return info?.thread?.historyMode === 'paginated';
+    } catch (error) {
+      if (isAttachFallbackError(error)) return false;
+      throw error;
+    }
+  }
+
+  async startThread(scope, model) {
+    const useFlag = Boolean(model) && this.supportsModelFallbackFlag;
+    const params = {
+      ...scope, ephemeral: this.ephemeral, serviceName: 'hive_swarm',
+      ...(useFlag ? {allowProviderModelFallback: false} : {}),
+    };
+    try {
+      return await this.rpc('thread/start', params);
+    } catch (error) {
+      if (useFlag && isUnsupportedParam(error, 'allowProviderModelFallback')) {
+        this.supportsModelFallbackFlag = false;
+        const {allowProviderModelFallback, ...fallback} = params;
+        return this.rpc('thread/start', fallback);
+      }
+      throw error;
+    }
+  }
+
+  async forkThread(threadId, scope, {attachToSource = false, beforeTurnId} = {}) {
+    const attach = attachToSource && !this.ephemeral && this.supportsAttachToSource;
+    const params = {
+      threadId, ...scope, excludeTurns: true, ephemeral: this.ephemeral,
+      ...(attach ? {attachToSource: true} : {}),
+      ...(beforeTurnId ? {beforeTurnId} : {}),
+    };
+    try {
+      return await this.rpc('thread/fork', params);
+    } catch (error) {
+      if (attach && !beforeTurnId && isAttachFallbackError(error)) {
+        if (isUnsupportedParam(error, 'attachToSource')) {
+          this.supportsAttachToSource = false;
+        }
+        const {attachToSource: _, ...fallback} = params;
+        return this.rpc('thread/fork', fallback);
+      }
+      throw error;
+    }
+  }
+
+  async tryStartAttached(parentId, scope, cwd) {
+    if (!await this.parentSupportsAttach(parentId)) return null;
+    try {
+      const turns = await this.rpc('thread/turns/list', {
+        threadId: parentId, itemsView: 'notLoaded', sortDirection: 'asc', limit: 1,
+      });
+      const firstTurnId = turns?.data?.[0]?.id;
+      const forkScope = await this.ensureModelProvider(scope, cwd);
+      const response = await this.rpc('thread/fork', {
+        threadId: parentId, ...forkScope, attachToSource: true, excludeTurns: true, ephemeral: false,
+        ...(firstTurnId ? {beforeTurnId: firstTurnId} : {}),
+      });
+      return {response, scope: forkScope};
+    } catch (error) {
+      if (isAttachFallbackError(error) || /cannot change.*model provider/i.test(String(error?.message ?? error))) {
+        if (isUnsupportedParam(error, 'attachToSource')) {
+          this.supportsAttachToSource = false;
+        }
+        return null;
+      }
+      throw error;
+    }
   }
 
   async run({team, member, remember, declaredOutcome, peerToken, peerPort, onActivity}) {
@@ -374,62 +466,94 @@ export class CodexRunner {
       ? (await this.listModels()).find(entry => entry.model === model)?.defaultReasoningEffort
       : configuredEffort(team, member);
     const cwd = member.workspace?.cwd ?? team.cwd;
-    const scope = {
+    let scope = {
       cwd, sandbox: member.writable ? 'workspace-write' : 'read-only',
       approvalPolicy: 'never', model,
       config: {...peerConfig(team, member, peerToken, peerPort), ...(effort ? {model_reasoning_effort: effort} : {})},
     };
     if (model?.startsWith('xingchi/')) scope.modelProvider = 'desktop-xingchi';
     else if (model && this.modelProviders.has(model)) scope.modelProvider = this.modelProviders.get(model);
-    const savedId=member.threadId;
-    let id=savedId;
-    const inheriting = !id && Boolean(member.forkFrom);
-    const selection = {modelProvider:scope.modelProvider, config:JSON.stringify(scope.config)};
-    let releaseSource,releaseNew;
+    const requestedProvider = scope.modelProvider;
+    const configKey = JSON.stringify(scope.config);
+    const savedId = member.threadId;
+    let id = savedId;
+    const forkCoordinator = !id && member.forkSource === 'coordinator';
+    const forkTeammate = !id && !forkCoordinator && Boolean(member.forkFrom);
+    const inheriting = forkCoordinator || forkTeammate;
+    let executionMode = savedId ? (member.executionMode ?? 'session') : undefined;
+    const wasAttached = executionMode === 'attached';
+    let releaseSource, releaseNew;
     try {
-      const sourceId=id??member.forkFrom;
-      if (sourceId) releaseSource=await this.holdThread(sourceId);
-      const loaded=this.loadedThreads.get(id);
       let response;
-      let created=!id;
-      if (!sourceId) {
-        response=await this.rpc('thread/start',{...scope,ephemeral:this.ephemeral,serviceName:'hive_swarm'});
-      } else if (!loaded || loaded.modelProvider!==selection.modelProvider || loaded.config!==selection.config) {
-        if (!scope.modelProvider) {
-          const {config}=await this.rpc('config/read',{cwd,includeLayers:false});
-          scope.modelProvider=config.model_provider??'openai';
+      let created = !id;
+      if (forkCoordinator) {
+        if (!team.parentSessionId) throw Error('Cannot fork from coordinator without a parent session.');
+        scope = await this.ensureModelProvider(scope, cwd);
+        const canAttach = await this.parentSupportsAttach(team.parentSessionId);
+        response = await this.forkThread(team.parentSessionId, scope, {attachToSource: canAttach});
+        executionMode = response.thread?.attachedToThreadId ? 'attached' : 'session';
+      } else if (forkTeammate) {
+        const sourceId = member.forkFrom;
+        const sourceAttached = team.members?.find(m => m.threadId === sourceId)?.executionMode === 'attached';
+        if (!sourceAttached) releaseSource = await this.holdThread(sourceId);
+        scope = await this.ensureModelProvider(scope, cwd);
+        response = await this.forkThread(sourceId, scope, {attachToSource: sourceAttached});
+        executionMode = response.thread?.attachedToThreadId ? 'attached' : 'session';
+      } else if (!id) {
+        const attached = team.parentSessionId && !this.ephemeral
+          ? await this.tryStartAttached(team.parentSessionId, scope, cwd)
+          : null;
+        if (attached) {
+          response = attached.response;
+          scope = attached.scope;
+          executionMode = response.thread?.attachedToThreadId ? 'attached' : 'session';
+        } else {
+          response = await this.startThread(scope, model);
+          executionMode = 'session';
         }
-        if (!id) response=await this.forkThread(sourceId,scope);
-        else {
+      } else {
+        if (!wasAttached) releaseSource = await this.holdThread(id);
+        const loaded = this.loadedThreads.get(id);
+        if (!loaded || loaded.model !== model || loaded.requestedProvider !== requestedProvider || loaded.config !== configKey) {
+          scope = await this.ensureModelProvider(scope, cwd);
           try {
-            response=await this.rpc('thread/resume',{threadId:id,excludeTurns:true,...scope});
+            response = await this.rpc('thread/resume', {threadId: id, excludeTurns: true, ...scope});
           } catch (error) {
             if (!/cannot change this thread's model provider/i.test(error.message)) throw error;
           }
-          if (!response || (response.modelProvider && response.modelProvider!==scope.modelProvider)) {
-            response=await this.forkThread(id,scope);
-            created=true;
+          if (!response || (response.modelProvider && response.modelProvider !== scope.modelProvider)) {
+            response = await this.forkThread(id, scope, {attachToSource: wasAttached});
+            executionMode = response.thread?.attachedToThreadId ? 'attached' : 'session';
+            created = true;
           }
         }
       }
       if (response) {
-        id=response.thread.id;
+        id = response.thread.id;
         if (created) {
-          releaseNew=await this.holdThread(id,true);
-          const name=[...('🐝 @'+member.name+' · '+(team.title??team.task))].slice(0,95).join('');
-          await this.rpc('thread/name/set',{threadId:id,name}).catch(()=>{});
-          const finishSource=releaseSource;
-          releaseSource=null;
-          await finishSource?.(Boolean(savedId));
+          if (executionMode !== 'attached') releaseNew = await this.holdThread(id, true);
+          const name = [...('🐝 @'+member.name+' · '+(team.title??team.task))].slice(0,95).join('');
+          await this.rpc('thread/name/set', {threadId: id, name}).catch(()=>{});
+          const finishSource = releaseSource;
+          releaseSource = null;
+          if (finishSource) await finishSource(Boolean(savedId));
+          else if (savedId) {
+            this.loadedThreads.delete(savedId);
+            await this.rpc('thread/unsubscribe', {threadId: savedId}).catch(()=>{});
+          }
         }
-        if (scope.modelProvider && response.modelProvider && response.modelProvider!==scope.modelProvider) {
+        if (scope.modelProvider && response.modelProvider && response.modelProvider !== scope.modelProvider) {
           throw Error('Codex did not select the requested model provider.');
         }
-        remember({threadId:id,activeModel:response.model,activeEffort:response.reasoningEffort,
-          ...(inheriting?{forkFrom:null}:{})});
+        remember({
+          threadId: id, executionMode,
+          activeModel: response.model, activeEffort: response.reasoningEffort,
+          ...(forkTeammate ? {forkFrom: null} : {}),
+          ...(forkCoordinator ? {forkSource: null} : {}),
+        });
       }
-      this.loadedThreads.set(id,selection);
-      return await this.runTurn(id,{team,member,remember,declaredOutcome,onActivity,model,effort,cwd,inheriting});
+      this.loadedThreads.set(id, {model, requestedProvider, modelProvider: scope.modelProvider, config: configKey});
+      return await this.runTurn(id, {team, member, remember, declaredOutcome, onActivity, model, effort, cwd, inheriting});
     } finally {
       try { await releaseNew?.(); }
       finally { await releaseSource?.(); }
