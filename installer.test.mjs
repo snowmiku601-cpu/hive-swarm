@@ -479,3 +479,48 @@ test('renameDirectory retries transient Windows EPERM/EBUSY locks while still re
   }), /EPERM/);
   assert.equal(calls3, 1);
 });
+
+test('updating from an earlier verified release without newly added files succeeds while rejecting tampered prior releases', async t => {
+  const {createHash} = await import('node:crypto');
+  const f = fixture(t);
+  const priorVersion = '2.0.0';
+  const priorFiles = files.filter(file => file !== 'hive-gif.js');
+  const priorDir = join(f.store, 'versions', priorVersion);
+  const priorMarket = join(priorDir, 'marketplace');
+  for (const file of priorFiles) {
+    const src = join(f.old, file);
+    const dst = join(priorMarket, file);
+    mkdirSync(dirname(dst), {recursive: true});
+    if (file === 'package.json') {
+      const m = JSON.parse(readFileSync(src, 'utf8'));
+      writeFileSync(dst, JSON.stringify({...m, version: priorVersion,
+        files: priorFiles.filter(name => !['package.json', 'README.md', 'LICENSE'].includes(name))}));
+    } else if (file === '.codex-plugin/plugin.json') {
+      const m = JSON.parse(readFileSync(src, 'utf8'));
+      writeFileSync(dst, JSON.stringify({...m, version: priorVersion}));
+    } else {
+      writeFileSync(dst, readFileSync(src));
+    }
+  }
+  const sha = bytes => createHash('sha256').update(bytes).digest('hex');
+  const digest = sha(JSON.stringify(priorFiles.map(file => [file, sha(readFileSync(join(priorMarket, file)))])));
+  mkdirSync(f.store, {recursive: true});
+  writeFileSync(join(f.store, 'owner.json'), JSON.stringify({schema: 1, pluginId: plugin}) + '\n');
+  writeFileSync(join(priorDir, 'owner.json'), JSON.stringify({schema: 1, pluginId: plugin, version: priorVersion, digest}) + '\n');
+  cpSync(priorMarket, f.cache(priorVersion), {recursive: true});
+  f.state.marketplace = priorMarket;
+  f.state.version = priorVersion;
+
+  // Tampered extra file inside prior release still fails closed.
+  writeFileSync(join(priorMarket, 'stray.txt'), 'tamper');
+  const rejected = await f.run('update', f.next, ['--after-close']);
+  assert.equal(rejected.code, 1);
+  assert.match(rejected.stderr, /Unexpected entry/);
+  rmSync(join(priorMarket, 'stray.txt'));
+
+  // Clean prior 2.0.0 release (25 files, without hive-gif.js) upgrades cleanly to next (26 files).
+  success(await f.run('update', f.next, ['--after-close']));
+  assert.equal(f.state.version, f.v2);
+  assert.equal(f.state.marketplace, f.release(f.v2));
+  assert.ok(existsSync(join(f.release(f.v2), 'hive-gif.js')));
+});

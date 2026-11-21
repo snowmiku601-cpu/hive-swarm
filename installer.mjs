@@ -129,13 +129,15 @@ async function publishDirectory(target, populate) {
   }
 }
 
-function checkMetadata(bytes, command) {
+function checkMetadata(bytes, command, {allowPriorFiles = false} = {}) {
   const manifest = json(bytes.get('package.json'));
   const plugin = json(bytes.get('.codex-plugin/plugin.json'));
   if (!validIdentity(manifest) || !validIdentity(plugin) || manifest.version !== plugin.version) {
     throw Error('Hive Swarm package and Codex plugin identities and versions must match.');
   }
-  if (!matchesPackageFiles(manifest.files)) throw Error('Unexpected Hive Swarm package allowlist.');
+  if (allowPriorFiles ? !priorPackageFiles(manifest.files) : !matchesPackageFiles(manifest.files)) {
+    throw Error('Unexpected Hive Swarm package allowlist.');
+  }
   const market = json(bytes.get('.agents/plugins/marketplace.json'));
   const mcp = json(bytes.get('.mcp.json')).mcpServers;
   const source = market.plugins?.[0]?.source;
@@ -150,25 +152,41 @@ function checkMetadata(bytes, command) {
 }
 
 const packageDigest = bytes => sha256(JSON.stringify([...bytes].map(([file, contents]) => [file, sha256(contents)])));
-
-function readPackage(path, nodePath) {
-  const bytes = new Map(CORE_PACKAGE_FILES.map(file => [file, readRegularFile(join(path, file))]));
-  const version = checkMetadata(bytes, nodePath ?? 'node');
-  return {version, digest: packageDigest(bytes), bytes};
+const requiredMetadataFiles = Object.freeze([
+  '.agents/plugins/marketplace.json', '.codex-plugin/plugin.json', '.mcp.json',
+  'LICENSE', 'README.md', 'cli.mjs', 'package.json', 'server.mjs', 'skills/swarm/SKILL.md',
+]);
+const safeRelativeFile = file => typeof file === 'string' && file.length > 0 && file.length <= 260 &&
+  !file.startsWith('/') && !file.endsWith('/') && !file.includes('\\') && !file.includes('\0') &&
+  !/^[a-zA-Z]:/.test(file) && file.split('/').every(part => part && part !== '.' && part !== '..');
+function priorPackageFiles(files) {
+  if (!Array.isArray(files) || !files.every(safeRelativeFile)) return null;
+  const all = [...new Set([...files, ...standardFiles])].sort();
+  return requiredMetadataFiles.every(file => all.includes(file)) ? all : null;
 }
 
-const publicDirectories = new Set(CORE_PACKAGE_FILES.flatMap(file => {
+function readPackage(path, nodePath, {allowPriorFiles = false} = {}) {
+  const files = allowPriorFiles
+    ? priorPackageFiles(json(readRegularFile(join(path, 'package.json'))).files)
+    : CORE_PACKAGE_FILES;
+  if (!files) throw Error('Unexpected Hive Swarm package allowlist.');
+  const bytes = new Map(files.map(file => [file, readRegularFile(join(path, file))]));
+  const version = checkMetadata(bytes, nodePath ?? 'node', {allowPriorFiles});
+  return {version, digest: packageDigest(bytes), bytes, files};
+}
+
+const directorySet = files => new Set(files.flatMap(file => {
   const parts = file.split('/');
   return parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join('/'));
 }));
 
-function verifyTree(path, prefix = '') {
+function verifyTree(path, files = CORE_PACKAGE_FILES, prefix = '', allowedDirs = directorySet(files)) {
   for (const item of readdirSync(path)) {
     const file = prefix + item;
     const next = join(path, item);
     const stat = entry(next);
-    if (stat?.isDirectory() && publicDirectories.has(file)) verifyTree(next, file + '/');
-    else if (!stat?.isFile() || !CORE_PACKAGE_FILES.includes(file)) throw Error('Unexpected entry in a Hive Swarm package copy: ' + next);
+    if (stat?.isDirectory() && allowedDirs.has(file)) verifyTree(next, files, file + '/', allowedDirs);
+    else if (!stat?.isFile() || !files.includes(file)) throw Error('Unexpected entry in a Hive Swarm package copy: ' + next);
   }
 }
 
@@ -184,12 +202,12 @@ function verifiedRelease(store, version) {
     throw Error('Invalid Node runtime binding in the Hive Swarm release marker: ' + release);
   }
   const path = join(release, 'marketplace');
-  const actual = readPackage(path, nodePath);
-  verifyTree(path);
+  const actual = readPackage(path, nodePath, {allowPriorFiles: true});
+  verifyTree(path, actual.files);
   if (marker.version !== version || actual.version !== version || marker.digest !== actual.digest) {
     throw Error('Hive Swarm release differs from its ownership marker: ' + path);
   }
-  return {path, version, digest: actual.digest, sourceDigest: bound ? marker.sourceDigest : actual.digest, nodePath};
+  return {path, version, digest: actual.digest, sourceDigest: bound ? marker.sourceDigest : actual.digest, nodePath, files: actual.files};
 }
 
 function installedBytes(candidate, nodePath) {
@@ -274,8 +292,10 @@ function cacheVersions(paths, owned) {
     const path = join(paths.cache, version);
     if (!owned || !validVersion(version) || !directory(path)) throw Error('Refusing foreign Codex plugin cache: ' + path);
     const release = verifiedRelease(paths.store, version);
-    verifyTree(path);
-    if (readPackage(path, release.nodePath).digest !== release.digest) throw Error('Codex plugin cache differs from the managed release: ' + path);
+    verifyTree(path, release.files);
+    if (readPackage(path, release.nodePath, {allowPriorFiles: true}).digest !== release.digest) {
+      throw Error('Codex plugin cache differs from the managed release: ' + path);
+    }
     return version;
   });
 }
