@@ -478,7 +478,7 @@ function FlowGraph({state,controller,onJournal,onJumpPost}) {
     if (next.size&&(changed||!measuredBoxes||measuredBoxes.size!==next.size)) setMeasuredBoxes(next);
   },[projection.nodes,width,cardWidth,narrow]);
   const routed=useMemo(()=>Graph.routeEdges(projection,points,{
-    variant:'card',boxes:measuredBoxes,cardWidth,narrow,marginStart:6,marginEnd:7,obstacleMargin:14,
+    variant:'card',boxes:measuredBoxes,cardWidth,narrow,marginStart:6,marginEnd:7,obstacleMargin:narrow?16:24,
   }),[projection,points,measuredBoxes,cardWidth,narrow]);
   const elapsed=Graph.elapsedSpan(posts.slice(0,index),{live:replay===null&&['working','queued'].includes(state.team.phase)});
   const hoveredPair=hoveredEdge?hoveredEdge.split('>'):null;

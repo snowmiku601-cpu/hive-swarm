@@ -186,7 +186,7 @@ ol.post-list {list-style:decimal}
 .graph-stage {position:relative;isolation:isolate;overflow:clip;height:clamp(360px,56vh,540px);background:radial-gradient(ellipse at center,color-mix(in oklab,var(--wash) 55%,var(--stage)),var(--stage) 72%)}
 .graph-stage canvas {display:block}
 #graph-canvas,#graph-nodes {position:absolute;inset:0;width:100%;height:100%}
-.graph-node {position:absolute;transform:translate(-50%,-23px);display:grid;justify-items:center;gap:3px;min-width:0;width:90px;padding:0;border:0;background:none;transition:opacity 160ms ease}
+.graph-node {position:absolute;transform:translate(-50%,-23px);display:grid;justify-items:center;gap:3px;min-width:0;width:128px;padding:0;border:0;background:none;transition:opacity 160ms ease}
 .graph-node:hover:not(:disabled),.graph-node[aria-pressed=true] {background:none;border:none}
 .hex {width:52px;height:46px;display:grid;place-items:center;clip-path:polygon(24% 0,76% 0,100% 50%,76% 100%,24% 100%,0 50%);background:var(--edge);position:relative;isolation:isolate}
 .hex::before {content:"";position:absolute;inset:2px;clip-path:inherit;background:var(--raised);z-index:-1}
@@ -196,7 +196,7 @@ ol.post-list {list-style:decimal}
 .graph-node[data-muted=true] {opacity:.44}
 .graph-node[data-dimmed=true] {opacity:.26}
 .graph-node[data-status=retired] .hex {background:var(--line)}
-.node-label {max-width:90px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:var(--ink);font:600 10px/1.45 var(--mono);box-shadow:0 2px 6px rgb(0 0 0 / 24%)}
+.node-label {width:max-content;max-width:128px;display:block;overflow-wrap:anywhere;white-space:normal;text-align:center;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:2px 7px;color:var(--ink);font:600 10px/1.35 var(--mono);box-shadow:0 2px 6px rgb(0 0 0 / 24%)}
 .graph-node[aria-pressed=true] .node-label {border-color:var(--gold-solid);color:var(--gold)}
 .node-broadcast {position:absolute;left:60%;top:-5px;color:var(--gold);background:var(--surface);border:1px solid var(--edge);font:600 10px var(--mono);border-radius:4px;padding:1px 4px;white-space:nowrap}
 .graph-legend {display:flex;align-items:center;flex-wrap:wrap;flex-wrap:balance;gap:8px 16px;padding:10px 14px;border-top:1px solid var(--line);color:var(--muted);font-size:11px;background:color-mix(in oklab,var(--field) 50%,var(--surface))}
@@ -318,5 +318,5 @@ dialog::backdrop {overflow:hidden;overscroll-behavior:contain}
   .controls {gap:4px}
   .controls .icon-button {min-width:30px;padding-inline:5px}
   #replay {min-width:56px;margin-inline:2px}
-  .graph-node,.node-label {max-width:73px}
+  .graph-node,.node-label {width:84px;max-width:84px}
 }

@@ -153,14 +153,16 @@
 
   function nodeBox(node,{variant='card',cardWidth,narrow=false}={}) {
     if (variant==='hex') {
-      const maxLabelW=narrow?73:90;
+      const maxLabelW=narrow?84:128;
       const raw=String(node?.name??'');
       const labelText=raw==='user'?'You':raw==='system'?'System':'@'+raw;
-      const labelW=Math.min(maxLabelW,Math.max(38,12+labelText.length*6.5));
+      const charsPerLine=Math.max(8,Math.floor((maxLabelW-12)/6.3));
+      const lines=estimateNameLines(labelText,charsPerLine);
+      const labelW=Math.min(maxLabelW,Math.max(38,12+labelText.length*6.3));
       const unmentioned=unmentionedNode(node??{});
-      const halfW=Math.max(unmentioned?32:27,labelW/2);
+      const halfW=Math.max(unmentioned?32:28,labelW/2);
       const top=unmentioned?32:(node?.broadcasts?29:24);
-      const bottom=47;
+      const bottom=29+lines*15+4;
       return {halfW,halfH:(top+bottom)/2,offsetX:0,offsetY:(bottom-top)/2,radius:10};
     }
     const width=cardWidth??(narrow?92:112);
@@ -267,12 +269,16 @@
   function curveClearance(clipped,obstacles) {
     if (!obstacles.length) return Infinity;
     let minClear=Infinity;
-    for (let i=0;i<=16;i++) {
-      const pt=bezierPoint(clipped.start,clipped.control,clipped.end,i/16);
+    for (let i=0;i<=24;i++) {
+      const pt=bezierPoint(clipped.start,clipped.control,clipped.end,i/24);
       for (const box of obstacles) {
         const dist=roundedRectSignedDistance(pt.x,pt.y,box);
         if (dist<minClear) minClear=dist;
       }
+    }
+    for (const box of obstacles) {
+      const midDist=roundedRectSignedDistance(clipped.mid.x,clipped.mid.y,box)-10;
+      if (midDist<minClear) minClear=midDist;
     }
     return minClear;
   }
@@ -388,25 +394,55 @@
       }
     }
     for (const entry of routed) {
-      if (!entry.bidirectional || entry.edge.clearance>=2) continue;
+      if (!entry.bidirectional || entry.edge.clearance>=Math.min(obstacleMargin,16)) continue;
       const twin=byKey.get(entry.link.to+'>'+entry.link.from);
-      if (!twin || twin.edge.clearance<2) continue;
+      if (!twin || twin.edge.clearance<Math.min(obstacleMargin,16)) continue;
       const aPt=points.get(entry.link.from),bPt=points.get(entry.link.to);
-      for (const innerBend of [-18,-26,-36]) {
+      for (const innerBend of [-18,-26,-36,-48]) {
         const altInner=clipEdge(aPt,bPt,entry.fromBox,entry.toBox,{
           marginStart,marginEnd,bidirectional:true,bend:innerBend,obstacles:entry.obstacles,obstacleMargin,minLength,
         });
-        if (!altInner || altInner.clearance<2) continue;
+        if (!altInner || altInner.clearance<10) continue;
         const outerBend=Math.max(twin.edge.bend,Math.abs(innerBend)+28);
         const altOuter=clipEdge(bPt,aPt,twin.fromBox,twin.toBox,{
           marginStart,marginEnd,bidirectional:true,bend:outerBend,obstacles:twin.obstacles,obstacleMargin,minLength,
         });
-        if (altOuter && altOuter.clearance>=2 && Math.hypot(altInner.mid.x-altOuter.mid.x,altInner.mid.y-altOuter.mid.y)>=12) {
+        if (altOuter && altOuter.clearance>=10 && Math.hypot(altInner.mid.x-altOuter.mid.x,altInner.mid.y-altOuter.mid.y)>=12) {
           entry.edge=altInner;
           twin.edge=altOuter;
           break;
         }
       }
+    }
+    const placedPills=[];
+    const pillClear=(pt,obstacles,minObs)=> {
+      for (const item of obstacles) {
+        const box=item?.box?normalizeBox(item,item.box):normalizeBox(item,item);
+        if (roundedRectSignedDistance(pt.x,pt.y,box)<minObs) return false;
+      }
+      for (const other of placedPills) {
+        if (Math.hypot(pt.x-other.x,pt.y-other.y)<26) return false;
+      }
+      return true;
+    };
+    const allBoxes=[];
+    for (const node of projection.nodes??[]) {
+      const pt=points.get(node.name);
+      if (pt) allBoxes.push({x:pt.x,y:pt.y,box:nodeBoxes.get(node.name)});
+    }
+    for (const entry of routed) {
+      const {edge,link}=entry;
+      if (edge.length<40) continue;
+      const p0=edge.start,c=edge.control,p1=edge.end;
+      let chosen=edge.mid;
+      if (!pillClear(chosen,allBoxes,12)) {
+        for (const t of [0.38,0.62,0.32,0.68,0.44,0.56]) {
+          const cand=bezierPoint(p0,c,p1,t);
+          if (pillClear(cand,allBoxes,12)) {chosen=cand;break;}
+        }
+      }
+      edge.mid=chosen;
+      if (link.count>1) placedPills.push(chosen);
     }
     return routed.map(({link,edge,bidirectional})=>({link,edge,bidirectional}));
   }
@@ -478,7 +514,7 @@
     ctx.textAlign='center';
     ctx.textBaseline='middle';
     const routed=routeEdges(projection,points,{
-      variant:'hex',narrow:width<465,marginStart:6,marginEnd:6,obstacleMargin:12,
+      variant:'hex',narrow:width<465,marginStart:6,marginEnd:6,obstacleMargin:width<465?14:24,
     });
     for (const {link,edge} of routed) {
       const {start:a,control:c,end:b,mid,endAngle:angle}=edge;

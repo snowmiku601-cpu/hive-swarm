@@ -120,6 +120,7 @@ test('nodeBox accounts for wrapped multi-line card names and asymmetric Codex he
   const hex=nodeBox({name:'design-research',posts:7},{variant:'hex'});
   assert.ok(hex.offsetY>0,'Codex hex+label bounding box shifts downward to cover the label');
   assert.ok(hex.offsetY+hex.halfH>=46,'Codex box covers full label height below hex');
+  assert.ok(hex.halfW>=54,'Codex hex nodeBox accommodates full @design-research pill without truncation');
 });
 
 test('clipEdge and routeEdges keep every arrow and arrowhead cleanly outside node cards in the 6-node screenshot scenario', () => {
@@ -138,6 +139,7 @@ test('clipEdge and routeEdges keep every arrow and arrowhead cleanly outside nod
     {from:'asset-research',to:'coordinator',count:1,direct:1,broadcast:0,lastSeq:12},
     {from:'user',to:'design-research',count:3,direct:3,broadcast:0,lastSeq:13},
     {from:'user',to:'coordinator',count:4,direct:4,broadcast:0,lastSeq:14},
+    {from:'user',to:'asset-research',count:2,direct:2,broadcast:0,lastSeq:24},
     {from:'user',to:'qa',count:5,direct:5,broadcast:0,lastSeq:15},
     {from:'user',to:'builder',count:6,direct:6,broadcast:0,lastSeq:16},
     {from:'qa',to:'design-research',count:2,direct:2,broadcast:0,lastSeq:17},
@@ -180,12 +182,25 @@ test('clipEdge and routeEdges keep every arrow and arrowhead cleanly outside nod
         'bidirectional qa<->builder endpoints separate cleanly at '+variant+'/'+width);
       // Verify outer chords clear the center coordinator card
       const coordAbs=toAbs(points.get('coordinator'),nodeBox(screenshotNodes[0],{variant,narrow:width<465}));
-      for (const [from,to] of [['user','builder'],['qa','design-research'],['builder','design-research'],['design-research','builder']]) {
+      for (const [from,to] of [['user','builder'],['user','asset-research'],['qa','design-research'],['builder','design-research'],['design-research','builder']]) {
         const {edge}=routed.find(r=>r.link.from===from&&r.link.to===to);
         for (let step=0;step<=16;step++) {
           const pt=bezier(edge.start,edge.control,edge.end,step/16);
           assert.ok(roundedRectSignedDistance(pt.x,pt.y,coordAbs)>0,
             'outer chord '+from+'->'+to+' clears coordinator at '+variant+'/'+width);
+        }
+      }
+      // Verify rendered mention count pills (count > 1) never overlap each other or node cards
+      const pills=routed.filter(r=>r.link.count>1&&r.edge.length>=40).map(r=>r.edge.mid);
+      for (let i=0;i<pills.length;i++) {
+        for (const node of screenshotNodes) {
+          const nAbs=toAbs(points.get(node.name),nodeBox(node,{variant,narrow:width<465}));
+          assert.ok(roundedRectSignedDistance(pills[i].x,pills[i].y,nAbs)>=8,
+            'pill '+i+' clears node '+node.name+' at '+variant+'/'+width);
+        }
+        for (let j=i+1;j<pills.length;j++) {
+          assert.ok(Math.hypot(pills[i].x-pills[j].x,pills[i].y-pills[j].y)>=22,
+            'pills '+i+' & '+j+' do not collide at '+variant+'/'+width);
         }
       }
     }
