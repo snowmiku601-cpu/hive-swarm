@@ -162,3 +162,60 @@ test('active workers can call list_models to verify host models without coordina
   const models=await app.command('list_models',{},{actor:{teamId:team.id,member:'builder',turn:1}});
   assert.equal(models.models[0].id,'fixture/model');
 });
+
+test('trusted context.parentSessionId, fork: coordinator, executionMode and subagentName project cleanly and reject spoofed args',async t=>{
+  const directory=mkdtempSync(join(tmpdir(),'hive-core-v2-'));
+  const seen=[];
+  const runner={
+    listModels:async()=>[{id:'fixture/model',label:'Fixture',efforts:['low'],defaultEffort:'low'}],
+    run:async request=>{
+      seen.push({name:request.member.name,parentSessionId:request.team.parentSessionId,forkSource:request.member.forkSource});
+      request.remember({
+        threadId:'child-'+request.member.name,
+        executionMode:'subagent',
+        subagentName:'hive-'+request.member.name,
+        ...(request.member.forkSource?{forkSource:null}:{}),
+      });
+      return {state:'done',message:'[done] Checked.',notify:[],waitFor:[]};
+    },
+    close:async()=>{},
+  };
+  const app=createSwarmApplication({dataDirectory:directory,host:'deepseek-harness',runner,workspaceAllowed:async cwd=>cwd===workspace});
+  t.after(async()=>{await app.close();rmSync(directory,{recursive:true,force:true});});
+
+  await assert.rejects(
+    app.command('start_team',{...startArgs(),parentSessionId:'spoofed-parent'},{parentSessionId:'trusted-parent'}),
+    /host identity|cannot be supplied/i,
+  );
+
+  const started=await app.command('start_team',{
+    cwd:workspace,task:'Native subagent team',
+    members:[{name:'researcher',brief:'Warm start',fork:'coordinator'}],
+  },{parentSessionId:'parent-chat-1'});
+  assert.equal(started.parentSessionId,'parent-chat-1');
+  assert.equal(started.members[0].executionMode,undefined);
+  assert.equal(Object.hasOwn(started.members[0],'forkSource'),false);
+
+  for(let i=0;i<100&&seen.length<1;i++) await delay(10);
+  assert.deepEqual(seen[0],{name:'researcher',parentSessionId:'parent-chat-1',forkSource:'coordinator'});
+
+  const added=await app.command('add_member',{
+    teamId:started.id,member:{name:'reviewer',brief:'Check diff',fork:'coordinator'},
+  });
+  for(let i=0;i<100&&(await app.snapshot({teamId:started.id})).team.phase!=='done';i++) await delay(10);
+  const final=(await app.snapshot({teamId:started.id})).team;
+  assert.equal(final.parentSessionId,'parent-chat-1');
+  assert.equal(final.members[0].executionMode,'subagent');
+  assert.equal(final.members[0].subagentName,'hive-researcher');
+  assert.deepEqual(final.members[0].session,{host:'deepseek-harness',id:'child-researcher'});
+  assert.equal(final.members[1].executionMode,'subagent');
+  assert.equal(final.members[1].subagentName,'hive-reviewer');
+  assert.equal(added.members.length,2);
+
+  // Legacy team without executionMode defaults to 'session' when threadId is present.
+  const raw=app.board.get(started.id);
+  delete raw.members[0].executionMode;
+  app.board.save(raw);
+  const restored=(await app.snapshot({teamId:started.id})).team;
+  assert.equal(restored.members[0].executionMode,'session');
+});

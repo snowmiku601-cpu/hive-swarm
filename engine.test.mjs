@@ -1104,3 +1104,113 @@ test('sharded group names expand in waitFor and outcome threads, and empty chann
   const history=board.readHistory(created.id,{channel:'',limit:10});
   assert.ok(history.posts.some(p=>p.text==='Empty channel defaults to main'));
 });
+
+test('trusted parentSessionId persists, untrusted input.parentSessionId is rejected, and fork: coordinator works across create and addMember',async t=>{
+  const dir=mkdtempSync(join(tmpdir(),'hive-parent-fork-'));
+  const file=join(dir,'test.sqlite');
+  const seen=[];
+  let board=new TeamBoard(file,async ({team,member,remember})=>{
+    seen.push({name:member.name,parentSessionId:team.parentSessionId,forkSource:member.forkSource,forkFrom:member.forkFrom});
+    remember({
+      threadId:'child-'+member.name,
+      executionMode:member.name.startsWith('shard')?'attached':'subagent',
+      subagentName:'hive-'+member.name,
+      ...(member.forkSource?{forkSource:null}:{}),
+    });
+    return report('[done] Verified.');
+  });
+  t.after(()=>{board.close();rmSync(dir,{recursive:true,force:true});});
+
+  assert.throws(()=>board.create({cwd:dir,task:'Spoofed',parentSessionId:'spoof',members:[{name:'a',brief:'x'}]}),/host/i);
+  assert.throws(()=>board.create({cwd:dir,task:'No parent',members:[{name:'a',brief:'x',fork:'coordinator'}]}),/parent session/i);
+  assert.throws(()=>board.create({cwd:dir,task:'Bad initial fork',members:[{name:'a',brief:'x',fork:'other'}]},undefined,{parentSessionId:'parent-1'}),/only fork from "coordinator"/i);
+  assert.throws(()=>board.create({cwd:dir,task:'Bad id',members:[{name:'a',brief:'x'}]},undefined,{parentSessionId:'bad\0id'}),/invalid characters/i);
+
+  const created=board.create({
+    cwd:dir,task:'Warm fork start',
+    members:[
+      {name:'researcher',brief:'Investigate',fork:'@coordinator'},
+      {name:'shard',brief:'Split',tasks:['A','B'],fork:'coordinator'},
+    ],
+  },undefined,{parentSessionId:'parent-session-42'});
+  assert.equal(created.parentSessionId,'parent-session-42');
+  assert.equal(created.members[0].forkSource,'coordinator');
+  assert.equal(created.members[1].forkSource,'coordinator');
+  assert.equal(created.members[2].forkSource,'coordinator');
+  assert.equal(Object.hasOwn(created.members[0],'fork'),false);
+
+  await until(()=>board.get(created.id).members.every(m=>m.status==='done'));
+  assert.deepEqual(seen.map(s=>s.parentSessionId),['parent-session-42','parent-session-42','parent-session-42']);
+  assert.deepEqual(seen.map(s=>s.forkSource),['coordinator','coordinator','coordinator']);
+
+  const afterCreate=board.get(created.id);
+  for (const m of afterCreate.members) {
+    assert.equal(Object.hasOwn(m,'forkSource'),false);
+    assert.equal(m.subagentName,'hive-'+m.name);
+  }
+  assert.equal(afterCreate.members[0].executionMode,'subagent');
+  assert.equal(afterCreate.members[1].executionMode,'attached');
+
+  assert.throws(()=>board.addMember(created.id,{name:'bad',brief:'x',fork:'coordinator'},{fork:'researcher'}),/matching fork/i);
+  const bySpec=board.addMember(created.id,{name:'followup-a',brief:'Check A',fork:'coordinator'});
+  assert.equal(bySpec.members.at(-1).forkSource,'coordinator');
+  const byTop=board.addMember(created.id,{name:'followup-b',brief:'Check B'},{fork:'coordinator'});
+  assert.equal(byTop.members.at(-1).forkSource,'coordinator');
+  await until(()=>board.get(created.id).members.every(m=>m.status==='done'));
+
+  board.close();
+  board=new TeamBoard(file,()=>assert.fail('Restored done team should not dispatch'));
+  const reopened=board.get(created.id);
+  assert.equal(reopened.parentSessionId,'parent-session-42');
+  assert.equal(reopened.members.find(m=>m.name==='researcher').executionMode,'subagent');
+  assert.equal(reopened.members.find(m=>m.name==='researcher').subagentName,'hive-researcher');
+  assert.equal(reopened.members.find(m=>m.name==='shard-1').executionMode,'attached');
+});
+
+test('non-coordinator workers cannot fork coordinator, while addMember without parentSessionId falls back to saved coordinator member',async t=>{
+  let release;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const board=new TeamBoard(':memory:',async ({member,remember})=>{
+    remember('saved-'+member.name);
+    if (member.name==='builder') await gate;
+    return report('[done] OK.');
+  });
+  t.after(()=>{release();board.close();});
+
+  const withParent=board.create({cwd:process.cwd(),task:'Peer restriction',members:[{name:'builder',brief:'Work'}]},undefined,{parentSessionId:'parent-99'});
+  await until(()=>board.get(withParent.id).members[0].status==='working');
+  assert.throws(()=>board.addMember(withParent.id,{name:'helper',brief:'Sneak'},{actor:'builder',fork:'coordinator'}),/coordinator/i);
+  release();
+  await until(()=>board.get(withParent.id).members[0].status==='done');
+
+  const legacyBoard=new TeamBoard(':memory:',async ({member,remember})=>{
+    remember('chat-'+member.name);
+    return report('[done] OK.');
+  });
+  t.after(()=>legacyBoard.close());
+  const legacy=legacyBoard.create({cwd:process.cwd(),task:'Legacy coordinator',coordinator:true,members:[{name:'builder',brief:'Work'}]});
+  await until(()=>teamPhase(legacyBoard.get(legacy.id))==='done');
+  const added=legacyBoard.addMember(legacy.id,{name:'helper',brief:'From coordinator'},{fork:'coordinator'});
+  assert.equal(added.members.at(-1).forkFrom,'chat-coordinator');
+  assert.equal(added.members.at(-1).forkSource,undefined);
+});
+
+test('restoring legacy 1.8/1.9 SQLite teams defaults executionMode to session only when threadId exists',t=>{
+  const dir=mkdtempSync(join(tmpdir(),'hive-legacy-mode-'));
+  const file=join(dir,'test.sqlite');
+  let board=new TeamBoard(file,()=>assert.fail('Must not dispatch'));
+  t.after(()=>{board.close();rmSync(dir,{recursive:true,force:true});});
+  board.save({
+    id:'legacy-19',paused:true,cwd:dir,task:'Legacy team',title:'Legacy team',
+    concurrency:2,turns:1,turnLimit:8,channels:[{name:'main',archived:false}],events:[],
+    members:[
+      {name:'ran',brief:'Done',status:'done',writable:false,waitFor:[],channels:[],threadId:'old-thread-1',inbox:[],completed:1},
+      {name:'queued',brief:'Never ran',status:'waiting',writable:false,waitFor:[],channels:[],threadId:null,inbox:[],completed:0},
+    ],
+  });
+  board.close();
+  board=new TeamBoard(file,()=>assert.fail('Must not dispatch'));
+  const restored=board.get('legacy-19');
+  assert.equal(restored.members[0].executionMode,'session');
+  assert.equal(restored.members[1].executionMode,undefined);
+});

@@ -32,17 +32,23 @@ export function presentTeam(team,{activity={},actor,host=team.host??'codex'}={})
   const recovery=team.members.filter(m=>m.recoveryRequired).map(m=>({kind:'recovery',member:m.name,text:'@'+m.name+' outcome unconfirmed. Inspect the owned session before continuing.'}));
   const input=team.members.filter(m=>m.inputRequired).map(m=>({kind:'input',member:m.name,text:'@'+m.name+' needs your permission or input in its owned DSH session.'}));
   return {id:team.id,host,title:team.title,cwd:team.cwd,task:team.task,model:team.model,effort:team.effort,
+    ...(team.parentSessionId?{parentSessionId:team.parentSessionId}:{}),
     ...(team.fallbackModel?{fallbackModel:team.fallbackModel,...(team.fallbackEffort!==undefined?{fallbackEffort:team.fallbackEffort}:{})}:{}),
     ...(team.threads?.length?{threads:team.threads}:{}),
     paused:team.paused,turns:team.turns,turnLimit:team.turnLimit,phase:teamPhase(team),channels:team.channels,activity,
     attention:[...input,...recovery,...stallIssues(team)],events:events.slice(-60),
-    members:team.members.map(member=>({name:member.name,role:member.role,group:member.group,brief:member.brief,
-      status:member.status,writable:member.writable,threadId:member.threadId,
-      session:member.threadId?{host,id:member.threadId}:null,waitFor:member.waitFor,pendingWaitFor:pendingWaitFor(team,member),
-      worktree:member.worktree,workspace:member.workspace,channels:member.channels,lastTurn:member.lastTurn,
-      retireAfterTurn:member.retireAfterTurn,recoveryRequired:member.recoveryRequired===true,
-      ...(member.fallbackModel?{fallbackModel:member.fallbackModel,...(member.fallbackEffort!==undefined?{fallbackEffort:member.fallbackEffort}:{})}:{}),
-      model:member.model??member.activeModel??team.model,effort:member.effort??member.activeEffort??configuredEffort(team,member)}))};
+    members:team.members.map(member=>{
+      const executionMode=member.executionMode??(member.threadId?'session':undefined);
+      return {name:member.name,role:member.role,group:member.group,brief:member.brief,
+        status:member.status,writable:member.writable,threadId:member.threadId,
+        ...(executionMode?{executionMode}:{}),
+        ...(member.subagentName?{subagentName:member.subagentName}:{}),
+        session:member.threadId?{host,id:member.threadId}:null,waitFor:member.waitFor,pendingWaitFor:pendingWaitFor(team,member),
+        worktree:member.worktree,workspace:member.workspace,channels:member.channels,lastTurn:member.lastTurn,
+        retireAfterTurn:member.retireAfterTurn,recoveryRequired:member.recoveryRequired===true,
+        ...(member.fallbackModel?{fallbackModel:member.fallbackModel,...(member.fallbackEffort!==undefined?{fallbackEffort:member.fallbackEffort}:{})}:{}),
+        model:member.model??member.activeModel??team.model,effort:member.effort??member.activeEffort??configuredEffort(team,member)};
+    })};
 }
 
 /** Host-owned application. Wire transports must supply trusted actor metadata separately from args. */
@@ -108,6 +114,7 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
     if(action==='list_teams')return {teams:(await snapshot({},context)).teams};
     if(action==='list_models')return {models:await models()};
     if(action==='start_team') {
+      if(Object.hasOwn(args,'parentSessionId'))throw Error('Host identity cannot be supplied in command arguments.');
       const cwd=await allowed(args.cwd,context);
       const memberChecks=(args.members??[]).flatMap(m=>[
         (m?.model||(args.model&&m?.effort))?{model:m.model??args.model,effort:m.effort===null?undefined:m.effort??args.effort}:null,
@@ -115,7 +122,8 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
       ]);
       await selections([args,args.fallbackModel?{model:args.fallbackModel,effort:args.fallbackEffort}:null,...memberChecks]);
       const source=args.members?.some(m=>m.worktree)?await worktreeSource(cwd):undefined;
-      return view(board.create({...args,cwd,host},source));
+      const parentSessionId=context.parentSessionId==null||context.parentSessionId===''?undefined:context.parentSessionId;
+      return view(board.create({...args,cwd,host},source,{parentSessionId}));
     }
     const team=await ownTeam(id,context);
     switch(action) {

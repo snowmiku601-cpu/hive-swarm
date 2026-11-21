@@ -594,3 +594,109 @@ test('peer tools include board_history, coordinator can update outcome threads, 
   assert.equal((await fetch(team.url+'/status',{headers:{'sec-fetch-site':'same-origin'}})).status,200);
   assert.equal((await fetch(team.url+'/history',{headers:{'sec-fetch-site':'same-origin'}})).status,200);
 });
+
+test('extractParentSessionId reads MCP _meta keys and CODEX_THREAD_ID safely, while /tool rejects spoofed parentSessionId and projects executionMode',async t=>{
+  assert.equal(services.extractParentSessionId({'codex/threadId':'thr-meta'},{CODEX_THREAD_ID:'thr-env'}),'thr-meta');
+  assert.equal(services.extractParentSessionId({threadId:'thr-alt'},{CODEX_THREAD_ID:'thr-env'}),'thr-alt');
+  assert.equal(services.extractParentSessionId({thread_id:'thr-snake'},{}),'thr-snake');
+  assert.equal(services.extractParentSessionId({codex:{threadId:'thr-nested'}},{}),'thr-nested');
+  assert.equal(services.extractParentSessionId(undefined,{CODEX_THREAD_ID:'thr-env'}),'thr-env');
+  assert.equal(services.extractParentSessionId({'codex/threadId':'bad\0id'},{CODEX_THREAD_ID:'  '}),undefined);
+
+  const seen=[];
+  const api=await fixture(t,async ({team,member,remember})=>{
+    seen.push({name:member.name,parentSessionId:team.parentSessionId,forkSource:member.forkSource});
+    remember({
+      threadId:'attached-'+member.name,
+      executionMode:'attached',
+      subagentName:'hive-'+member.name,
+      ...(member.forkSource?{forkSource:null}:{}),
+    });
+    return done;
+  });
+
+  const postTool=async (name,args,context)=>{
+    const response=await fetch(api.origin+'/tool',{method:'POST',headers:{
+      authorization:'Bearer '+api.key,'content-type':'application/json',
+    },body:JSON.stringify({name,arguments:args,...(context?{context}:{})})});
+    return {status:response.status,body:await response.json()};
+  };
+
+  const spoofed=await postTool('start_team',{cwd:process.cwd(),task:'Spoof',parentSessionId:'evil',members},{parentSessionId:'real-parent'});
+  assert.equal(spoofed.status,400);
+  assert.match(spoofed.body.error,/host identity|cannot be supplied/i);
+
+  const started=await postTool('start_team',{
+    cwd:process.cwd(),task:'Attached Codex team',
+    members:[{name:'researcher',brief:'Warm start',fork:'coordinator'}],
+  },{parentSessionId:'codex-parent-9'});
+  assert.equal(started.status,200);
+  assert.equal(started.body.parentSessionId,'codex-parent-9');
+  const finished=await api.waitFor(started.body.id,state=>state.phase==='done');
+  assert.equal(finished.parentSessionId,'codex-parent-9');
+  assert.equal(finished.members[0].executionMode,'attached');
+  assert.equal(finished.members[0].subagentName,'hive-researcher');
+  assert.deepEqual(seen[0],{name:'researcher',parentSessionId:'codex-parent-9',forkSource:'coordinator'});
+
+  const added=await api.invoke('add_member',{
+    teamId:started.body.id,
+    member:{name:'verifier',brief:'Check',fork:'coordinator'},
+  });
+  assert.equal(added.members.length,2);
+  await api.waitFor(started.body.id,state=>state.phase==='done'&&state.members.length===2&&state.members[1].status==='done');
+  assert.deepEqual(seen[1],{name:'verifier',parentSessionId:'codex-parent-9',forkSource:'coordinator'});
+});
+
+test('stdio MCP bridge exposes member.fork and forwards trusted _meta or CODEX_THREAD_ID as parentSessionId',async t=>{
+  const {spawn}=await import('node:child_process');
+  const {fileURLToPath}=await import('node:url');
+  const api=await fixture(t,async ({member,remember})=>{
+    remember({threadId:'attached-'+member.name,executionMode:'attached'});
+    return done;
+  });
+  const port=new URL(api.origin).port;
+  const child=spawn(process.execPath,[fileURLToPath(new URL('./server.mjs',import.meta.url))],{
+    env:{...process.env,TEAM_BOARD_DATA:api.dataDirectory,TEAM_BOARD_PORT:port,CODEX_THREAD_ID:'env-parent-123'},
+    stdio:['pipe','pipe','ignore'],windowsHide:true,
+  });
+  t.after(()=>child.kill());
+  const responses=new Map();
+  const waiters=new Map();
+  let buf='';
+  child.stdout.on('data',chunk=>{
+    buf+=chunk.toString();
+    let idx;
+    while ((idx=buf.indexOf('\n'))>=0) {
+      const msg=JSON.parse(buf.slice(0,idx));
+      buf=buf.slice(idx+1);
+      responses.set(msg.id,msg);
+      waiters.get(msg.id)?.(msg);
+      waiters.delete(msg.id);
+    }
+  });
+  const rpc=(id,method,params)=>new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>reject(Error('Timed out waiting for '+method)),5000);
+    waiters.set(id,msg=>{clearTimeout(timer);resolve(msg);});
+    child.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');
+  });
+
+  await rpc(1,'initialize',{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'test',version:'1.0'}});
+  const listed=await rpc(2,'tools/list',{});
+  const startTool=listed.result.tools.find(tool=>tool.name==='start_team');
+  assert.equal(startTool.inputSchema.properties.members.items.properties.fork.type,'string');
+
+  const fromEnv=await rpc(3,'tools/call',{
+    name:'start_team',
+    arguments:{cwd:process.cwd(),task:'Env parent test',members:[{name:'alpha',brief:'Go',fork:'coordinator'}]},
+  });
+  assert.equal(fromEnv.result.isError,undefined);
+  assert.equal(fromEnv.result.structuredContent.parentSessionId,'env-parent-123');
+
+  const fromMeta=await rpc(4,'tools/call',{
+    name:'start_team',
+    arguments:{cwd:process.cwd(),task:'Meta parent test',members:[{name:'beta',brief:'Go',fork:'coordinator'}]},
+    _meta:{'codex/threadId':'meta-parent-456'},
+  });
+  assert.equal(fromMeta.result.isError,undefined);
+  assert.equal(fromMeta.result.structuredContent.parentSessionId,'meta-parent-456');
+});

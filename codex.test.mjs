@@ -392,3 +392,209 @@ test('turn inactivity timeout resets on live activity and worker prompt enforces
   assert.match(promptText,/wakeup doorbell|without @/i);
   assert.match(promptText,/do not.*duplicate|double-post/i);
 });
+
+test('fresh attached workers fork paginated parents with beforeTurnId and skip unarchive/archive churn without ever archiving parent',async()=>{
+  const runner=new CodexRunner();
+  const calls=[];
+  const archived=new Set();
+  let forks=0,nextTurn=0;
+  runner.start=async()=>{};
+  runner.rpc=async (method,params)=>{
+    calls.push({method,params});
+    if (method==='thread/read') return {thread:{id:params.threadId,historyMode:'paginated'}};
+    if (method==='thread/turns/list') return {data:[{id:'parent-turn-1'}]};
+    if (method==='config/read') return {config:{model_provider:'openai'}};
+    if (method==='thread/name/set'||method==='thread/unsubscribe') return {};
+    if (method==='thread/archive') { archived.add(params.threadId); return {}; }
+    if (method==='thread/unarchive') throw Error('Unexpected unarchive on attached thread: '+params.threadId);
+    if (method==='thread/fork') {
+      const id='attached-'+(++forks);
+      return {thread:{id,attachedToThreadId:params.threadId,forkedFromId:params.threadId},model:params.model,modelProvider:params.modelProvider};
+    }
+    if (method==='thread/resume') {
+      return {thread:{id:params.threadId,attachedToThreadId:'parent-thread-1'},model:params.model,modelProvider:params.modelProvider};
+    }
+    assert.equal(method,'turn/start');
+    const id='turn-'+(++nextTurn);
+    setImmediate(()=>{
+      runner.receive(JSON.stringify({method:'item/completed',params:{threadId:params.threadId,turnId:id,item:{type:'agentMessage',text:JSON.stringify(outcome)}}}));
+      runner.receive(JSON.stringify({method:'turn/completed',params:{threadId:params.threadId,turn:{id,status:'completed'}}}));
+    });
+    return {turn:{id}};
+  };
+
+  const team={id:'team',title:'Attached Team',cwd:process.cwd(),task:'Run attached',parentSessionId:'parent-thread-1',members:[]};
+  let saved={};
+  const remember=change=>{saved={...saved,...change};};
+  await runner.run({team,member:{name:'builder',brief:'Build',model:'gpt-5.4',inbox:[],lastTurn:1},remember});
+  assert.equal(saved.threadId,'attached-1');
+  assert.equal(saved.executionMode,'attached');
+  assert.equal(archived.size,0);
+  const forkCall=calls.find(c=>c.method==='thread/fork');
+  assert.equal(forkCall.params.threadId,'parent-thread-1');
+  assert.equal(forkCall.params.attachToSource,true);
+  assert.equal(forkCall.params.beforeTurnId,'parent-turn-1');
+  assert.equal(forkCall.params.ephemeral,false);
+  const firstPrompt=calls.find(c=>c.method==='turn/start').params.input[0].text;
+  assert.doesNotMatch(firstPrompt,/source history/);
+
+  // Turn 2 on same loaded attached thread goes straight to turn/start with zero archive/resume churn.
+  const beforeTurn2=calls.length;
+  await runner.run({team,member:{name:'builder',brief:'Build',model:'gpt-5.4',threadId:saved.threadId,executionMode:saved.executionMode,inbox:[],lastTurn:2},remember});
+  assert.deepEqual(calls.slice(beforeTurn2).map(c=>c.method),['turn/start']);
+
+  // Turn 3 after app-server unloads the thread resumes cleanly without unarchive/archive.
+  runner.receive(JSON.stringify({method:'thread/status/changed',params:{threadId:'attached-1',status:{type:'notLoaded'}}}));
+  const beforeTurn3=calls.length;
+  await runner.run({team,member:{name:'builder',brief:'Build',model:'gpt-5.4',threadId:saved.threadId,executionMode:saved.executionMode,inbox:[],lastTurn:3},remember});
+  assert.deepEqual(calls.slice(beforeTurn3).map(c=>c.method),['config/read','thread/resume','turn/start']);
+  assert.equal(archived.size,0);
+});
+
+test('fork: coordinator omits beforeTurnId, explains source history once, clears forkSource, and never archives parent',async()=>{
+  const runner=new CodexRunner();
+  const calls=[];
+  const archived=new Set();
+  let forks=0,nextTurn=0;
+  let parentMode='paginated';
+  runner.start=async()=>{};
+  runner.rpc=async (method,params)=>{
+    calls.push({method,params});
+    if (method==='thread/read') return {thread:{id:params.threadId,historyMode:parentMode}};
+    if (method==='config/read') return {config:{model_provider:'openai'}};
+    if (method==='thread/name/set'||method==='thread/unsubscribe') return {};
+    if (method==='thread/archive') { archived.add(params.threadId); return {}; }
+    if (method==='thread/unarchive') throw Error('Parent must never be unarchived: '+params.threadId);
+    if (method==='thread/fork') {
+      const id='coord-fork-'+(++forks);
+      return {thread:{id,...(params.attachToSource?{attachedToThreadId:params.threadId}:{})},model:params.model,modelProvider:params.modelProvider};
+    }
+    assert.equal(method,'turn/start');
+    const id='turn-'+(++nextTurn);
+    setImmediate(()=>{
+      runner.receive(JSON.stringify({method:'item/completed',params:{threadId:params.threadId,turnId:id,item:{type:'agentMessage',text:JSON.stringify(outcome)}}}));
+      runner.receive(JSON.stringify({method:'turn/completed',params:{threadId:params.threadId,turn:{id,status:'completed'}}}));
+    });
+    return {turn:{id}};
+  };
+
+  const team={id:'team',title:'Warm Fork',cwd:process.cwd(),task:'Inherit context',parentSessionId:'parent-chat-7',members:[]};
+  let saved={};
+  await runner.run({team,member:{name:'researcher',brief:'Continue',forkSource:'coordinator',inbox:[],lastTurn:1},remember:c=>{saved={...saved,...c};}});
+  assert.equal(saved.threadId,'coord-fork-1');
+  assert.equal(saved.executionMode,'attached');
+  assert.equal(saved.forkSource,null);
+  const firstFork=calls.find(c=>c.method==='thread/fork');
+  assert.equal(firstFork.params.threadId,'parent-chat-7');
+  assert.equal(firstFork.params.attachToSource,true);
+  assert.equal(Object.hasOwn(firstFork.params,'beforeTurnId'),false);
+  assert.match(calls.find(c=>c.method==='turn/start').params.input[0].text,/source history/);
+  assert.equal(archived.size,0);
+
+  // Legacy (non-paginated) parent falls back to unattached fork: child archives, parent NEVER archives.
+  parentMode='legacy';
+  let legacySaved={};
+  await runner.run({team,member:{name:'legacy-warm',brief:'Continue',forkSource:'coordinator',inbox:[],lastTurn:2},remember:c=>{legacySaved={...legacySaved,...c};}});
+  assert.equal(legacySaved.executionMode,'session');
+  assert.equal(legacySaved.forkSource,null);
+  const secondFork=calls.filter(c=>c.method==='thread/fork')[1];
+  assert.equal(Object.hasOwn(secondFork.params,'attachToSource'),false);
+  assert.deepEqual([...archived],['coord-fork-2']);
+});
+
+test('explicit model passes allowProviderModelFallback: false and older Codex rejections degrade cleanly to 1.9.1 thread/start + archive',async()=>{
+  const runner=new CodexRunner();
+  const calls=[];
+  const archived=new Set();
+  let starts=0,nextTurn=0;
+  runner.start=async()=>{};
+  runner.rpc=async (method,params)=>{
+    calls.push({method,params});
+    if (method==='thread/read') return {thread:{id:params.threadId,historyMode:'paginated'}};
+    if (method==='thread/turns/list') return {data:[{id:'t1'}]};
+    if (method==='config/read') return {config:{model_provider:'openai'}};
+    if (method==='thread/fork') throw Error('unknown field `attachToSource`');
+    if (method==='thread/start') {
+      if (params.allowProviderModelFallback===false) throw Error('unknown field `allowProviderModelFallback`');
+      return {thread:{id:'legacy-'+(++starts)},model:params.model,modelProvider:'openai'};
+    }
+    if (method==='thread/name/set') return {};
+    if (method==='thread/archive') { archived.add(params.threadId); return {}; }
+    assert.equal(method,'turn/start');
+    const id='turn-'+(++nextTurn);
+    setImmediate(()=>{
+      runner.receive(JSON.stringify({method:'item/completed',params:{threadId:params.threadId,turnId:id,item:{type:'agentMessage',text:JSON.stringify(outcome)}}}));
+      runner.receive(JSON.stringify({method:'turn/completed',params:{threadId:params.threadId,turn:{id,status:'completed'}}}));
+    });
+    return {turn:{id}};
+  };
+
+  const team={id:'team',title:'Fallback',cwd:process.cwd(),task:'Fallback',parentSessionId:'parent-1',members:[]};
+  let saved={};
+  await runner.run({team,member:{name:'builder',brief:'Build',model:'gpt-5.4',inbox:[],lastTurn:1},remember:c=>{saved={...saved,...c};}});
+  assert.equal(saved.threadId,'legacy-1');
+  assert.equal(saved.executionMode,'session');
+  assert.equal(archived.has('legacy-1'),true);
+  assert.equal(archived.has('parent-1'),false);
+  const startCalls=calls.filter(c=>c.method==='thread/start');
+  assert.equal(startCalls.length,2);
+  assert.equal(startCalls[0].params.allowProviderModelFallback,false);
+  assert.equal(Object.hasOwn(startCalls[1].params,'allowProviderModelFallback'),false);
+  assert.equal(runner.supportsAttachToSource,false);
+  assert.equal(runner.supportsModelFallbackFlag,false);
+
+  // Subsequent worker skips unsupported flags immediately.
+  const beforeSecond=calls.length;
+  await runner.run({team,member:{name:'reviewer',brief:'Check',model:'gpt-5.4',inbox:[],lastTurn:2},remember:()=>{}});
+  assert.deepEqual(calls.slice(beforeSecond).map(c=>c.method),['thread/start','thread/name/set','turn/start','thread/archive']);
+  assert.equal(Object.hasOwn(calls[beforeSecond].params,'allowProviderModelFallback'),false);
+});
+
+test('ephemeral runner never sends attachToSource, and attached teammate forks skip archiving the attached source',async()=>{
+  const ephemeral=new CodexRunner({ephemeral:true});
+  const ephCalls=[];
+  ephemeral.start=async()=>{};
+  ephemeral.rpc=async (method,params)=>{
+    ephCalls.push({method,params});
+    if (method==='config/read') return {config:{model_provider:'openai'}};
+    if (method==='thread/start') return {thread:{id:'eph-1'},model:params.model,modelProvider:'openai'};
+    if (method==='thread/fork') return {thread:{id:'eph-fork-1'},model:params.model,modelProvider:'openai'};
+    if (method==='thread/name/set') return {};
+    assert.equal(method,'turn/start');
+    setImmediate(()=>{
+      ephemeral.receive(JSON.stringify({method:'item/completed',params:{threadId:params.threadId,turnId:'t1',item:{type:'agentMessage',text:JSON.stringify(outcome)}}}));
+      ephemeral.receive(JSON.stringify({method:'turn/completed',params:{threadId:params.threadId,turn:{id:'t1',status:'completed'}}}));
+    });
+    return {turn:{id:'t1'}};
+  };
+  const team={id:'team',title:'Ephemeral',cwd:process.cwd(),task:'Run',parentSessionId:'parent-1',members:[]};
+  await ephemeral.run({team,member:{name:'fresh',brief:'Fresh',model:'gpt-5.4',inbox:[],lastTurn:1},remember:()=>{}});
+  await ephemeral.run({team,member:{name:'warm',brief:'Warm',forkSource:'coordinator',inbox:[],lastTurn:2},remember:()=>{}});
+  assert.ok(ephCalls.every(c=>c.params?.attachToSource!==true));
+  assert.equal(ephCalls.find(c=>c.method==='thread/start').params.allowProviderModelFallback,false);
+
+  // Teammate fork from an attached worker skips unarchive/archive on source and stays attached.
+  const attached=new CodexRunner();
+  const attCalls=[];
+  attached.start=async()=>{};
+  attached.rpc=async (method,params)=>{
+    attCalls.push({method,params});
+    if (method==='config/read') return {config:{model_provider:'openai'}};
+    if (method==='thread/name/set') return {};
+    if (method==='thread/archive'||method==='thread/unarchive') throw Error('Should not archive/unarchive attached thread');
+    if (method==='thread/fork') return {thread:{id:'attached-child',attachedToThreadId:params.threadId},model:params.model,modelProvider:params.modelProvider};
+    assert.equal(method,'turn/start');
+    setImmediate(()=>{
+      attached.receive(JSON.stringify({method:'item/completed',params:{threadId:params.threadId,turnId:'t2',item:{type:'agentMessage',text:JSON.stringify(outcome)}}}));
+      attached.receive(JSON.stringify({method:'turn/completed',params:{threadId:params.threadId,turn:{id:'t2',status:'completed'}}}));
+    });
+    return {turn:{id:'t2'}};
+  };
+  const attTeam={id:'team',title:'Nested',cwd:process.cwd(),task:'Run',members:[{name:'builder',threadId:'attached-builder',executionMode:'attached'}]};
+  let saved={};
+  await attached.run({team:attTeam,member:{name:'helper',brief:'Help',forkFrom:'attached-builder',inbox:[],lastTurn:1},remember:c=>{saved={...saved,...c};}});
+  assert.equal(saved.threadId,'attached-child');
+  assert.equal(saved.executionMode,'attached');
+  assert.equal(saved.forkFrom,null);
+  assert.equal(attCalls.find(c=>c.method==='thread/fork').params.attachToSource,true);
+});
