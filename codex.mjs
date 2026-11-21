@@ -207,6 +207,7 @@ export class CodexRunner {
     this.loadedThreads = new Map();
     this.threadHolds = new Map();
     this.modelProviders = new Map();
+    this.modelsHydrated = false;
     this.supportsAttachToSource = true;
     this.supportsModelFallbackFlag = true;
     this.sequence = 0;
@@ -254,6 +255,7 @@ export class CodexRunner {
     this.child = null;
     this.ready = null;
     this.loadedThreads.clear();
+    this.modelsHydrated = false;
     this.supportsAttachToSource = true;
     this.supportsModelFallbackFlag = true;
     for (const request of this.pending.values()) request.reject(Error(message));
@@ -311,13 +313,14 @@ export class CodexRunner {
     let cursor;
     do {
       const page = await this.rpc('model/list', {cursor, limit: 100, includeHidden: false});
-      for (const entry of page.data.filter(model => !model.hidden)) {
+      for (const entry of (page?.data ?? []).filter(model => !model.hidden)) {
         models.push(entry);
         const provider = entry.modelProvider ?? entry.provider;
         if (entry.model && typeof provider === 'string' && provider) this.modelProviders.set(entry.model, provider);
       }
-      cursor = page.nextCursor;
+      cursor = page?.nextCursor;
     } while (cursor);
+    this.modelsHydrated = true;
     return models;
   }
 
@@ -462,8 +465,16 @@ export class CodexRunner {
   async run({team, member, remember, declaredOutcome, peerToken, peerPort, onActivity}) {
     await this.start();
     const model = member.model ?? team.model;
+    let catalog;
+    if (model && (member.effort === null || (!this.modelProviders.has(model) && !this.modelsHydrated))) {
+      try {
+        catalog = await this.listModels();
+      } catch (error) {
+        if (member.effort === null) throw error;
+      }
+    }
     const effort = member.effort === null && model
-      ? (await this.listModels()).find(entry => entry.model === model)?.defaultReasoningEffort
+      ? catalog?.find(entry => entry.model === model)?.defaultReasoningEffort
       : configuredEffort(team, member);
     const cwd = member.workspace?.cwd ?? team.cwd;
     let scope = {
@@ -471,8 +482,8 @@ export class CodexRunner {
       approvalPolicy: 'never', model,
       config: {...peerConfig(team, member, peerToken, peerPort), ...(effort ? {model_reasoning_effort: effort} : {})},
     };
-    if (model?.startsWith('xingchi/')) scope.modelProvider = 'desktop-xingchi';
-    else if (model && this.modelProviders.has(model)) scope.modelProvider = this.modelProviders.get(model);
+    if (model && this.modelProviders.has(model)) scope.modelProvider = this.modelProviders.get(model);
+    else if (model?.startsWith('xingchi/')) scope.modelProvider = 'desktop-xingchi';
     const requestedProvider = scope.modelProvider;
     const configKey = JSON.stringify(scope.config);
     const savedId = member.threadId;

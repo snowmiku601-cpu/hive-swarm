@@ -19,6 +19,7 @@ function fixture(output=JSON.stringify(outcome), events, rejectProviderChange=fa
   runner.start=async()=>{};
   runner.rpc=async (method,params)=>{
     calls.push({method,params});
+    if (method==='model/list') return {data:[]};
     if (method==='config/read') return {config:{model_provider:'fixture-default'}};
     if (method==='thread/name/set'||method==='thread/unsubscribe') return {};
     if (method==='thread/archive') {
@@ -99,7 +100,7 @@ test('archived threads unarchive before resume with the selected scope and archi
   await session.run({threadId:session.threadId,model:'xingchi/gpt-fixture',effort:'low'});
   await session.run({threadId:session.threadId,model:'gpt-fixture'});
   assert.deepEqual(session.calls.map(call=>call.method),[
-    'thread/start','thread/name/set','turn/start','thread/archive',
+    'model/list','thread/start','thread/name/set','turn/start','thread/archive',
     'thread/unarchive','thread/resume','turn/start','thread/archive',
     'thread/unarchive','thread/resume','turn/start','thread/archive',
     'thread/unarchive','config/read','thread/resume','turn/start','thread/archive',
@@ -401,6 +402,7 @@ test('fresh attached workers fork paginated parents with beforeTurnId and skip u
   runner.start=async()=>{};
   runner.rpc=async (method,params)=>{
     calls.push({method,params});
+    if (method==='model/list') return {data:[]};
     if (method==='thread/read') return {thread:{id:params.threadId,historyMode:'paginated'}};
     if (method==='thread/turns/list') return {data:[{id:'parent-turn-1'}]};
     if (method==='config/read') return {config:{model_provider:'openai'}};
@@ -510,6 +512,7 @@ test('explicit model passes allowProviderModelFallback: false and older Codex re
   runner.start=async()=>{};
   runner.rpc=async (method,params)=>{
     calls.push({method,params});
+    if (method==='model/list') return {data:[]};
     if (method==='thread/read') return {thread:{id:params.threadId,historyMode:'paginated'}};
     if (method==='thread/turns/list') return {data:[{id:'t1'}]};
     if (method==='config/read') return {config:{model_provider:'openai'}};
@@ -556,6 +559,7 @@ test('ephemeral runner never sends attachToSource, and attached teammate forks s
   ephemeral.start=async()=>{};
   ephemeral.rpc=async (method,params)=>{
     ephCalls.push({method,params});
+    if (method==='model/list') return {data:[]};
     if (method==='config/read') return {config:{model_provider:'openai'}};
     if (method==='thread/start') return {thread:{id:'eph-1'},model:params.model,modelProvider:'openai'};
     if (method==='thread/fork') return {thread:{id:'eph-fork-1'},model:params.model,modelProvider:'openai'};
@@ -617,4 +621,51 @@ test('generic invalid params errors from thread/start do not latch supportsModel
   assert.equal(startCalls.length,1);
   assert.equal(startCalls[0].allowProviderModelFallback,false);
   assert.equal(runner.supportsModelFallbackFlag,true);
+});
+
+test('B5: run() lazy-hydrates modelProviders via listModels() before falling back to desktop-xingchi for xingchi/ models',async()=>{
+  const runner=new CodexRunner();
+  const calls=[];
+  let starts=0,nextTurn=0;
+  runner.start=async()=>{};
+  runner.rpc=async (method,params)=>{
+    calls.push({method,params});
+    if (method==='model/list') {
+      return {data:[
+        {model:'xingchi/gpt-6.1-sol',modelProvider:'xingchiapi',hidden:false},
+        {model:'custom/m1',provider:'custom-prov',hidden:false},
+      ]};
+    }
+    if (method==='thread/start') return {thread:{id:'thr-'+(++starts)},model:params.model,modelProvider:params.modelProvider};
+    if (method==='thread/name/set'||method==='thread/archive'||method==='thread/unarchive') return {};
+    if (method==='thread/resume') return {thread:{id:params.threadId},model:params.model,modelProvider:params.modelProvider};
+    assert.equal(method,'turn/start');
+    const id='t-'+(++nextTurn);
+    setImmediate(()=>{
+      runner.receive(JSON.stringify({method:'item/completed',params:{threadId:params.threadId,turnId:id,item:{type:'agentMessage',text:JSON.stringify(outcome)}}}));
+      runner.receive(JSON.stringify({method:'turn/completed',params:{threadId:params.threadId,turn:{id,status:'completed'}}}));
+    });
+    return {turn:{id}};
+  };
+
+  const team={id:'team',title:'Lazy Provider',cwd:process.cwd(),task:'Test B5',members:[]};
+  let saved={};
+  const remember=change=>{saved={...saved,...change};};
+  await runner.run({team,member:{name:'a',brief:'Go',model:'xingchi/gpt-6.1-sol',inbox:[],lastTurn:1},remember});
+  assert.equal(calls.filter(c=>c.method==='model/list').length,1);
+  assert.equal(calls.find(c=>c.method==='thread/start').params.modelProvider,'xingchiapi');
+
+  // Second turn reuses cached provider without extra model/list RPC.
+  await runner.run({team,member:{name:'a',brief:'Go',model:'xingchi/gpt-6.1-sol',threadId:saved.threadId,inbox:[],lastTurn:2},remember});
+  assert.equal(calls.filter(c=>c.method==='model/list').length,1);
+
+  // Unlisted xingchi/ model still falls back cleanly to desktop-xingchi.
+  await runner.run({team,member:{name:'b',brief:'Go',model:'xingchi/unlisted',inbox:[],lastTurn:3},remember:()=>{}});
+  const secondStart=calls.filter(c=>c.method==='thread/start')[1].params;
+  assert.equal(secondStart.modelProvider,'desktop-xingchi');
+
+  // Listed custom model uses catalog provider without config/read.
+  await runner.run({team,member:{name:'c',brief:'Go',model:'custom/m1',inbox:[],lastTurn:4},remember:()=>{}});
+  assert.equal(calls.filter(c=>c.method==='thread/start')[2].params.modelProvider,'custom-prov');
+  assert.equal(calls.some(c=>c.method==='config/read'),false);
 });

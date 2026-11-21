@@ -5,6 +5,7 @@
   const standalone=parent===window;
   const emptyPanel=standalone && location.pathname==='/swarm';
   const tabs=['overview','board','members','graph'];
+  const GRAPH_MODE_KEY='hive-swarm-graph-mode';
   const states={queued:'Queued',working:'Working',waiting:'Waiting',done:'Done',failed:'Failed',
     quota:'Quota limit',retired:'Retired',observer:'Observer'};
   const executionModes={subagent:'Subagent',attached:'Attached',session:'Session'};
@@ -18,12 +19,28 @@
   const liveSlots=new Map();
   const nowSlots=new Map();
   const memberDrafts=new Map();
+  const threadOpenState=new Map();
   let teamId=standalone&&!emptyPanel?location.pathname.split('/').at(-1):null;
   let team,signature='',rosterKey='',feedKey='',activeTab='board',chronology=[],latestByAuthor=new Map();
   let historyTail=0,historyRequest,refreshing=false,following=true,seen=0,feedLimit=160;
   let recentTeams=[],teamListKey='',loadingTeams=false,channelKey='',memberKey='';
-  let stream,streamOnline=false,modelCatalog,titleEditing=false,transcript,extendingBudget=false;
+  let stream,streamOnline=false,modelCatalog,titleEditing=false,transcript,lightbox,extendingBudget=false;
   let requestNumber=0,refreshTimer,playTimer,playing=false,cursor=null,focusedNode=null,graphFrame=0;
+  let graphMode=loadGraphMode(),exportingGif=false;
+
+  function loadGraphMode() {
+    try {
+      const saved=globalThis.sessionStorage?.getItem?.(GRAPH_MODE_KEY);
+      if (saved==='hive'||saved==='mentions') return saved;
+    } catch {}
+    return 'hive';
+  }
+  function saveGraphMode(mode) {
+    try { globalThis.sessionStorage?.setItem?.(GRAPH_MODE_KEY,mode); } catch {}
+  }
+  function currentTheme() {
+    return document.documentElement.dataset.theme==='light'?'light':'dark';
+  }
 
   function node(tag,kind='',text) {
     const element=document.createElement(tag);
@@ -50,6 +67,7 @@
     button.setAttribute('aria-label','Jump to post #'+seq);
     button.onclick=()=>{
       if (transcript) closeTranscript();
+      if (lightbox) closeLightbox();
       return jumpToPost(seq);
     };
     return button;
@@ -64,6 +82,38 @@
       link.rel='noopener noreferrer';
       return link;
     } catch {}
+  }
+  function safeAssetUrl(destination) {
+    const raw=String(destination??'').trim();
+    if (!raw) return '';
+    if (raw.startsWith('/')&&!raw.startsWith('//')) return raw;
+    try {
+      const url=new URL(raw,location?.origin||'http://127.0.0.1');
+      if (['http:','https:'].includes(url.protocol)&&(!location?.origin||url.origin===location.origin)) return url.href;
+    } catch {}
+    return '';
+  }
+  function chevronIcon() {
+    if (typeof document.createElementNS!=='function') {
+      const span=node('span','accordion-chevron','▾');
+      span.setAttribute('aria-hidden','true');
+      return span;
+    }
+    const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+    svg.setAttribute('class','accordion-chevron');
+    svg.setAttribute('width','14');
+    svg.setAttribute('height','14');
+    svg.setAttribute('viewBox','0 0 16 16');
+    svg.setAttribute('aria-hidden','true');
+    const path=document.createElementNS('http://www.w3.org/2000/svg','path');
+    path.setAttribute('d','M4 6l4 4 4-4');
+    path.setAttribute('fill','none');
+    path.setAttribute('stroke','currentColor');
+    path.setAttribute('stroke-width','1.6');
+    path.setAttribute('stroke-linecap','round');
+    path.setAttribute('stroke-linejoin','round');
+    svg.append(path);
+    return svg;
   }
   function inlineText(target,value) {
     let offset=0;
@@ -145,11 +195,88 @@
   function stamp(event) {
     return '#'+event.seq+(event.time?' · '+time.format(new Date(event.time)):'');
   }
+  function beeSprite(member,{muted=false}={}) {
+    return HiveBee.sprite(member.name,{
+      status:member.status??'observer',
+      coordinator:member.role==='coordinator',
+      tint:member.tint,
+      muted,
+    });
+  }
   function bee(member,compact=false) {
     const tile=node('span','bee-tile'+(compact?' compact':''));
     tile.dataset.status=member.status??'observer';
-    tile.append(HiveBee.sprite(member.name,{status:tile.dataset.status,coordinator:member.role==='coordinator',tint:member.tint}));
+    tile.append(beeSprite(member));
     return tile;
+  }
+  function beeTint(member) {
+    if (typeof HiveBee?.tintStyle==='function') {
+      return HiveBee.tintStyle(member.name,member.role==='coordinator',member.tint);
+    }
+    const palette=[
+      ['#efac37','#ffe18d','#bb641d'],['#75baef','#cdefff','#3974bb'],
+      ['#55cbb2','#b8f8df','#268c7d'],['#e68db3','#ffcee2','#a24275'],
+      ['#b3ce64','#e9f6a1','#6c9137'],['#ad9ce8','#e3d4ff','#6d58af'],
+    ];
+    const [base,highlight,shade]=typeof HiveBee?.colors==='function'
+      ? HiveBee.colors(member.name,member.role==='coordinator',member.tint)
+      : (member.role==='coordinator'?palette[0]:palette[1+((member.tint??0)%(palette.length-1))]);
+    return {
+      base,highlight,shade,
+      bg:'color-mix(in oklab, '+base+' 14%, var(--surface))',
+      border:'color-mix(in oklab, '+base+' 40%, var(--line))',
+      text:'var(--ink)',
+    };
+  }
+  function beePill(member,{clickable=true}={}) {
+    const canJournal=standalone&&chatUrl(member.threadId);
+    const canMention=!member.external&&member.status!=='retired'&&!member.retireAfterTurn;
+    const interactive=clickable&&(canJournal||canMention);
+    const pill=node(interactive?'button':'span','bee-pill');
+    if (interactive) {
+      pill.type='button';
+      pill.setAttribute('aria-label',canJournal?'View journal for '+author(member.name):'Mention '+author(member.name));
+      pill.onclick=()=>{
+        if (canJournal) return openTranscript(member,pill);
+        return mentionMember(member.name);
+      };
+    }
+    const palette=beeTint(member);
+    if (pill.style?.setProperty) {
+      pill.style.setProperty('--pill-bg',palette.bg);
+      pill.style.setProperty('--pill-border',palette.border);
+      pill.style.setProperty('--pill-ink',palette.text);
+    }
+    pill.append(beeSprite(member,{muted:member.status==='retired'}),node('span','bee-pill-name',member.name));
+    return pill;
+  }
+  function smartTaskLabel(member) {
+    if (typeof graph.smartTaskLabel==='function') return graph.smartTaskLabel(member);
+    const explicit=String(member?.taskLabel??'').trim();
+    if (explicit) return explicit.slice(0,96);
+    let raw=String(member?.brief??'').trim();
+    if (!raw) return member?.name??'Task';
+    raw=raw.replace(/\[([^\]]+)\]\([^)]+\)/g,'$1')
+      .replace(/[`*_#]/g,' ')
+      .replace(/\s+/g,' ')
+      .trim();
+    const sentences=raw.split(/(?<!\d)(?<=[.!?])\s+|\r?\n/).filter(Boolean);
+    if (sentences.length>1&&/^(?:you are|act as|your role|member)\b/i.test(sentences[0])) {
+      raw=sentences.slice(1).join(' ');
+    } else {
+      raw=raw.replace(/^you are(?:\s+an?)?(?:\s+hive swarm)?(?:\s+member|\s+agent|\s+worker)?(?:\s+@?[a-z0-9_-]+)?(?:\s*\([^)]*\))?(?:\s+for\s+(?:[^.,:;]|\d\.\d)+)?[.,:;\s-]*/i,'');
+    }
+    raw=raw.replace(/^(?:your\s+(?:assignment|mission|role|task)(?:\s+in\s+[^:]+)?|you\s+own|mission|goal|objective)\s*[:—–-]?\s*/i,'');
+    raw=raw.replace(/\s+(?:in|inside|at)\s+(?:[a-z]:\\|\/)[^\s,;]+/gi,'').trim();
+    const firstSentence=raw.split(/(?<!\d)(?<=[.!?])\s+|\r?\n/)[0]?.trim()||raw;
+    let label=firstSentence.replace(/[.:;,\s]+$/,'').trim();
+    if (label.length>64) {
+      const cut=label.slice(0,64);
+      const lastSpace=cut.lastIndexOf(' ');
+      label=(lastSpace>24?cut.slice(0,lastSpace):cut).trim();
+    }
+    label=label.replace(/\s+(?:for|in|on|with|to|of|and|or|the|a|an|at|by|from)$/i,'').trim();
+    return label||(member?.name??'Task');
   }
   function people() {
     const members=team.members.some(member=>member.role==='coordinator')?team.members:[
@@ -178,13 +305,16 @@
     if (!value?.id || !Array.isArray(value.members)) return;
     if (team?.id && team.id!==value.id) {
       if (transcript) closeTranscript();
+      if (lightbox) closeLightbox();
       posts.clear();
       chronology=[];
       latestByAuthor.clear();
+      threadOpenState.clear();
       historyTail=seen=0;
       cursor=focusedNode=null;
       memberDrafts.clear();
       $('overview-brief-details').open=false;
+      $('overview-tasks-accordion').open=false;
       memberKey=channelKey=rosterKey=feedKey='';
     }
     team=value;
@@ -261,7 +391,7 @@
       const retired=roster.length-live.length;
       $('aside-total').textContent=retired?retired+' retired':'';
       $('aside-total').hidden=!retired;
-    } else if (activeTab==='overview') renderOverview();
+    } else if (activeTab==='overview') renderOverview(roster);
     else if (activeTab==='members') renderMembers(roster);
     else scheduleGraph();
     syncTranscript();
@@ -408,19 +538,22 @@
     return '';
   }
 
+  function openTranscript(member,opener) {
+    if (!standalone||!chatUrl(member.threadId)) return;
+    transcript={name:member.name,threadId:member.threadId,status:member.status,opener};
+    $('transcript-title').textContent='Journal · '+author(member.name);
+    $('transcript-turns').replaceChildren();
+    $('member-transcript').showModal();
+    syncTranscript();
+    return refreshTranscript();
+  }
+
   function transcriptButton(member) {
     if (!standalone || !chatUrl(member.threadId)) return null;
     const button=node('button','link-button','View journal');
     button.type='button';
     button.setAttribute('aria-label','View journal for '+author(member.name));
-    button.onclick=()=>{
-      transcript={name:member.name,threadId:member.threadId,status:member.status,opener:button};
-      $('transcript-title').textContent='Journal · '+author(member.name);
-      $('transcript-turns').replaceChildren();
-      $('member-transcript').showModal();
-      syncTranscript();
-      return refreshTranscript();
-    };
+    button.onclick=()=>openTranscript(member,button);
     return button;
   }
 
@@ -430,7 +563,30 @@
     transcript=null;
     previous.request?.abort();
     $('member-transcript').close();
-    (previous.opener.isConnected?previous.opener:$('tab-'+activeTab)).focus({preventScroll:true});
+    (previous.opener?.isConnected?previous.opener:$('tab-'+activeTab)).focus({preventScroll:true});
+  }
+
+  function openLightbox(shot,opener) {
+    const src=safeAssetUrl(shot.url);
+    if (!src) return;
+    lightbox={shot,opener};
+    $('lightbox-caption').textContent=shot.caption||'Screenshot';
+    $('lightbox-meta').textContent=[author(shot.author),shot.seq?'#'+shot.seq:''].filter(Boolean).join(' · ');
+    const img=$('lightbox-image');
+    img.src=src;
+    img.alt=shot.caption||'Screenshot';
+    const actions=$('lightbox-actions');
+    actions.replaceChildren();
+    if (shot.seq) actions.append(postReference(shot.seq));
+    $('screenshot-lightbox').showModal();
+  }
+
+  function closeLightbox() {
+    const previous=lightbox;
+    if (!previous) return;
+    lightbox=null;
+    $('screenshot-lightbox').close();
+    (previous.opener?.isConnected?previous.opener:$('tab-'+activeTab)).focus({preventScroll:true});
   }
 
   function syncTranscript() {
@@ -555,17 +711,29 @@
   }
 
   function threadState(thread) {
-    const people=(thread.members??[]).map(name=>team.members.find(member=>member.name===name)).filter(Boolean);
-    if (people.some(member=>member.recoveryRequired||['failed','quota'].includes(member.status))) {
+    const members=(thread.members??[]).map(name=>team.members.find(member=>member.name===name)).filter(Boolean);
+    if (members.some(member=>member.recoveryRequired||['failed','quota'].includes(member.status))) {
       return {key:'blocked',label:'Blocked',rank:0};
     }
-    if (people.some(member=>member.status==='working')) return {key:'active',label:'Active',rank:1};
-    if (people.some(member=>member.status==='queued')) return {key:'queued',label:'Queued',rank:2};
-    if (people.some(member=>member.status==='waiting')) return {key:'waiting',label:'Waiting',rank:3};
-    if (people.length&&people.every(member=>['done','retired'].includes(member.status))) {
+    if (members.some(member=>member.status==='working')) return {key:'active',label:'Active',rank:1};
+    if (members.some(member=>member.status==='queued')) return {key:'queued',label:'Queued',rank:2};
+    if (members.some(member=>member.status==='waiting')) return {key:'waiting',label:'Waiting',rank:3};
+    if (members.length&&members.every(member=>['done','retired'].includes(member.status))) {
       return {key:'done',label:'Done',rank:4};
     }
     return {key:'queued',label:'Queued',rank:2};
+  }
+
+  function stateGlyph(member) {
+    if (member.recoveryRequired||['failed','quota'].includes(member.status)) return '!';
+    if (member.status==='done') return '✓';
+    if (member.status==='working') return '●';
+    if (member.status==='retired') return '–';
+    return '◦';
+  }
+  function stateKey(member) {
+    if (member.recoveryRequired||['failed','quota'].includes(member.status)) return 'failed';
+    return member.status??'waiting';
   }
 
   function attentionItems() {
@@ -644,61 +812,176 @@
     return row;
   }
 
-  function renderOverview() {
-    const members=team.members;
-    const workers=members.filter(member=>member.role!=='coordinator'&&member.status!=='retired');
+  function renderOverview(roster=people()) {
+    const members=roster.filter(member=>!member.external);
+    const allWorkers=members.filter(member=>member.role!=='coordinator');
+    const liveWorkers=allWorkers.filter(member=>member.status!=='retired');
+    const doneWorkers=liveWorkers.filter(member=>member.status==='done').length;
+    $('overview-intro').hidden=false;
     $('overview-goal').textContent=team.title;
+    const goalLine=team.goalLine?.trim()??'';
+    $('overview-goal-line').textContent=goalLine;
+    $('overview-goal-line').hidden=!goalLine||goalLine===team.title;
     const brief=team.task?.trim()??'';
     const long=brief.length>180||/\n/.test(brief);
     $('overview-brief').textContent=brief;
     $('overview-brief').hidden=long||!brief||brief===team.title;
     $('overview-brief-details').hidden=!long;
     $('overview-brief-full').textContent=brief;
-    progressView('workers','worker-progress',workers.filter(member=>member.status==='done').length,workers.length);
+
+    const tasksTotal=liveWorkers.length;
+    const heading=$('overview-tasks-heading');
+    heading.replaceChildren(
+      node('strong','',doneWorkers+' of '+tasksTotal),
+      document.createTextNode(' tasks done')
+    );
+    const taskIcon=$('overview-tasks-icon');
+    const hasBlocked=members.some(member=>member.recoveryRequired||['failed','quota'].includes(member.status));
+    const hasWorking=members.some(member=>member.status==='working');
+    taskIcon.textContent=tasksTotal>0&&doneWorkers===tasksTotal?'✓':hasBlocked?'!':'•';
+    taskIcon.dataset.status=tasksTotal>0&&doneWorkers===tasksTotal?'done':hasBlocked?'failed':hasWorking?'working':'waiting';
+    progressView('workers','worker-progress',doneWorkers,tasksTotal);
     progressView('turns','turn-progress',team.turns,team.turnLimit);
+
     liveSlots.clear();
     nowSlots.clear();
-    $('overview-members').replaceChildren(...members.map(member=>{
-      const row=node('li','overview-member');
-      const heading=node('div','member-top');
-      const status=node('span','status-word',condition(member));
-      status.dataset.status=member.status;
-      const mode=modeBadge(member);
-      const right=node('span','member-pills');
-      if (mode) right.append(mode);
-      right.append(status);
-      heading.append(node('strong','',author(member.name)),right);
-      row.append(heading);
+    const taskListMembers=allWorkers.length?allWorkers:members;
+    $('overview-members').replaceChildren(...taskListMembers.map(member=>{
+      const row=node('li','overview-task-row');
+      const icon=node('span','task-state-icon',stateGlyph(member));
+      icon.setAttribute('aria-hidden','true');
+      icon.dataset.status=stateKey(member);
+      const info=node('div','task-row-info');
+      info.append(node('span','task-row-title',smartTaskLabel(member)));
       const now=node('p','now-summary',memberNow(member));
       nowSlots.set(member.name,now);
-      row.append(now);
+      info.append(now);
       const latest=latestByAuthor.get(member.name);
       const journal=transcriptButton(member);
       if (latest||journal) {
         const actions=node('div','overview-actions');
         if (latest) actions.append(postReference(latest.seq));
         if (journal) actions.append(journal);
-        row.append(actions);
+        info.append(actions);
       }
+      const aside=node('div','task-row-aside');
+      aside.append(beePill(member));
+      row.append(icon,info,aside);
       return row;
     }));
+
     const alerts=attentionItems();
     $('overview-alerts').replaceChildren(...alerts.map(attentionRow));
     $('overview-alerts-panel').hidden=!alerts.length;
-    const threads=(team.threads??[]).map(thread=>({thread,state:threadState(thread)}))
+
+    const sourceThreads=team.threads?.length
+      ? team.threads
+      : (taskListMembers.length?[{id:'__tasks__',title:'Tasks',goal:'',members:taskListMembers.map(member=>member.name)}]:[]);
+    const threads=sourceThreads.map(thread=>({thread,state:threadState(thread)}))
       .sort((a,b)=>a.state.rank-b.state.rank);
     $('overview-threads').replaceChildren(...threads.map(({thread,state})=>{
-      const row=node('li','thread-row');
-      const heading=node('div','member-top');
-      const badge=node('span','status-word',state.label);
-      badge.dataset.status=state.key==='blocked'?'failed':state.key==='active'?'working':state.key;
-      heading.append(node('strong','',thread.title),badge);
-      row.append(heading);
-      if (thread.goal) row.append(node('p','now-summary',thread.goal));
-      if (thread.members?.length) row.append(node('p','minor member-context',thread.members.map(author).join(' · ')));
-      return row;
+      const item=node('li');
+      const card=node('details','panel thread-card');
+      const threadKey=thread.id??thread.title;
+      card.open=threadOpenState.get(threadKey)??true;
+      card.ontoggle=()=>{threadOpenState.set(threadKey,card.open);};
+      const summary=node('summary','thread-summary');
+      const left=node('span','thread-summary-left');
+      const dot=node('span','thread-dot');
+      dot.dataset.state=state.key;
+      dot.setAttribute('aria-hidden','true');
+      // Only thread title uses <strong> to keep thread heading structure clear and testable.
+      left.append(dot,node('strong','',thread.title),node('span','thread-status-text',state.label));
+      const threadMembers=(thread.members??[]).map(name=>roster.find(member=>member.name===name)??{name,status:'queued'});
+      const threadDone=threadMembers.filter(member=>['done','retired'].includes(member.status)).length;
+      const threadTotal=threadMembers.length;
+      const pct=threadTotal?Math.round(threadDone/threadTotal*100):0;
+      const right=node('span','thread-progress-wrap');
+      const bar=node('span','thread-bar');
+      bar.setAttribute('aria-hidden','true');
+      const fill=node('span','thread-bar-fill');
+      fill.dataset.state=state.key;
+      fill.style.width=pct+'%';
+      bar.append(fill);
+      const chevron=chevronIcon();
+      right.append(bar,node('span','thread-fraction mono',threadDone+'/'+threadTotal),chevron);
+      summary.append(left,right);
+      card.append(summary);
+
+      const body=node('div','thread-body');
+      if (thread.goal&&thread.goal!==thread.title) body.append(node('p','thread-goal quiet',thread.goal));
+      if (threadMembers.length) {
+        const list=node('ul','thread-task-rows');
+        list.append(...threadMembers.map(member=>{
+          const taskRow=node('li','thread-task-row');
+          const icon=node('span','task-state-icon',stateGlyph(member));
+          icon.setAttribute('aria-hidden','true');
+          icon.dataset.status=stateKey(member);
+          taskRow.append(icon,node('span','thread-task-title',smartTaskLabel(member)),beePill(member));
+          return taskRow;
+        }));
+        body.append(list);
+      }
+      card.append(body);
+      item.append(card);
+      return item;
     }));
     $('overview-threads-panel').hidden=!threads.length;
+
+    const shots=(Array.isArray(team.screenshots)?team.screenshots:[]).filter(shot=>safeAssetUrl(shot?.url));
+    $('overview-screenshots-panel').hidden=!shots.length;
+    if (shots.length) {
+      $('overview-screenshots-count').textContent=shots.length+(shots.length===1?' capture':' captures');
+      $('overview-screenshots').replaceChildren(...shots.map(shot=>{
+        const card=node('article','screenshot-card');
+        card.setAttribute('role','listitem');
+        const thumb=node('button','screenshot-thumb-btn');
+        thumb.type='button';
+        thumb.setAttribute('aria-label','Preview screenshot: '+(shot.caption||'Capture'));
+        const img=node('img');
+        img.src=safeAssetUrl(shot.url);
+        img.alt=shot.caption||'Screenshot';
+        img.loading='lazy';
+        img.decoding='async';
+        thumb.append(img,node('span','screenshot-caption',shot.caption||'Screenshot'));
+        thumb.onclick=()=>openLightbox(shot,thumb);
+        const meta=node('div','screenshot-meta');
+        const authorMember=roster.find(member=>member.name===shot.author)??{name:shot.author||'user',status:'observer'};
+        meta.append(beePill(authorMember,{clickable:false}));
+        if (shot.seq) meta.append(postReference(shot.seq));
+        card.append(thumb,meta);
+        return card;
+      }));
+    } else $('overview-screenshots').replaceChildren();
+
+    const coordMember=roster.find(member=>member.role==='coordinator')??{name:'coordinator',role:'coordinator',status:'observer'};
+    $('overview-team-badge').replaceChildren(beeSprite(coordMember));
+    const goalMode=team.coordinator===false||!team.members?.some(member=>member.role==='coordinator');
+    $('overview-team-role').textContent='Coordinator';
+    $('overview-team-mode').textContent='Goal summary';
+    $('overview-team-mode').hidden=!goalMode;
+
+    const summary=$('overview-summary');
+    summary.replaceChildren();
+    const coordReport=chronology.findLast(event=>event.author==='coordinator'&&event.kind==='message');
+    const goalReport=goalMode?chronology.findLast(event=>event.kind==='message'&&(event.author==='user'||/\[done\]/i.test(event.text??''))):null;
+    const report=coordReport??goalReport;
+    if (report) {
+      const body=node('div','message');
+      richText(body,report.text);
+      summary.append(postReference(report.seq),body);
+    }
+    summary.hidden=!report;
+    $('overview-summary-empty').hidden=Boolean(report);
+    const execFacts=[
+      team.turns+'/'+team.turnLimit+' turns',
+      [team.model,team.effort].filter(Boolean).join(' · '),
+      team.fallbackModel?'Fallback: '+team.fallbackModel+(team.fallbackEffort?' · '+team.fallbackEffort:''):'',
+      team.cwd,
+    ].filter(Boolean).join(' · ');
+    $('overview-execution').textContent=execFacts;
+    $('overview-execution').hidden=!execFacts;
+
     const milestones=chronology.filter(event=>['checkpoint','monitor'].includes(event.kind)||/\[done\]/i.test(event.text)).slice(-6).reverse();
     $('overview-milestones').replaceChildren(...milestones.map(event=>{
       const result=node('li','milestone');
@@ -706,15 +989,6 @@
       return result;
     }));
     $('overview-milestones-panel').hidden=!milestones.length;
-    const summary=$('overview-summary');
-    summary.replaceChildren();
-    const report=chronology.findLast(event=>event.author==='coordinator'&&event.kind==='message');
-    if (report) {
-      const body=node('div','message');
-      richText(body,report.text);
-      summary.append(node('h3','','Coordinator summary'),postReference(report.seq),body);
-    }
-    summary.hidden=!report;
   }
 
   function trustedButton(label, action, disabled=false, style='link-button') {
@@ -948,6 +1222,318 @@
     $('member-empty').hidden=visible.length>0;
   }
 
+  /* Fallback graph & GIF helpers when HiveGraph 2.1 / HiveGif are not yet loaded */
+  function fallbackProjectHive(events,roster,cursorSeq) {
+    const upTo=events.filter(event=>event.seq<=cursorSeq&&graph.isPost(event));
+    const lastPost=upTo.at(-1)??null;
+    const latestSeqByAuthor=new Map();
+    for (const post of upTo) latestSeqByAuthor.set(post.author,post.seq);
+    const coordMember=roster.find(member=>member.role==='coordinator')??{name:'coordinator',role:'coordinator',status:'waiting'};
+    const workers=roster.filter(member=>member.role!=='coordinator'&&!member.external);
+    const buckets={working:[],waiting:[],needs:[],done:[]};
+    const memberBucket=new Map();
+    for (const member of workers) {
+      let bucket='waiting';
+      if (member.recoveryRequired||['failed','quota'].includes(member.status)) bucket='needs';
+      else if (member.status==='working') bucket='working';
+      else if (['done','retired'].includes(member.status)) bucket='done';
+      buckets[bucket].push({
+        ...member,
+        muted:['done','retired'].includes(member.status),
+        latestSeq:latestSeqByAuthor.get(member.name)??0,
+      });
+      memberBucket.set(member.name,bucket);
+    }
+    const meta={
+      working:{label:'Working',tone:'working'},
+      waiting:{label:'Waiting',tone:'waiting'},
+      needs:{label:'Needs you',tone:'needs'},
+      done:{label:'Done',tone:'done'},
+    };
+    const clusters=['working','waiting','needs','done']
+      .filter(id=>buckets[id].length>0)
+      .map(id=>({id,label:meta[id].label,tone:meta[id].tone,count:buckets[id].length,members:buckets[id]}));
+    const doneCount=buckets.done.length;
+    const totalWorkers=workers.length;
+    const coordPhase=buckets.needs.length?'stalled':buckets.working.length?'working':
+      totalWorkers>0&&doneCount===totalWorkers?'done':'waiting';
+    const connectors=[];
+    if (buckets.done.length) connectors.push({from:'done',to:'coordinator',kind:'done',label:'Tasks done'});
+    if (buckets.needs.length) connectors.push({from:'coordinator',to:'needs',kind:'waiting',label:'Needs you'});
+    if (buckets.waiting.some(member=>(member.pendingWaitFor??member.waitFor)?.length)) {
+      connectors.push({from:'waiting',to:'coordinator',kind:'waiting',label:'Waiting on'});
+    }
+    if (lastPost&&(lastPost.targets?.length||coordPhase!=='done')) {
+      const from=lastPost.author==='coordinator'?'coordinator':(memberBucket.get(lastPost.author)??'coordinator');
+      const target=lastPost.targets?.find(name=>name!==lastPost.author);
+      const to=target?(target==='coordinator'?'coordinator':(memberBucket.get(target)??'coordinator')):(from==='coordinator'&&clusters[0]?clusters[0].id:'coordinator');
+      if (from!==to) connectors.push({from,to,kind:'message',label:'Message just sent',seq:lastPost.seq});
+    }
+    return {
+      currentSeq:cursorSeq,
+      lastPost,
+      coordinator:{
+        name:coordMember.name,status:coordMember.status,role:'coordinator',
+        doneCount,totalWorkers,phase:coordPhase,latestSeq:latestSeqByAuthor.get(coordMember.name)??0,
+        tint:coordMember.tint,
+      },
+      clusters,
+      connectors,
+    };
+  }
+  function hexVertices(cx,cy,radius) {
+    return Array.from({length:6},(_,k)=>{
+      const angle=k*Math.PI/3;
+      return {x:cx+radius*Math.cos(angle),y:cy+radius*Math.sin(angle)};
+    });
+  }
+  function fallbackLayoutHive(hiveModel,width,height) {
+    const clusters=hiveModel.clusters??[];
+    const count=clusters.length;
+    const radius=count<=1
+      ? Math.max(88,Math.min(120,width*0.25,height*0.225))
+      : Math.max(70,Math.min(104,width*0.21,height*0.195));
+    const hexH=Math.sqrt(3)*radius;
+    const cellsById=new Map();
+    let coordPos;
+    const clusterLayouts=[];
+    if (count===0) {
+      coordPos={x:width/2,y:height/2};
+    } else if (count===1) {
+      const gap=Math.max(12,Math.min(22,height-hexH*2-20));
+      const totalH=hexH*2+gap;
+      const topY=Math.max(hexH/2+10,(height-totalH)/2+hexH/2);
+      const clusterPos={x:width/2,y:topY};
+      coordPos={x:width/2,y:topY+hexH+gap};
+      clusterLayouts.push({pos:clusterPos,cluster:clusters[0]});
+    } else {
+      coordPos={x:width/2,y:height*0.64};
+      const spreadX=Math.min(width*0.33,radius*2.2);
+      const spreadY=Math.min(height*0.34,hexH*1.12);
+      clusters.forEach((cluster,idx)=>{
+        const angle=-Math.PI+(idx+1)*Math.PI/(count+1);
+        clusterLayouts.push({
+          pos:{x:width/2+Math.cos(angle)*spreadX,y:coordPos.y+Math.sin(angle)*spreadY},
+          cluster,
+        });
+      });
+    }
+    const coordinator={
+      id:'coordinator',x:coordPos.x,y:coordPos.y,radius,
+      vertices:hexVertices(coordPos.x,coordPos.y,radius),
+      model:hiveModel.coordinator,
+    };
+    cellsById.set('coordinator',coordinator);
+    const laidOutClusters=clusterLayouts.map(({pos,cluster})=>{
+      const items=cluster.members??[];
+      const cols=items.length<=2?items.length:items.length<=6?3:4;
+      const rows=Math.max(1,Math.ceil(items.length/Math.max(1,cols)));
+      const slotW=Math.min(68,(radius*1.58)/Math.max(1,cols));
+      const rowGap=rows===1?0:Math.min(48,(hexH*0.56)/Math.max(1,rows));
+      const baseY=pos.y+12-((rows-1)*rowGap)/2;
+      const slots=items.map((member,idx)=>{
+        const row=Math.floor(idx/cols);
+        const col=idx%cols;
+        const inRow=Math.min(cols,items.length-row*cols);
+        const sx=pos.x+(col-(inRow-1)/2)*slotW;
+        const sy=baseY+row*rowGap;
+        return {member,x:sx,y:sy,slotWidth:slotW,beeScale:1};
+      });
+      const cell={
+        id:cluster.id,label:cluster.label,tone:cluster.tone,count:cluster.count,
+        x:pos.x,y:pos.y,radius,vertices:hexVertices(pos.x,pos.y,radius),slots,
+      };
+      cellsById.set(cluster.id,cell);
+      return cell;
+    });
+    return {width,height,radius,coordinator,clusters:laidOutClusters,cellsById};
+  }
+  function fallbackHiveMinimumHeight(clusterCount,width) {
+    if (clusterCount<=1) return width<440?380:430;
+    return width<440?420:460;
+  }
+  function fallbackLayoutMentions(nodes,width,height) {
+    const result=new Map();
+    if (!nodes.length) return result;
+    if (nodes.length>12||width<320) return graph.layout(nodes,width,height);
+    const ordered=[...nodes].sort((a,b)=>(b.role==='coordinator')-(a.role==='coordinator'));
+    const topPad=48,bottomPad=48;
+    const centerY=(topPad+(height-bottomPad))/2;
+    const radiusY=Math.max(54,(height-topPad-bottomPad)/2);
+    const sidePad=Math.min(110,Math.max(72,width*0.16));
+    const radiusX=Math.max(60,width/2-sidePad);
+    if (ordered.length===1) {
+      result.set(ordered[0].name,{x:width/2,y:centerY});
+      return result;
+    }
+    ordered.forEach((member,idx)=>{
+      const angle=-Math.PI/2+idx*Math.PI*2/ordered.length;
+      result.set(member.name,{
+        x:width/2+Math.cos(angle)*radiusX,
+        y:centerY+Math.sin(angle)*radiusY,
+      });
+    });
+    return result;
+  }
+  function fallbackPillBox(member,narrow) {
+    const len=String(member?.name??'').length;
+    const w=Math.max(76,Math.min(narrow?134:180,len*7.1+48));
+    return {halfW:w/2,halfH:15,offsetX:0,offsetY:0,radius:15};
+  }
+  function pillBoxFor(member,narrow) {
+    if (typeof graph.layoutMentions==='function'&&typeof graph.nodeBox==='function') {
+      return graph.nodeBox(member,{variant:'pill',narrow});
+    }
+    return fallbackPillBox(member,narrow);
+  }
+  function clipRayToHex(origin,target,vertices) {
+    if (!vertices?.length) return origin;
+    const dx=target.x-origin.x,dy=target.y-origin.y;
+    let bestT=Infinity;
+    for (let i=0;i<vertices.length;i++) {
+      const a=vertices[i],b=vertices[(i+1)%vertices.length];
+      const ex=b.x-a.x,ey=b.y-a.y;
+      const denom=dx*ey-dy*ex;
+      if (Math.abs(denom)<1e-6) continue;
+      const t=((a.x-origin.x)*ey-(a.y-origin.y)*ex)/denom;
+      const u=((a.x-origin.x)*dy-(a.y-origin.y)*dx)/denom;
+      if (t>0&&u>=-1e-4&&u<=1+1e-4&&t<bestT) bestT=t;
+    }
+    return Number.isFinite(bestT)?{x:origin.x+dx*bestT,y:origin.y+dy*bestT}:origin;
+  }
+  function rayClipHex(fromCell,toCell,offset=0) {
+    const angle=Math.atan2(toCell.y-fromCell.y,toCell.x-fromCell.x);
+    const nx=-Math.sin(angle),ny=Math.cos(angle);
+    const fromPt=offset?{x:fromCell.x+nx*offset,y:fromCell.y+ny*offset}:fromCell;
+    const toPt=offset?{x:toCell.x+nx*offset,y:toCell.y+ny*offset}:toCell;
+    const start=clipRayToHex(fromPt,toPt,fromCell.vertices);
+    const end=clipRayToHex(toPt,fromPt,toCell.vertices);
+    return {start,end};
+  }
+  function drawHexCell(ctx,cell,palette,title,subtitle) {
+    ctx.beginPath();
+    cell.vertices.forEach((pt,idx)=>idx===0?ctx.moveTo(pt.x,pt.y):ctx.lineTo(pt.x,pt.y));
+    ctx.closePath();
+    ctx.fillStyle=palette.fill;
+    ctx.fill();
+    ctx.lineWidth=2;
+    ctx.strokeStyle=palette.stroke;
+    ctx.stroke();
+    ctx.textAlign='center';
+    ctx.textBaseline='middle';
+    const titleY=cell.id==='coordinator'?cell.y+cell.radius*0.42:cell.y-cell.radius*0.62;
+    ctx.fillStyle=palette.ink;
+    ctx.font='650 12px var(--sans), system-ui, sans-serif';
+    ctx.fillText(title,cell.x,titleY);
+    if (subtitle!=null) {
+      ctx.fillStyle=palette.muted;
+      ctx.font='500 11px var(--sans), system-ui, sans-serif';
+      ctx.fillText(String(subtitle),cell.x,titleY+15);
+    }
+  }
+  function drawArrowHead(ctx,end,angle,color) {
+    const len=8;
+    ctx.fillStyle=color;
+    ctx.beginPath();
+    ctx.moveTo(end.x,end.y);
+    ctx.lineTo(end.x-len*Math.cos(angle-0.45),end.y-len*Math.sin(angle-0.45));
+    ctx.lineTo(end.x-(len*0.65)*Math.cos(angle),end.y-(len*0.65)*Math.sin(angle));
+    ctx.lineTo(end.x-len*Math.cos(angle+0.45),end.y-len*Math.sin(angle+0.45));
+    ctx.closePath();
+    ctx.fill();
+  }
+  function drawHiveCanvas(canvas,hiveLayout,connectors,color) {
+    const width=canvas.clientWidth,height=canvas.clientHeight;
+    if (!width||!height) return;
+    const scale=Math.min(devicePixelRatio||1,2);
+    const pw=Math.round(width*scale),ph=Math.round(height*scale);
+    if (canvas.width!==pw||canvas.height!==ph) {canvas.width=pw;canvas.height=ph;}
+    const ctx=canvas.getContext('2d');
+    ctx.setTransform(scale,0,0,scale,0,0);
+    ctx.clearRect(0,0,width,height);
+    for (const conn of connectors) {
+      const fromCell=hiveLayout.cellsById.get(conn.from);
+      const toCell=hiveLayout.cellsById.get(conn.to);
+      if (!fromCell||!toCell||fromCell===toCell) continue;
+      const offset=conn.kind==='message'?8:conn.kind==='waiting'?-8:0;
+      const {start,end}=rayClipHex(fromCell,toCell,offset);
+      if (Math.hypot(end.x-start.x,end.y-start.y)<1) continue;
+      const stroke=conn.kind==='done'?color.good:conn.kind==='message'?color.purple:color.gold;
+      ctx.strokeStyle=stroke;
+      ctx.lineWidth=conn.kind==='message'?2.2:1.8;
+      ctx.setLineDash(conn.kind==='waiting'?[5,4]:[]);
+      ctx.beginPath();
+      ctx.moveTo(start.x,start.y);
+      ctx.lineTo(end.x,end.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (conn.kind==='waiting') drawArrowHead(ctx,end,Math.atan2(end.y-start.y,end.x-start.x),stroke);
+    }
+    const tonePalette=tone=>{
+      if (tone==='done') return {fill:color.goodSoft,stroke:color.good,ink:color.text,muted:color.muted};
+      if (tone==='working') return {fill:color.wash,stroke:color.gold,ink:color.text,muted:color.muted};
+      if (tone==='needs') return {fill:color.badSoft,stroke:color.bad,ink:color.text,muted:color.muted};
+      return {fill:color.paper,stroke:color.link,ink:color.text,muted:color.muted};
+    };
+    for (const cluster of hiveLayout.clusters) {
+      drawHexCell(ctx,cluster,tonePalette(cluster.tone),cluster.label,cluster.count);
+    }
+    const coordTone=hiveLayout.coordinator.model.phase==='done'?'done':
+      hiveLayout.coordinator.model.phase==='stalled'?'needs':'working';
+    const doneTotal=hiveLayout.coordinator.model.doneCount+' of '+hiveLayout.coordinator.model.totalWorkers+' done';
+    drawHexCell(ctx,hiveLayout.coordinator,tonePalette(coordTone),'Coordinator',doneTotal);
+  }
+  function drawMentionsCanvas(canvas,projection,coordinates,boxes,focus,highlight,color) {
+    const width=canvas.clientWidth,height=canvas.clientHeight;
+    if (!width||!height) return;
+    const scale=Math.min(devicePixelRatio||1,2);
+    const pw=Math.round(width*scale),ph=Math.round(height*scale);
+    if (canvas.width!==pw||canvas.height!==ph) {canvas.width=pw;canvas.height=ph;}
+    const ctx=canvas.getContext('2d');
+    ctx.setTransform(scale,0,0,scale,0,0);
+    ctx.clearRect(0,0,width,height);
+    ctx.font='600 10px ui-monospace, monospace';
+    ctx.textAlign='center';
+    ctx.textBaseline='middle';
+    const routed=graph.routeEdges(projection,coordinates,{
+      variant:'pill',boxes,narrow:width<465,marginStart:5,marginEnd:6,obstacleMargin:width<465?12:20,
+    });
+    for (const {link,edge} of routed) {
+      const {start:a,control:c,end:b,mid,endAngle:angle}=edge;
+      const pulse=link.lastSeq===highlight;
+      const related=!focus||link.from===focus||link.to===focus;
+      const stroke=pulse&&related?color.accent:color.link;
+      ctx.globalAlpha=related?(pulse?1:0.78):0.16;
+      ctx.strokeStyle=ctx.fillStyle=stroke;
+      ctx.lineWidth=Math.min(4.2,1.1+Math.sqrt(link.count)*0.72);
+      ctx.lineCap='round';
+      ctx.setLineDash(link.direct?[]:[4,4]);
+      const inset=Math.min(4.5,edge.length*0.25);
+      ctx.beginPath();
+      ctx.moveTo(a.x,a.y);
+      ctx.quadraticCurveTo(c.x,c.y,b.x-Math.cos(angle)*inset,b.y-Math.sin(angle)*inset);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      drawArrowHead(ctx,b,angle,stroke);
+      if (related&&edge.length>=40&&(link.count>1||pulse||focus)) {
+        const label=String(link.count);
+        const pillW=Math.max(18,label.length*6.5+8);
+        ctx.globalAlpha=0.98;
+        ctx.fillStyle=color.paper;
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(mid.x-pillW/2,mid.y-7.5,pillW,15,7.5);
+        else ctx.rect(mid.x-pillW/2,mid.y-7.5,pillW,15);
+        ctx.fill();
+        ctx.strokeStyle=pulse?color.accent:color.link;
+        ctx.lineWidth=1;
+        ctx.stroke();
+        ctx.fillStyle=pulse?color.accent:color.text;
+        ctx.fillText(label,mid.x,mid.y+0.25);
+      }
+    }
+    ctx.globalAlpha=1;
+  }
+
   function timeline() {return chronology.filter(graph.isPost);}
   function cursorIndex(events) {
     if (cursor===null) return events.length;
@@ -978,17 +1564,52 @@
     if (activeTab!=='graph'||graphFrame) return;
     graphFrame=requestAnimationFrame(()=>{graphFrame=0;if (team && activeTab==='graph') renderGraph();});
   }
+  function setGraphMode(mode) {
+    graphMode=mode==='mentions'?'mentions':'hive';
+    saveGraphMode(graphMode);
+    $('graph-mode-hive').setAttribute('aria-pressed',String(graphMode==='hive'));
+    $('graph-mode-mentions').setAttribute('aria-pressed',String(graphMode==='mentions'));
+    $('mentions-options').hidden=graphMode!=='mentions';
+    $('graph-stage').dataset.mode=graphMode;
+    $('graph-legend').dataset.mode=graphMode;
+    $('legend-hive').hidden=graphMode!=='hive';
+    $('legend-mentions').hidden=graphMode!=='mentions';
+    scheduleGraph();
+  }
   function renderGraphTotal(events=timeline(),index=cursorIndex(events)) {
     const live=cursor===null&&['working','queued'].includes(team.phase);
     $('graph-total').textContent=events.length+' posts · '+graph.elapsedSpan(events.slice(0,index),{live})+
       (cursor!==null?' · '+index+'/'+events.length:'');
   }
+  function graphPalette(stage) {
+    const css=getComputedStyle(stage);
+    const val=(prop,fallback)=>css.getPropertyValue(prop).trim()||fallback;
+    const light=currentTheme()==='light';
+    return {
+      grid:val('--grid',light?'#eaedf2':'#242933'),
+      link:val('--edge',light?'#9ba5b5':'#7c8698'),
+      accent:val('--gold',light?'#8f5b10':'#f6c458'),
+      gold:val('--gold-solid','#e5a024'),
+      good:val('--good',light?'#247a3d':'#6fd89c'),
+      goodSoft:light?'rgba(36, 122, 61, 0.08)':'rgba(111, 216, 156, 0.1)',
+      purple:val('--purple',light?'#7c4dff':'#b39ddb'),
+      bad:val('--bad',light?'#c4302b':'#ff8a80'),
+      badSoft:light?'rgba(196, 48, 43, 0.08)':'rgba(255, 138, 128, 0.1)',
+      wash:val('--wash',light?'#fdf4e2':'#2b2416'),
+      paper:val('--surface',light?'#ffffff':'#181b21'),
+      text:val('--ink',light?'#181c23':'#eef1f6'),
+      muted:val('--muted',light?'#555e6d':'#a4adbd'),
+    };
+  }
+
   function renderGraph() {
     const events=timeline();
     const index=cursorIndex(events);
     const current=events[index-1];
-    const projection=graph.project(events,people(),current?.seq??0,{
-      hideInactive:$('hide-inactive').checked,expandBroadcast:$('expand-all').checked,
+    const roster=people();
+    const mentionsProjection=graph.project(events,roster,current?.seq??0,{
+      hideInactive:graphMode==='mentions'?$('hide-inactive').checked:false,
+      expandBroadcast:graphMode==='mentions'?$('expand-all').checked:false,
     });
     renderGraphTotal(events,index);
     $('replay').max=events.length;
@@ -1003,57 +1624,238 @@
     $('play').setAttribute('aria-label',playLabel);
     $('play').title=playLabel;
     $('live').setAttribute('aria-pressed',String(cursor===null));
-    $('broadcast-count').textContent=projection.broadcasts+' @all posts';
+    $('broadcast-count').textContent=mentionsProjection.broadcasts+' @all posts';
+
+    $('graph-mode-hive').setAttribute('aria-pressed',String(graphMode==='hive'));
+    $('graph-mode-mentions').setAttribute('aria-pressed',String(graphMode==='mentions'));
+    $('mentions-options').hidden=graphMode!=='mentions';
+    $('graph-stage').dataset.mode=graphMode;
+    $('graph-legend').dataset.mode=graphMode;
+    $('legend-hive').hidden=graphMode!=='hive';
+    $('legend-mentions').hidden=graphMode!=='mentions';
+
     const stage=$('graph-stage');
-    const minimum=graph.minimumHeight(projection.nodes.length,stage.clientWidth);
-    stage.style.height=minimum?minimum+'px':'';
-    const coordinates=graph.layout(projection.nodes,stage.clientWidth,stage.clientHeight);
-    if (focusedNode && !coordinates.has(focusedNode)) focusedNode=null;
-    const active=document.activeElement?.dataset.graphName;
-    $('graph-nodes').replaceChildren(...projection.nodes.map(member=>{
-      const point=coordinates.get(member.name);
-      const button=node('button','graph-node');
-      button.type='button';
-      button.style.left=point.x+'px';
-      button.style.top=point.y+'px';
-      button.dataset.graphName=member.name;
-      button.dataset.role=member.role??'worker';
-      button.dataset.status=member.status;
-      button.dataset.muted=String(!member.posts&&!projection.links.some(edge=>edge.to===member.name));
-      button.dataset.dimmed=String(Boolean(focusedNode&&focusedNode!==member.name&&
-        !projection.links.some(edge=>(edge.from===focusedNode&&edge.to===member.name)||(edge.to===focusedNode&&edge.from===member.name))));
-      button.dataset.unmentioned=String(graph.unmentionedNode(member));
-      button.title=author(member.name)+' · '+condition(member)+
-        (graph.unmentionedNode(member)?' · Posted with no mention':'');
-      button.setAttribute('aria-label',button.title);
-      button.setAttribute('aria-pressed',String(focusedNode===member.name));
-      const hex=node('span','hex');
-      hex.append(HiveBee.sprite(member.name,{coordinator:member.role==='coordinator',status:member.status,tint:member.tint}));
-      button.append(hex,node('span','node-label',author(member.name)));
-      if (member.broadcasts) button.append(node('span','node-broadcast','@all '+member.broadcasts));
-      button.onclick=()=>{
-        focusedNode=focusedNode===member.name?null:member.name;
-        scheduleGraph();
+    const color=graphPalette(stage);
+    const activeFocus=document.activeElement?.dataset.graphName;
+    const projByName=new Map(mentionsProjection.nodes.map(item=>[item.name,item]));
+    const isConnected=name=>!focusedNode||focusedNode===name||mentionsProjection.links.some(
+      edge=>(edge.from===focusedNode&&edge.to===name)||(edge.to===focusedNode&&edge.from===name));
+
+    if (graphMode==='hive') {
+      const hiveModel=(graph.projectHive??fallbackProjectHive)(events,roster,current?.seq??0);
+      const minimum=(graph.hiveMinimumHeight??fallbackHiveMinimumHeight)(hiveModel.clusters.length,stage.clientWidth);
+      stage.style.height=minimum?minimum+'px':'';
+      const hiveLayout=(graph.layoutHive??fallbackLayoutHive)(hiveModel,stage.clientWidth,stage.clientHeight);
+      if (focusedNode&&!roster.some(member=>member.name===focusedNode)) focusedNode=null;
+      const buttons=[];
+      const makeHiveButton=(member,x,y,isCoordinator,slotWidth)=>{
+        const projNode=projByName.get(member.name)??member;
+        const btn=node('button','graph-node graph-hive-bee');
+        btn.type='button';
+        btn.style.left=x+'px';
+        btn.style.top=y+'px';
+        if (Number.isFinite(slotWidth)&&slotWidth>0) btn.style.width=Math.max(46,Math.min(70,Math.floor(slotWidth)))+'px';
+        btn.dataset.graphName=member.name;
+        btn.dataset.role=isCoordinator?'coordinator':'worker';
+        btn.dataset.status=member.status??'waiting';
+        btn.dataset.muted=String(!projNode.posts&&!mentionsProjection.links.some(edge=>edge.to===member.name));
+        btn.dataset.dimmed=String(!isConnected(member.name));
+        btn.dataset.unmentioned=String(graph.unmentionedNode(projNode));
+        const beeMuted=!isCoordinator&&['done','retired'].includes(member.status);
+        btn.dataset.beeMuted=String(beeMuted);
+        btn.title=author(member.name)+' · '+condition(member)+(graph.unmentionedNode(projNode)?' · Posted with no mention':'');
+        btn.setAttribute('aria-label',btn.title);
+        btn.setAttribute('aria-pressed',String(focusedNode===member.name));
+        btn.append(beeSprite({...member,role:isCoordinator?'coordinator':'worker'},{muted:beeMuted}));
+        if (!isCoordinator) btn.append(node('span','hive-bee-label',member.name));
+        btn.onclick=()=>{
+          focusedNode=focusedNode===member.name?null:member.name;
+          scheduleGraph();
+        };
+        return btn;
       };
-      return button;
-    }));
-    if (active) [...$('graph-nodes').children].find(button=>button.dataset.graphName===active)?.focus({preventScroll:true});
-    const css=getComputedStyle(stage);
-    graph.draw($('graph-canvas'),projection,coordinates,focusedNode,current?.seq,{
-      grid:css.getPropertyValue('--grid'),link:css.getPropertyValue('--edge'),accent:css.getPropertyValue('--gold'),
-      paper:css.getPropertyValue('--surface'),text:css.getPropertyValue('--ink'),
-    });
+      const coordMember=roster.find(member=>member.role==='coordinator')??{name:'coordinator',role:'coordinator',status:'waiting'};
+      const coordSlot=hiveLayout.coordinator.slots?.[0];
+      buttons.push(makeHiveButton(coordMember,coordSlot?.x??hiveLayout.coordinator.x,coordSlot?.y??(hiveLayout.coordinator.y-16),true));
+      for (const cluster of hiveLayout.clusters) {
+        for (const slot of cluster.slots) {
+          buttons.push(makeHiveButton(slot.member,slot.x,slot.y,false,slot.slotWidth));
+        }
+      }
+      $('graph-nodes').replaceChildren(...buttons);
+      drawHiveCanvas($('graph-canvas'),hiveLayout,hiveModel.connectors,color);
+    } else {
+      const minimum=(graph.mentionsMinimumHeight??graph.minimumHeight)(mentionsProjection.nodes.length,stage.clientWidth);
+      stage.style.height=minimum?minimum+'px':'';
+      const coordinates=(graph.layoutMentions??fallbackLayoutMentions)(mentionsProjection.nodes,stage.clientWidth,stage.clientHeight);
+      if (focusedNode&&!coordinates.has(focusedNode)) focusedNode=null;
+      const narrow=stage.clientWidth<465;
+      const pillBoxes=new Map();
+      const pillButtons=mentionsProjection.nodes.map(member=>{
+        const point=coordinates.get(member.name);
+        pillBoxes.set(member.name,pillBoxFor(member,narrow));
+        const btn=node('button','graph-node graph-pill-node');
+        btn.type='button';
+        btn.style.left=point.x+'px';
+        btn.style.top=point.y+'px';
+        btn.dataset.graphName=member.name;
+        btn.dataset.role=member.role??'worker';
+        btn.dataset.status=member.status??'observer';
+        btn.dataset.muted=String(!member.posts&&!mentionsProjection.links.some(edge=>edge.to===member.name));
+        btn.dataset.dimmed=String(!isConnected(member.name));
+        btn.dataset.unmentioned=String(graph.unmentionedNode(member));
+        const beeMuted=member.role!=='coordinator'&&['done','retired'].includes(member.status);
+        btn.dataset.beeMuted=String(beeMuted);
+        btn.title=author(member.name)+' · '+condition(member)+(graph.unmentionedNode(member)?' · Posted with no mention':'');
+        btn.setAttribute('aria-label',btn.title);
+        btn.setAttribute('aria-pressed',String(focusedNode===member.name));
+        const dot=node('span','pill-dot');
+        dot.setAttribute('aria-hidden','true');
+        btn.append(beeSprite(member,{muted:beeMuted}),node('span','pill-name',member.name),dot);
+        if (member.broadcasts) btn.append(node('span','node-broadcast','@all '+member.broadcasts));
+        btn.onclick=()=>{
+          focusedNode=focusedNode===member.name?null:member.name;
+          scheduleGraph();
+        };
+        return btn;
+      });
+      $('graph-nodes').replaceChildren(...pillButtons);
+      for (const btn of pillButtons) {
+        if (btn.offsetWidth>0&&btn.offsetHeight>0) {
+          pillBoxes.set(btn.dataset.graphName,{halfW:btn.offsetWidth/2,halfH:btn.offsetHeight/2,offsetX:0,offsetY:0,radius:btn.offsetHeight/2});
+        }
+      }
+      drawMentionsCanvas($('graph-canvas'),mentionsProjection,coordinates,pillBoxes,focusedNode,current?.seq,color);
+    }
+
+    if (activeFocus) [...$('graph-nodes').children].find(button=>button.dataset.graphName===activeFocus)?.focus({preventScroll:true});
+
     $('inspection-title').textContent=focusedNode?author(focusedNode):'Selected post';
     $('clear-node').hidden=!focusedNode;
+    const focusedMember=focusedNode?roster.find(member=>member.name===focusedNode):null;
+    const memberActions=$('graph-member-actions');
+    memberActions.replaceChildren();
+    const journal=focusedMember?transcriptButton(focusedMember):null;
+    if (journal) memberActions.append(journal);
+    memberActions.hidden=!memberActions.childElementCount;
     $('graph-post-author').textContent=current?author(current.author)+' · '+stamp(current):'';
     richText($('graph-post'),current?.text??'No post at this position yet.');
-    const links=projection.links.filter(edge=>!focusedNode||edge.from===focusedNode||edge.to===focusedNode)
+    const links=mentionsProjection.links.filter(edge=>!focusedNode||edge.from===focusedNode||edge.to===focusedNode)
       .sort((a,b)=>b.count-a.count);
     $('edge-list').replaceChildren(...links.map(edge=>{
       const line=node('li');
       line.append(node('span','',author(edge.from)+' → '+author(edge.to)),node('strong','',edge.count));
       return line;
     }));
+  }
+
+  /* Fallback GIF89a exporter when HiveGif is not yet merged */
+  function fallbackEncodeSingleFrameGif(rgba,width,height) {
+    const out=[0x47,0x49,0x46,0x38,0x39,0x61,width&255,(width>>8)&255,height&255,(height>>8)&255,0xF0,0,0];
+    // 2-color table (theme paper & ink)
+    out.push(0xFA,0xFA,0xFA,0x20,0x24,0x2C);
+    // NETSCAPE2.0 infinite loop extension
+    out.push(0x21,0xFF,0x0B,0x4E,0x45,0x54,0x53,0x43,0x41,0x50,0x45,0x32,0x2E,0x30,0x03,0x01,0,0,0);
+    out.push(0x2C,0,0,0,0,width&255,(width>>8)&255,height&255,(height>>8)&255,0,2);
+    const total=width*height;
+    const idx=new Uint8Array(total);
+    for (let i=0;i<total;i++) {
+      const lum=(rgba[i*4]*299+rgba[i*4+1]*587+rgba[i*4+2]*114)/1000;
+      idx[i]=lum<128?1:0;
+    }
+    const bytes=[];
+    let bitBuf=0,bitCount=0;
+    const emit=(code,bits)=>{
+      bitBuf|=code<<bitCount;
+      bitCount+=bits;
+      while (bitCount>=8) {bytes.push(bitBuf&255);bitBuf>>=8;bitCount-=8;}
+    };
+    emit(4,3);
+    for (let i=0;i<total;i++) {
+      emit(idx[i],3);
+      if (i%120===119) emit(4,3);
+    }
+    emit(5,3);
+    if (bitCount>0) bytes.push(bitBuf&255);
+    for (let i=0;i<bytes.length;i+=255) {
+      const chunk=bytes.slice(i,i+255);
+      out.push(chunk.length,...chunk);
+    }
+    out.push(0,0x3B);
+    return new Uint8Array(out);
+  }
+  function fallbackExportGraphReplayGif(opts) {
+    const width=Math.max(320,Math.min(960,Math.round(opts.width||680)));
+    const height=Math.max(240,Math.min(720,Math.round(opts.height||460)));
+    const canvas=document.createElement('canvas');
+    canvas.width=width;
+    canvas.height=height;
+    const ctx=canvas.getContext('2d');
+    if (ctx) {
+      if (typeof graph.renderGraphFrame==='function') graph.renderGraphFrame(ctx,{...opts,width,height});
+      else {
+        ctx.fillStyle=opts.theme==='light'?'#f9fafc':'#15181e';
+        ctx.fillRect?.(0,0,width,height);
+        const stageCanvas=$('graph-canvas');
+        if (stageCanvas?.width&&stageCanvas?.height) ctx.drawImage?.(stageCanvas,0,0,width,height);
+      }
+    }
+    const rgba=ctx?.getImageData?.(0,0,width,height)?.data??new Uint8ClampedArray(width*height*4);
+    const bytes=fallbackEncodeSingleFrameGif(rgba,width,height);
+    const blob=typeof Blob!=='undefined'?new Blob([bytes],{type:'image/gif'}):undefined;
+    return {bytes,blob,frameCount:1,width,height};
+  }
+  function teamSlug() {
+    const slug=String(team?.title??team?.id??'swarm').toLowerCase()
+      .replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,48);
+    return slug||'swarm';
+  }
+  async function exportGif() {
+    if (!team||exportingGif) return;
+    const btn=$('export-gif');
+    exportingGif=true;
+    btn.disabled=true;
+    notice('Exporting '+graphMode+' GIF…');
+    try {
+      const stage=$('graph-stage');
+      const events=timeline();
+      const exporter=globalThis.HiveGif?.exportGraphReplayGif??fallbackExportGraphReplayGif;
+      const result=await exporter({
+        mode:graphMode,
+        posts:events,
+        members:people(),
+        phase:team.phase??(team.paused?'paused':'working'),
+        pacing:$('pacing').value,
+        speed:Number($('speed').value),
+        hideInactive:$('hide-inactive').checked,
+        expandBroadcast:$('expand-all').checked,
+        focus:focusedNode,
+        theme:currentTheme(),
+        width:Math.max(480,stage.clientWidth||680),
+        height:Math.max(360,stage.clientHeight||460),
+        graph,
+        bees:globalThis.HiveBee,
+      });
+      const blob=result?.blob??(typeof Blob!=='undefined'&&result?.bytes?new Blob([result.bytes],{type:'image/gif'}):null);
+      const filename=teamSlug()+'-graph.gif';
+      if (blob&&typeof URL.createObjectURL==='function') {
+        const href=URL.createObjectURL(blob);
+        const link=node('a');
+        link.href=href;
+        link.download=filename;
+        link.style.display='none';
+        document.body?.append?.(link);
+        link.click?.();
+        link.remove?.();
+        setTimeout(()=>URL.revokeObjectURL?.(href),1500);
+      }
+      notice('Exported '+filename+' ('+(result?.frameCount??1)+' frames).');
+    } catch (error) {
+      notice(error?.message||'Could not export GIF.',true);
+    } finally {
+      exportingGif=false;
+      btn.disabled=false;
+    }
   }
 
   function selectTab(name,focus=false) {
@@ -1067,7 +1869,7 @@
       $('panel-'+tab).hidden=!selected||!team;
     }
     render();
-    $('tab-'+name).scrollIntoView?.({block:'nearest',inline:'nearest'});
+    $('tab-'+name).scrollIntoView?.({block:'nearest',inline:'nearest',container:'nearest'});
     if (focus) $('tab-'+name).focus();
   }
 
@@ -1186,12 +1988,25 @@
     $('theme').firstElementChild.textContent=theme==='dark'?'☀':'☾';
     scheduleGraph();
   }
+  const colorSchemeQuery=matchMedia('(prefers-color-scheme: dark)');
   function initialTheme() {
     try {
       const saved=localStorage.getItem('team-board-color');
       if (saved==='light'||saved==='dark') return saved;
     } catch {}
-    return matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';
+    return colorSchemeQuery.matches?'dark':'light';
+  }
+  function attachLightDismiss(dialog,closeFn) {
+    if (!dialog||typeof dialog.addEventListener!=='function') return;
+    if (globalThis.HTMLDialogElement && 'closedBy' in globalThis.HTMLDialogElement.prototype) return;
+    const outside=(event)=>{
+      const rect=dialog.getBoundingClientRect?.();
+      if (!rect) return false;
+      return event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom;
+    };
+    let pressedOutside=false;
+    dialog.addEventListener('pointerdown',event=>{pressedOutside=outside(event);});
+    dialog.addEventListener('pointerup',event=>{if (pressedOutside&&outside(event)) closeFn();});
   }
 
   $('brand-bee').append(HiveBee.sprite('coordinator',{coordinator:true}));
@@ -1201,10 +2016,9 @@
     try {localStorage.setItem('team-board-color',theme);} catch {}
   };
   setTheme(initialTheme());
-  const colorSchemeQuery=matchMedia('(prefers-color-scheme:light)');
   colorSchemeQuery.addEventListener?.('change',event=>{
     try {if (localStorage.getItem('team-board-color')) return;} catch {}
-    setTheme(event.matches?'light':'dark');
+    setTheme(event.matches?'dark':'light');
   });
   for (const [index,name] of tabs.entries()) {
     const tab=$('tab-'+name);
@@ -1257,6 +2071,12 @@
     finally {extendingBudget=false;button.disabled=false;$('extra-turns').disabled=false;}
   }
   $('extra-turns').onclick=event=>{if (event.isTrusted) return extendBudget($('extra-turns'));};
+  $('close-lightbox').onclick=closeLightbox;
+  $('screenshot-lightbox').oncancel=event=>{
+    event.preventDefault();
+    closeLightbox();
+  };
+  attachLightDismiss($('screenshot-lightbox'),closeLightbox);
   if (standalone) {
     $('close-transcript').onclick=closeTranscript;
     $('refresh-transcript').onclick=refreshTranscript;
@@ -1264,6 +2084,7 @@
       event.preventDefault();
       closeTranscript();
     };
+    attachLightDismiss($('member-transcript'),closeTranscript);
     const select=$('recent-teams');
     select.onfocus=loadRecentTeams;
     select.onchange=()=>{
@@ -1313,7 +2134,10 @@
     nextTick();
   };
   $('clear-node').onclick=()=>{focusedNode=null;scheduleGraph();};
+  $('graph-mode-hive').onclick=()=>setGraphMode('hive');
+  $('graph-mode-mentions').onclick=()=>setGraphMode('mentions');
   $('hide-inactive').onchange=$('expand-all').onchange=scheduleGraph;
+  $('export-gif').onclick=exportGif;
   const observer=new ResizeObserver(scheduleGraph);
   observer.observe($('graph-stage'));
   function refreshLanding() {
@@ -1356,7 +2180,7 @@
       }
     });
     rpc('ui/initialize',{
-      appInfo:{name:'Hive Swarm',version:globalThis.__HIVE_SWARM_VERSION__||'1.9.0'},appCapabilities:{},protocolVersion:'2026-01-26',
+      appInfo:{name:'Hive Swarm',version:globalThis.__HIVE_SWARM_VERSION__||'2.1.0'},appCapabilities:{},protocolVersion:'2026-01-26',
     }).then(()=>{
       parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');
       refresh();

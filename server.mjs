@@ -1,21 +1,22 @@
 import { spawn } from 'node:child_process';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { TeamBoard, boardWaitTimeout, childEnvironment, configuredEffort, pendingWaitFor, stallIssues, teamPhase, visibleChannels } from './engine.mjs';
+import { TeamBoard, boardWaitTimeout, childEnvironment, configuredEffort, pendingWaitFor, readSafeScreenshot, stallIssues, teamPhase, visibleChannels } from './engine.mjs';
 import { openWorktree, removeWorktree, worktreeSource } from './worktrees.mjs';
 
 const boardUri = 'ui://hive-swarm/board.html';
 const asset = name => readFileSync(new URL(name,import.meta.url),'utf8');
 const {version} = JSON.parse(asset('package.json'));
+const scripts = ['hive-graph.js','hive-bees.js',...(existsSync(new URL('hive-gif.js',import.meta.url))?['hive-gif.js']:[]),'board.js'];
 const html = asset('board.html').replace('<!-- hive-style -->', () => '<style>'+asset('board.css')+'</style>')
   .replace('<!-- hive-scripts -->', () => '<script>globalThis.__HIVE_SWARM_VERSION__='+JSON.stringify(version)+';</script>\n' +
-    ['hive-graph.js','hive-bees.js','board.js'].map(name => '<script>'+asset(name)+'</script>').join('\n'));
+    scripts.map(name => '<script>'+asset(name)+'</script>').join('\n'));
 const root = process.env.HIVE_SWARM_DATA || process.env.TEAM_BOARD_DATA || join(process.env.LOCALAPPDATA || homedir(), 'CodexTeamBoard');
 const port = Number(process.env.HIVE_SWARM_PORT || process.env.TEAM_BOARD_PORT || 17943);
 const origin = 'http://127.0.0.1:' + port;
@@ -26,7 +27,7 @@ const strings = {type:'array',items:string};
 const shape = (properties, required = []) => ({type: 'object', properties, required, additionalProperties: false});
 const teamId = {teamId: string};
 const memberForm = shape({
-  name: string, brief: string, group: string, model: string, effort: string,
+  name: string, brief: string, taskLabel: string, group: string, model: string, effort: string,
   fallbackModel: string, fallbackEffort: {type:['string','null']},
   fork: string,
   writable:boolean,worktree:boolean,waitFor:strings,channels:strings,
@@ -34,10 +35,11 @@ const memberForm = shape({
   tasks:{...strings,minItems:2,maxItems:8,description:'Shard this member into N copies (<name>-1..<name>-N), one per slice; omit for a single worker.'},
 }, ['name','brief']);
 const threadForm = shape({id:string,title:string,goal:string,members:strings}, ['id','title','goal']);
+const taskUpdateForm = shape({member:string,label:{type:['string','null']}},['member','label']);
 const tools = [
   {
-    name: 'start_team', title: 'Start a team', description: 'Start a user-requested team in a local workspace. Workers wait for their dependencies and mentions. Set writable only for members authorized to edit. Pass fork: "coordinator" on a member to inherit the current conversation. Optionally pass threads (outcome groups) and fallbackModel (quota failover).',
-    inputSchema: shape({title: string, cwd: string, task: string, model: string, effort: string,
+    name: 'start_team', title: 'Start a team', description: 'Start a user-requested team in a local workspace. Workers wait for their dependencies and mentions. Set writable only for members authorized to edit. Pass fork: "coordinator" on a member to inherit the current conversation. Optionally pass goalLine, member taskLabel, threads (outcome groups), and fallbackModel (quota failover).',
+    inputSchema: shape({title: string, goalLine: string, cwd: string, task: string, model: string, effort: string,
       fallbackModel: string, fallbackEffort: {type:['string','null']},
       threads: {type:'array',items:threadForm}, coordinator:boolean,
       concurrency: integer, turnLimit: integer, members: {type: 'array', items: memberForm}},
@@ -80,9 +82,9 @@ const tools = [
     inputSchema:shape({...teamId,title:string},['teamId','title']),
   },
   {
-    name:'set_team_plan',title:'Update outcome threads',
-    description:'Set or update outcome-grouped threads displayed in the Swarm Overview.',
-    inputSchema:shape({...teamId,threads:{type:'array',items:threadForm}},['teamId','threads']),
+    name:'set_team_plan',title:'Update team plan and outcome threads',
+    description:'Set or update optional team goalLine, member task labels, and outcome-grouped threads displayed in the Swarm Overview.',
+    inputSchema:shape({...teamId,goalLine:{type:['string','null']},tasks:{type:'array',items:taskUpdateForm},threads:{type:'array',items:threadForm}},['teamId']),
   },
   {
     name:'resolve_recovery',title:'Resolve an unconfirmed worker run',
@@ -219,16 +221,22 @@ function present(team, origin, activity, actor) {
   const events=visible?team.events.filter(event=>visible.includes(event.channel??'main')):team.events;
   return {
     id,title,cwd,task,model,effort,paused,turns,turnLimit,channels,activity,phase,
+    ...(team.goalLine?{goalLine:team.goalLine}:{}),
     ...(team.parentSessionId?{parentSessionId:team.parentSessionId}:{}),
     ...(team.fallbackModel?{fallbackModel:team.fallbackModel,...(team.fallbackEffort!==undefined?{fallbackEffort:team.fallbackEffort}:{})}:{}),
     ...(team.threads?.length?{threads:team.threads}:{}),
+    ...(team.screenshots?.length?{screenshots:team.screenshots.map(({id:shotId,seq,index,author,caption,time})=>({
+      id:shotId,seq,index,author,caption,time,
+      url:'/board/'+id+'/screenshot/'+seq+'/'+index,
+    }))}:{}),
     attention:phase==='stalled'?issues:phase==='budget'?
       [{kind:'budget',text:'Turn limit reached ('+turns+'/'+turnLimit+'). Add 8 turns to continue.'},...blockers]:blockers,
     ...panelLink(team, origin),
     members: team.members.map(member => {
-      const {name,role,group,brief,threadId,status,writable,waitFor,retireAfterTurn,worktree,workspace,addedBy,channels,lastTurn,fallbackModel,fallbackEffort,subagentName} = member;
+      const {name,role,group,brief,taskLabel,threadId,status,writable,waitFor,retireAfterTurn,worktree,workspace,addedBy,channels,lastTurn,fallbackModel,fallbackEffort,subagentName} = member;
       const executionMode = member.executionMode ?? (threadId ? 'session' : undefined);
       return {name,role,group,brief,threadId,status,writable,waitFor,retireAfterTurn,worktree,workspace,addedBy,channels,lastTurn,
+        ...(taskLabel?{taskLabel}:{}),
         ...(executionMode?{executionMode}:{}),
         ...(subagentName?{subagentName}:{}),
         ...(fallbackModel?{fallbackModel,...(fallbackEffort!==undefined?{fallbackEffort}:{})}:{}),
@@ -337,6 +345,7 @@ export async function service({dataDirectory = root, listenPort = port, runner} 
     try {
       const {pathname,searchParams} = new URL(req.url, origin);
       const isBoard = pathname.match(/^\/board\/([a-f0-9-]{36})$/);
+      const screenshot = pathname.match(/^\/board\/([a-f0-9-]{36})\/screenshot\/(\d+)\/(\d+)$/);
       const transcript = pathname.match(/^\/board\/([a-f0-9-]{36})\/member\/([a-z][a-z0-9_-]{0,29})\/transcript$/);
       const api = pathname.match(/^\/board\/([a-f0-9-]{36})\/(status|history|post|pause|resume|events|member-model|member-retire|worktree-remove|title|resolve-recovery)$/);
       if ((isBoard || pathname === '/swarm') && req.method === 'GET') {
@@ -345,9 +354,23 @@ export async function service({dataDirectory = root, listenPort = port, runner} 
           'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store',
           'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff',
           'X-Frame-Options': 'DENY',
-          'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'",
+          'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'none'",
         });
         return res.end(html);
+      }
+      if (screenshot && req.method==='GET') {
+        if (req.headers['sec-fetch-site']!=='same-origin') return send(res,403,{error:'Open Swarm to view board screenshots.'});
+        const [,id,rawSeq,rawIdx]=screenshot;
+        const file=readSafeScreenshot(board,dataDirectory,id,Number(rawSeq),Number(rawIdx));
+        if (!file) return send(res,404,{error:'Screenshot not found.'});
+        res.writeHead(200,{
+          'Content-Type':file.contentType,
+          'Cache-Control':'no-store',
+          'X-Content-Type-Options':'nosniff',
+          'Cross-Origin-Resource-Policy':'same-origin',
+          'Content-Length':String(file.body.byteLength),
+        });
+        return res.end(file.body);
       }
       if (pathname === '/swarm/teams' && req.method === 'GET') {
         if (req.headers['sec-fetch-site'] !== 'same-origin') return send(res, 403, {error:'Open Swarm to list its teams.'});
@@ -534,7 +557,15 @@ export async function service({dataDirectory = root, listenPort = port, runner} 
         case 'board_status': team = board.get(args.teamId); break;
         case 'post_message': team = board.post(args.teamId,args.text,args.channel); break;
         case 'set_team_title': team = board.setTeamTitle(args.teamId,args.title,actor); break;
-        case 'set_team_plan': team = board.setTeamPlan(args.teamId,args.threads,actor); break;
+        case 'set_team_plan': {
+          const plan=Array.isArray(args)?args:{
+            ...(Object.hasOwn(args,'goalLine')?{goalLine:args.goalLine}:{}),
+            ...(Object.hasOwn(args,'tasks')?{tasks:args.tasks}:{}),
+            ...(Object.hasOwn(args,'threads')?{threads:args.threads}:{}),
+          };
+          team = board.setTeamPlan(args.teamId,plan,actor);
+          break;
+        }
         case 'resolve_recovery': team = board.resolveRecovery(args.teamId,args.member,{action:args.action}); break;
         case 'pause_team': team = board.pause(args.teamId); break;
         case 'resume_team': team = board.resume(args.teamId, args.extraTurns); break;

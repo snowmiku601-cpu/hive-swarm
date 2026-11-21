@@ -89,6 +89,31 @@ export function registerRoutes({connection,application}) {
       },cancel(){abort.abort();}});
       return new Response(stream,{headers:{'content-type':'text/event-stream','cache-control':'no-store'}});
     });
+    route('/api/hive-swarm/v1/screenshot',['GET'],async request=>{
+      if(closed)throw Error('Hive Swarm is closed.');
+      const empty404=()=>new Response(null,{status:404,headers:{'cache-control':'no-store','x-content-type-options':'nosniff','cross-origin-resource-policy':'same-origin'}});
+      const params=new URL(request.url).searchParams;const raw={};
+      for(const [key,entry] of params){if(Object.hasOwn(raw,key))return empty404();raw[key]=entry;}
+      if(!Object.keys(raw).every(k=>k==='teamId'||k==='seq'||k==='index'))return empty404();
+      if(typeof raw.teamId!=='string'||!raw.teamId.trim()||raw.teamId.length>256||raw.teamId.includes('\0'))return empty404();
+      if(typeof raw.seq!=='string'||!/^\d+$/.test(raw.seq)||typeof raw.index!=='string'||!/^\d+$/.test(raw.index))return empty404();
+      const seq=Number(raw.seq),index=Number(raw.index);
+      if(!Number.isSafeInteger(seq)||seq<1||!Number.isSafeInteger(index)||index<0)return empty404();
+      const signal=AbortSignal.any([request.signal,lifetime.signal]);signal.throwIfAborted();
+      let file=null;
+      try{file=await application.screenshot?.({teamId:raw.teamId,seq,index},{signal});}
+      catch{file=null;}
+      if(!file?.body||!file?.contentType)return empty404();
+      return new Response(file.body,{
+        status:200,
+        headers:{
+          'content-type':file.contentType,
+          'cache-control':'no-store',
+          'x-content-type-options':'nosniff',
+          'cross-origin-resource-policy':'same-origin',
+        },
+      });
+    });
   } catch(error) {lifetime.abort();for(const dispose of disposers.reverse())void dispose();throw error;}
   return async()=>{if(closed)return;closed=true;lifetime.abort();for(const dispose of disposers.reverse())await dispose();};
 }

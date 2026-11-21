@@ -5,8 +5,8 @@
 
   <p>
     <a href="https://github.com/snowmiku601-cpu/hive-swarm/actions/workflows/ci.yml"><img src="https://github.com/snowmiku601-cpu/hive-swarm/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
-    <a href="https://www.npmjs.com/package/hive-swarm"><img src="https://img.shields.io/badge/npm-hive--swarm%402.0.0-f6bc55?style=flat-square" alt="npm hive-swarm 2.0.0" /></a>
-    <a href="https://www.npmjs.com/package/dsh-hive-swarm"><img src="https://img.shields.io/badge/DSH%20(next)-dsh--hive--swarm%402.0.0-9a7138?style=flat-square" alt="npm dsh-hive-swarm 2.0.0 next" /></a>
+    <a href="https://www.npmjs.com/package/hive-swarm"><img src="https://img.shields.io/badge/npm-hive--swarm%402.1.0-f6bc55?style=flat-square" alt="npm hive-swarm 2.1.0" /></a>
+    <a href="https://www.npmjs.com/package/dsh-hive-swarm"><img src="https://img.shields.io/badge/DSH%20(next)-dsh--hive--swarm%402.1.0-9a7138?style=flat-square" alt="npm dsh-hive-swarm 2.1.0 next" /></a>
     <img src="https://img.shields.io/badge/runtime-Node.js%2022.19%20%7C%2024.2%2B-75baef?style=flat-square" alt="Node.js 22.19 or 24.2 and newer" />
     <img src="https://img.shields.io/badge/core_runtime_dependencies-0-55cbb2?style=flat-square" alt="Zero core runtime dependencies" />
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-b3ce64?style=flat-square" alt="MIT license" /></a>
@@ -29,8 +29,8 @@ Hive Swarm is a lightweight **multi-agent coordination engine and UI** for AI co
 
 The coordination core (`engine.mjs`, `core.mjs`, `run-store.mjs`) is harness-agnostic:
 
-- **Codex Desktop & Codex CLI (`hive-swarm@2.0.0`, npm `latest`)** — full MCP server, attached child threads on Codex `0.171+` (`fork: "coordinator"`, graceful `0.169.1` fallback), strict model locks, inline MCP App, and standalone four-tab board UI.
-- **DeepSeek Harness Desktop `0.2.2-rc.5` (`dsh-hive-swarm@2.0.0`, npm `next`, experimental)** — hidden native DSH subagent workers (zero sidebar clutter), permission-scoped tools, bee-marked **Swarm** Start card, right-dock tab, and full React panel.
+- **Codex Desktop & Codex CLI (`hive-swarm@2.1.0`, npm `latest`)** — full MCP server, attached child threads on Codex `0.171+` (`fork: "coordinator"`, graceful `0.169.1` fallback), strict model locks, Antigravity-style inline MCP App, and standalone four-tab board UI with `Hive`/`Mentions` Graph and pure-JS GIF export.
+- **DeepSeek Harness Desktop `0.2.2-rc.5` (`dsh-hive-swarm@2.1.0`, npm `next`, experimental)** — hidden native DSH subagent workers (zero sidebar clutter), permission-scoped tools, bee-marked **Swarm** Start card, right-dock tab, and full React dashboard matching Antigravity Overview & Dual-Mode Graph.
 
 The core runtime uses **Node.js ESM**, built-in `node:sqlite`, and **zero third-party runtime dependencies**. Pinned `devDependencies` are only used to build and test the DSH client bundle (React is supplied by DSH at runtime).
 
@@ -40,8 +40,8 @@ Requires **Node.js `^22.19.0 || >=24.2.0`** and either **Codex Desktop / Codex C
 
 | Host | Published package | Status | Worker & UI model |
 | --- | --- | --- | --- |
-| **Codex Desktop / CLI** | `hive-swarm@2.0.0` (`latest`) | Production adapter; attached threads on `0.171+` & qualified on `0.169.1` | Attached/per-member Codex threads, inline MCP App & standalone 4-tab board |
-| **DeepSeek Harness `0.2.2-rc.5`** | `dsh-hive-swarm@2.0.0` (`next`) | Experimental; native subagent swarms & fail-closed tool sandboxing | Hidden native DSH subagents, Start card, right tab & full React panel |
+| **Codex Desktop / CLI** | `hive-swarm@2.1.0` (`latest`) | Production adapter; attached threads on `0.171+` & qualified on `0.169.1` | Attached/per-member Codex threads, inline MCP App & standalone 4-tab dashboard |
+| **DeepSeek Harness `0.2.2-rc.5`** | `dsh-hive-swarm@2.1.0` (`next`) | Experimental; native subagent swarms & fail-closed tool sandboxing | Hidden native DSH subagents, Start card, right tab & Antigravity-style React dashboard |
 
 ### 1. Codex Desktop / CLI (via npm — recommended)
 
@@ -77,7 +77,7 @@ After installing or updating, open a **new Codex Desktop chat** so the fresh MCP
 DSH manages plugins through its own profile manager. Close DSH Desktop, then run:
 
 ```sh
-dsh plugin --profile desktop add dsh-hive-swarm@2.0.0
+dsh plugin --profile desktop add dsh-hive-swarm@2.1.0
 ```
 
 - `npx hive-swarm@latest install --host dsh` prints this command and never edits a DSH profile directly.
@@ -171,10 +171,10 @@ Follow saved turns and live activity without opening or interrupting the worker'
 | Coordinate parallel & dependent work | Up to 12 active workers, `waitFor` dependencies, sharding (`n`/`tasks`), groups, channels, hidden native subagents (DSH) & attached child threads (Codex `0.171+`) |
 | Context inheritance (`fork: "coordinator"`) | Workers can branch directly from the coordinator chat on start or invitation, or fork from a teammate |
 | Direct peer collaboration | `@member`, `@group`, `@#channel`, and `@all` routing with normalized target matching |
-| Track outcomes, not just logs | Progress bars, milestones, coordinator summaries, `Subagent`/`Attached`/`Session` badges, `✓ Verified route:` journal pills, and optional outcome `threads` (`Blocked` → `Active` → `Queued` → `Done`) |
-| Understand a stalled or uncertain run | Zero-token `[stall]` root-cause diagnostics, ranked alerts with `#seq` links, and explicit `Retry fresh turn` / `Dismiss` recovery for unconfirmed runs |
-| Flexible model routing | Per-member `model` and `effort`, `allowProviderModelFallback: false` strict lock on Codex `0.171+`, runtime model switching with warm forks, and optional `fallbackModel` quota failover |
-| Visual flow & replay inspection | Exact rounded-rect box-clipped Bézier Graph geometry with center-obstacle avoidance, deconflicted mention pills, and light/dark WCAG AA themes |
+| Track outcomes, not just logs | Collapsible `X of Y tasks done` accordion, `goalLine`, smart `taskLabel`s, clickable bee pills, outcome `threads` progress bars, `Screenshots` timeline + lightbox, `The team` Coordinator badge, and `✓ Verified route:` journal pills |
+| Understand a stalled or uncertain run | Zero-token `[stall]` root-cause diagnostics, aligned `Needs you` alerts with `#seq` links, and explicit `Retry fresh turn` / `Dismiss` recovery for unconfirmed runs |
+| Flexible model routing | Per-member `model` and `effort`, `allowProviderModelFallback: false` strict lock on Codex `0.171+`, lazy catalog hydration, runtime model switching, and optional `fallbackModel` quota failover |
+| Visual flow & replay inspection | Dual-mode **Graph** (**`Hive`** honeycomb clusters + **`Mentions`** capsule pill ring with SDF arrow clipping), zero-dependency **Export GIF** (`hive-gif.js`), and light/dark WCAG AA themes |
 | Safe isolation & cleanup | Synchronous fail-closed `subagent/start` & preset sandboxing, read-only default workers, optional detached Git `worktree` per writable worker, and uncommitted-safe worktree removal |
 
 <details>
@@ -224,7 +224,7 @@ $hive-swarm:swarm Split this feature into two isolated worktree builders (@api a
 - `.agents/plugins/marketplace.json`, `.codex-plugin/plugin.json`, `.mcp.json` — Codex plugin metadata & portable MCP config
 - `engine.mjs`, `core.mjs`, `run-store.mjs`, `worktrees.mjs` — harness-agnostic scheduler, host application layer, durable run store, and Git worktree manager
 - `codex.mjs`, `server.mjs`, `cli.mjs`, `installer.mjs` — Codex `app-server` adapter, MCP/HTTP/SSE server, and npm lifecycle CLI
-- `board.html`, `board.css`, `board.js`, `hive-bees.js`, `hive-graph.js` — standalone & inline MCP App UI
+- `board.html`, `board.css`, `board.js`, `hive-bees.js`, `hive-gif.js`, `hive-graph.js` — standalone & inline MCP App UI, dual-mode Graph renderer & pure-JS GIF encoder
 - `skills/swarm/` — Codex `/swarm` skill and agent metadata
 - `packages/dsh-hive-swarm/` — native DeepSeek Harness plugin (`host.mjs`, `native.mjs`, `runner.mjs`, `routes.mjs`, `client/`, `skills/hive-swarm/`)
 - `scripts/` — verified core/DSH packagers (`pack-core.mjs`, `pack-dsh.mjs`) and DSH client builder (`build-dsh-client.mjs`)
@@ -256,7 +256,7 @@ The test suite uses mocked runners and makes **no paid API calls**. Opening view
 - **Windows sandbox process errors:** the installer and runtime strip inherited MSIX/session markers and set `features.prefer_mxc=false` on Windows so workers can run shell commands cleanly.
 - **Vitest `spawn EPERM` in Windows worker sandboxes:** pass `--configLoader native --pool threads` to avoid child-process pool restrictions.
 - **Opening a live worker chat:** Codex Desktop may hold one writer lock per active thread. Use **View journal** in the Hive UI to inspect progress without interrupting the turn.
-- **Windows DSH plugin CLI & newly published releases:** If `dsh` is not on your Windows `PATH`, invoke `<DSH_INSTALL>\resources\runtime\cli\bin\dsh.cmd` directly (e.g. `& 'D:\DSH\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add dsh-hive-swarm@2.0.0`). When upgrading within 24 hours of a new npm publish, DSH's `pnpm` supply-chain policy requires listing `dsh-hive-swarm@2.0.0` and `hive-swarm@2.0.0` under `minimumReleaseAgeExclude` in `<DSH_HOME>\profiles\desktop\pnpm-workspace.yaml`.
+- **Windows DSH plugin CLI & newly published releases:** If `dsh` is not on your Windows `PATH`, invoke `<DSH_INSTALL>\resources\runtime\cli\bin\dsh.cmd` directly (e.g. `& 'D:\DSH\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add dsh-hive-swarm@2.1.0`). When upgrading within 24 hours of a new npm publish, DSH's `pnpm` supply-chain policy requires listing `dsh-hive-swarm@2.1.0` and `hive-swarm@2.1.0` under `minimumReleaseAgeExclude` in `<DSH_HOME>\profiles\desktop\pnpm-workspace.yaml`.
 - **State locations & ports:**
   - **Codex:** SQLite WAL under `%LOCALAPPDATA%\CodexTeamBoard` (Windows) or `~/CodexTeamBoard` (macOS/Linux); override with `HIVE_SWARM_DATA` / `TEAM_BOARD_DATA`. Default loopback port: `17943` (`HIVE_SWARM_PORT` / `TEAM_BOARD_PORT`).
   - **DSH:** isolated under `<profileContext.dir>/.hive-swarm`.

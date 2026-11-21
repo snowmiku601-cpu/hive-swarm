@@ -35,9 +35,9 @@ test('RPC owner admission is independent of caller-supplied identity and reads d
   assert.equal(f.calls.at(-1).context.requestId,'x');
 });
 
-test('three exact Fetch routes bound JSON input and dispose without owning any listener',async t=>{
+test('exact Fetch routes bound JSON input and dispose without owning any listener',async t=>{
   const f=await fixture(t);
-  assert.deepEqual([...f.routes.keys()],['/api/hive-swarm/v1/snapshot','/api/hive-swarm/v1/command','/api/hive-swarm/v1/events']);
+  assert.deepEqual([...f.routes.keys()],['/api/hive-swarm/v1/snapshot','/api/hive-swarm/v1/command','/api/hive-swarm/v1/events','/api/hive-swarm/v1/screenshot']);
   const route=f.routes.get('/api/hive-swarm/v1/command');
   const request=body=>new Request('http://fixture/api/hive-swarm/v1/command',{method:'POST',headers:{'content-type':'application/json'},body});
   assert.equal((await route.fetch(request('{broken'))).status,400);
@@ -74,4 +74,87 @@ test('the GET event stream delivers every backlog page before advancing its reco
     assert.match(first,/\nid: 100\n/);assert.match(second,/\nid: 105\n/);assert.deepEqual(cursors.slice(0,2),[0,100]);
     assert.match(second,/"seq":101/);assert.match(second,/"seq":105/);
   }finally{abort.abort();await reader.cancel();}
+});
+
+test('GET /api/hive-swarm/v1/screenshot serves confined workspace/data images and returns 404 for traversal, symlinks, non-images, and oversized files',async t=>{
+  const {mkdirSync,mkdtempSync,realpathSync,rmSync,symlinkSync,writeFileSync}=await import('node:fs');
+  const {tmpdir}=await import('node:os');
+  const {join}=await import('node:path');
+  const {createSwarmApplication}=await import('../../core.mjs');
+  const {registerRoutes}=await import('./routes.mjs');
+
+  const root=mkdtempSync(join(tmpdir(),'hive-dsh-shots-'));
+  const dataDirectory=join(root,'data');
+  const repoDir=join(dataDirectory,'repo');
+  const outsideDir=join(root,'outside');
+  mkdirSync(join(repoDir,'shots'),{recursive:true});
+  mkdirSync(join(dataDirectory,'worktrees','wt'),{recursive:true});
+  mkdirSync(outsideDir,{recursive:true});
+
+  const png=Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]);
+  const jpg=Buffer.from([0xff,0xd8,0xff,0xe0]);
+  const webp=Buffer.from('RIFF\0\0\0\0WEBP');
+  writeFileSync(join(repoDir,'shots','ui.png'),png);
+  writeFileSync(join(repoDir,'shots','ui.jpg'),jpg);
+  writeFileSync(join(dataDirectory,'worktrees','wt','wt.webp'),webp);
+  writeFileSync(join(dataDirectory,'secret.png'),png);
+  writeFileSync(join(outsideDir,'secret.png'),png);
+  writeFileSync(join(repoDir,'shots','note.txt'),'plain text');
+  writeFileSync(join(repoDir,'shots','huge.png'),Buffer.alloc(10*1024*1024+1));
+  symlinkSync(outsideDir,join(repoDir,'shots','escape'),process.platform==='win32'?'junction':'dir');
+
+  const app=createSwarmApplication({
+    dataDirectory,host:'deepseek-harness',
+    runner:{listModels:async()=>[],run:async()=>new Promise(()=>{}),close:async()=>{}},
+    workspaceAllowed:async dir=>dir===realpathSync(repoDir),
+  });
+  const routes=new Map();
+  const dispose=registerRoutes({connection:{fetch:{register:r=>{routes.set(r.path,r);return async()=>routes.delete(r.path);}}},application:app});
+  t.after(async()=>{await dispose();await app.close();rmSync(root,{recursive:true,force:true});});
+
+  const team=await app.command('start_team',{cwd:repoDir,task:'Screenshot route',members:[{name:'ui',brief:'Render view'}]});
+  const posted=await app.command('post_message',{
+    teamId:team.id,
+    text:[
+      'Screenshot: shots/ui.png | Relative PNG',
+      'Screenshot: '+join(repoDir,'shots','ui.jpg')+' | Absolute JPG',
+      'Screenshot: '+join(dataDirectory,'worktrees','wt','wt.webp')+' | Worktree WEBP',
+      'Screenshot: ../secret.png | Traversal',
+      'Screenshot: '+join(outsideDir,'secret.png')+' | Outside root',
+      'Screenshot: shots/note.txt | Non-image',
+      'Screenshot: shots/escape/secret.png | Symlink escape',
+      'Screenshot: shots/huge.png | Over 10 MiB',
+    ].join('\n'),
+  });
+  const seq=posted.events.at(-1).seq;
+  assert.equal(posted.screenshots[0].url,'/api/hive-swarm/v1/screenshot?teamId='+encodeURIComponent(team.id)+'&seq='+seq+'&index=0');
+  assert.equal(Object.hasOwn(posted.screenshots[0],'path'),false);
+
+  const route=routes.get('/api/hive-swarm/v1/screenshot');
+  const getShot=query=>route.fetch(new Request('http://fixture/api/hive-swarm/v1/screenshot?'+query));
+
+  const res0=await getShot('teamId='+encodeURIComponent(team.id)+'&seq='+seq+'&index=0');
+  assert.equal(res0.status,200);
+  assert.equal(res0.headers.get('content-type'),'image/png');
+  assert.equal(res0.headers.get('cache-control'),'no-store');
+  assert.equal(res0.headers.get('x-content-type-options'),'nosniff');
+  assert.equal(res0.headers.get('cross-origin-resource-policy'),'same-origin');
+  assert.deepEqual(Buffer.from(await res0.arrayBuffer()),png);
+
+  const res1=await getShot('teamId='+encodeURIComponent(team.id)+'&seq='+seq+'&index=1');
+  assert.equal(res1.status,200);
+  assert.equal(res1.headers.get('content-type'),'image/jpeg');
+
+  const res2=await getShot('teamId='+encodeURIComponent(team.id)+'&seq='+seq+'&index=2');
+  assert.equal(res2.status,200);
+  assert.equal(res2.headers.get('content-type'),'image/webp');
+
+  for(const badIdx of [3,4,5,6,7,99]) {
+    const res=await getShot('teamId='+encodeURIComponent(team.id)+'&seq='+seq+'&index='+badIdx);
+    assert.equal(res.status,404,'index '+badIdx+' must 404');
+  }
+  assert.equal((await getShot('teamId=missing-team&seq=1&index=0')).status,404);
+  assert.equal((await getShot('teamId='+encodeURIComponent(team.id)+'&seq=abc&index=0')).status,404);
+  assert.equal((await getShot('teamId='+encodeURIComponent(team.id)+'&seq=1&index=0&extra=1')).status,404);
+  assert.equal((await getShot('teamId='+encodeURIComponent(team.id)+'&teamId='+encodeURIComponent(team.id)+'&seq=1&index=0')).status,404);
 });

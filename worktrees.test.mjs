@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
 import test from 'node:test';
 import * as worktrees from './worktrees.mjs';
-const {openWorktree,worktreeSource}=worktrees;
+const {openWorktree,samePath,within,worktreeSource}=worktrees;
+const execFileAsync = promisify(execFile);
 
 async function repoFixture(t) {
   const scratch = realpathSync(tmpdir());
@@ -80,4 +82,76 @@ test('cleanup prunes the checkout registration after its managed parent was remo
   rmSync(target,{recursive:true});
   await worktrees.removeWorktree(state,source,id,'missing',checkout);
   assert.ok(!git('worktree','list','--porcelain').toString().includes(id));
+});
+
+test('B2: Windows drive-letter and path case mismatches resolve cleanly across within, samePath, openWorktree and removeWorktree', async t => {
+  assert.equal(samePath('d:\\repo\\sub', 'D:\\Repo\\Sub', 'win32'), true);
+  assert.equal(samePath('d:\\repo\\sub', 'D:\\repo\\other', 'win32'), false);
+  assert.equal(within('d:\\repo', 'D:\\Repo\\package', 'win32'), true);
+  assert.equal(within('d:\\repo', 'D:\\repo-other\\package', 'win32'), false);
+
+  if (process.platform === 'win32') {
+    const {source,state,id,subdir}=await repoFixture(t);
+    const flipDrive = value => value.replace(/^[A-Za-z]:/, drive => drive === drive.toUpperCase() ? drive.toLowerCase() : drive.toUpperCase());
+    const lowerSource = await worktreeSource(flipDrive(subdir));
+    assert.equal(lowerSource.offset, 'package');
+    const checkout = await openWorktree(flipDrive(state), lowerSource, id, 'case-worker');
+    await worktrees.removeWorktree(flipDrive(state), lowerSource, id, 'case-worker', {
+      ...checkout,
+      path: flipDrive(checkout.path),
+    });
+    assert.equal(existsSync(checkout.path), false);
+  }
+});
+
+test('B3: concurrent openWorktree and removeWorktree serialize per repo and retry once on transient lock errors', async t => {
+  const {source,state,id}=await repoFixture(t);
+  let active = 0;
+  let maxActive = 0;
+  let transientInjected = false;
+  const serializedExec = async (cmd, args, opts) => {
+    if (args.includes('worktree') && (args.includes('add') || args.includes('remove'))) {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      try {
+        if (!transientInjected && args.includes('add')) {
+          transientInjected = true;
+          const err = Error('fatal: failed to read .git/worktrees/w/commondir: No error');
+          err.stderr = 'fatal: failed to read .git/worktrees/w/commondir: No error';
+          throw err;
+        }
+        return await execFileAsync(cmd, args, opts);
+      } finally {
+        active--;
+      }
+    }
+    return execFileAsync(cmd, args, opts);
+  };
+
+  const created = await Promise.all(['w1', 'w2', 'w3', 'w4'].map(name =>
+    openWorktree(state, source, id, name, {exec: serializedExec, retryDelayMs: 5})
+  ));
+  assert.equal(maxActive, 1, 'concurrent worktree operations on the same repo must serialize');
+  assert.equal(transientInjected, true);
+  assert.equal(created.length, 4);
+
+  // Also test EPERM / index.lock transient retry on removeWorktree.
+  let removeRetry = false;
+  await worktrees.removeWorktree(state, source, id, 'w1', created[0], {
+    retryDelayMs: 5,
+    exec: async (cmd, args, opts) => {
+      if (!removeRetry && args.includes('remove')) {
+        removeRetry = true;
+        throw Object.assign(Error('EPERM: index.lock'), {code: 'EPERM'});
+      }
+      return execFileAsync(cmd, args, opts);
+    },
+  });
+  assert.equal(removeRetry, true);
+
+  // Stress concurrent real add/remove without artificial mocks.
+  await Promise.all(created.slice(1).map((ws, idx) =>
+    worktrees.removeWorktree(state, source, id, 'w' + (idx + 2), ws)
+  ));
+  assert.ok(created.every(ws => !existsSync(ws.path)));
 });

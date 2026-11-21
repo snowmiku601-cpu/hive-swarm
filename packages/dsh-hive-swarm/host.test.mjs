@@ -37,7 +37,7 @@ test('default native storage belongs to the host-supplied profile and cannot gue
 });
 
 test('native Host activation registers routes and prefixed tools without creating sessions',async t=>{
-  const f=await fixture(t);assert.equal(f.routes.size,3);assert.equal(f.calls.length,0);
+  const f=await fixture(t);assert.equal(f.routes.size,4);assert.equal(f.calls.length,0);
   assert.equal(f.skills.get('hive-swarm')?.invocation.userInvocable,true);
   assert.match(f.skills.get('hive-swarm').content,/hive_swarm_start_team/);
   assert.doesNotMatch(f.skills.get('hive-swarm').content,/open_in_codex|codex:\/\//);
@@ -323,4 +323,65 @@ test('host executes native subagent activation end-to-end when ctx.subagents is 
   assert.equal(finalMember.status,'done');
   assert.equal(finalMember.executionMode,'subagent');
   assert.match(finalMember.subagentName,/^builder-/);
+});
+
+test('B2 & 2.1.0 strict schema: drive-letter case match, goalLine, taskLabel, and strict-mode tasks [{member,label}]',async t=>{
+  const {same}=await import('./host.mjs');
+  const existingPath=process.cwd();
+  const flipDrive=value=>value.replace(/^[A-Za-z]:/,d=>d===d.toUpperCase()?d.toLowerCase():d.toUpperCase());
+  if(process.platform==='win32') {
+    assert.equal(same(existingPath,flipDrive(existingPath),'win32'),true);
+  }
+
+  const f=await fixture(t);
+  const startTool=f.tools.get('hive_swarm_start_team').tool;
+  const planTool=f.tools.get('hive_swarm_set_team_plan').tool;
+  const addTool=f.tools.get('hive_swarm_add_member').tool;
+
+  // Strict schema verification for 2.1.0 fields
+  assert.deepEqual(startTool.parameters.properties.goalLine,{type:['string','null']});
+  assert.deepEqual(startTool.parameters.properties.members.items.properties.taskLabel.type,['string','null']);
+  assert.deepEqual(addTool.parameters.properties.member.properties.taskLabel.type,['string','null']);
+  assert.deepEqual(planTool.parameters.properties.goalLine,{type:['string','null']});
+  assert.equal(planTool.parameters.properties.tasks.items.additionalProperties,false);
+  assert.deepEqual(planTool.parameters.properties.tasks.items.required,['member','label']);
+  assert.equal(planTool.parameters.required,undefined);
+
+  const cwdInput=process.platform==='win32'?flipDrive(f.root):f.root;
+  const exec={signal:new AbortController().signal,agent:{id:'parent',current:true,session:{header:{cwd:cwdInput}}}};
+  const created=await startTool.execute({
+    cwd:f.root,task:'2.1.0 strict test',title:'Strict 2.1.0',goalLine:'Ship DSH 2.1.0 cleanly',
+    coordinator:false,model:'p/m',effort:'max',fallbackModel:null,fallbackEffort:null,
+    concurrency:2,turnLimit:12,threads:null,
+    members:[{
+      name:'builder',brief:'Build backend',taskLabel:'Backend fixes',group:null,model:'p/m',effort:'max',
+      fallbackModel:null,fallbackEffort:null,writable:true,worktree:false,waitFor:[],channels:[],n:null,tasks:null,fork:null,
+    }],
+  },exec);
+  assert.equal(created.goalLine,'Ship DSH 2.1.0 cleanly');
+  assert.equal(created.members[0].taskLabel,'Backend fixes');
+
+  // Strict-mode nulls preserve existing goalLine & taskLabel when updating only threads.
+  const threadsOnly=await planTool.execute({
+    teamId:created.id,goalLine:null,tasks:null,
+    threads:[{id:'core',title:'Core',goal:'Fix bugs',members:['builder']}],
+  },exec);
+  assert.equal(threadsOnly.goalLine,'Ship DSH 2.1.0 cleanly');
+  assert.equal(threadsOnly.members[0].taskLabel,'Backend fixes');
+  assert.equal(threadsOnly.threads.length,1);
+
+  // Update via strict-mode tasks array [{member, label}] and clear via label: null / goalLine: ''.
+  const renamedTasks=await planTool.execute({
+    teamId:created.id,goalLine:'Updated goal line',
+    tasks:[{member:'builder',label:'Updated task label'}],threads:null,
+  },exec);
+  assert.equal(renamedTasks.goalLine,'Updated goal line');
+  assert.equal(renamedTasks.members[0].taskLabel,'Updated task label');
+
+  const cleared=await planTool.execute({
+    teamId:created.id,goalLine:'',
+    tasks:[{member:'builder',label:null}],threads:null,
+  },exec);
+  assert.equal(Object.hasOwn(cleared,'goalLine'),false);
+  assert.equal(Object.hasOwn(cleared.members[0],'taskLabel'),false);
 });

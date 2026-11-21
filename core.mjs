@@ -1,7 +1,7 @@
 import {mkdirSync,realpathSync} from 'node:fs';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {TeamBoard,boardWaitTimeout,configuredEffort,pendingWaitFor,stallIssues,teamPhase,visibleChannels} from './engine.mjs';
+import {TeamBoard,boardWaitTimeout,configuredEffort,pendingWaitFor,readSafeScreenshot,stallIssues,teamPhase,visibleChannels} from './engine.mjs';
 import {openWorktree,removeWorktree,worktreeSource} from './worktrees.mjs';
 
 const reads=new Set(['list_teams','board_status','board_history','read_board','list_models','read_journal','open_swarm_panel','wait_for_board']);
@@ -29,17 +29,33 @@ export function presentTeam(team,{activity={},actor,host=team.host??'codex'}={})
   const selected=actor&&team.members.find(member=>member.name===actor);
   const visible=visibleChannels(selected);
   const events=visible?team.events.filter(event=>visible.includes(event.channel??'main')):team.events;
+  const phase=teamPhase(team);
+  const issues=stallIssues(team);
+  const blockers=issues.filter(issue=>['quota','failed','cycle'].includes(issue.kind)||
+    (issue.kind==='dependency'&&!team.members.some(member=>member.name===issue.member&&['working','queued'].includes(member.status))));
   const recovery=team.members.filter(m=>m.recoveryRequired).map(m=>({kind:'recovery',member:m.name,text:'@'+m.name+' outcome unconfirmed. Inspect the owned session before continuing.'}));
   const input=team.members.filter(m=>m.inputRequired).map(m=>({kind:'input',member:m.name,text:'@'+m.name+' needs your permission or input in its owned DSH session.'}));
+  const attention=[...input,...recovery,...(phase==='stalled'?issues:phase==='budget'
+    ?[{kind:'budget',text:'Turn limit reached ('+team.turns+'/'+team.turnLimit+'). Add 8 turns to continue.'},...blockers]
+    :blockers)];
+  const screenshots=team.screenshots?.length?team.screenshots.map(({id,seq,index,author,caption,time})=>({
+    id,seq,index,author,caption,time,
+    url:host==='codex'
+      ?'/board/'+team.id+'/screenshot/'+seq+'/'+index
+      :'/api/hive-swarm/v1/screenshot?teamId='+encodeURIComponent(team.id)+'&seq='+seq+'&index='+index,
+  })):undefined;
   return {id:team.id,host,title:team.title,cwd:team.cwd,task:team.task,model:team.model,effort:team.effort,
+    ...(team.goalLine?{goalLine:team.goalLine}:{}),
     ...(team.parentSessionId?{parentSessionId:team.parentSessionId}:{}),
     ...(team.fallbackModel?{fallbackModel:team.fallbackModel,...(team.fallbackEffort!==undefined?{fallbackEffort:team.fallbackEffort}:{})}:{}),
     ...(team.threads?.length?{threads:team.threads}:{}),
-    paused:team.paused,turns:team.turns,turnLimit:team.turnLimit,phase:teamPhase(team),channels:team.channels,activity,
-    attention:[...input,...recovery,...stallIssues(team)],events:events.slice(-60),
+    ...(screenshots?{screenshots}:{}),
+    paused:team.paused,turns:team.turns,turnLimit:team.turnLimit,phase,channels:team.channels,activity,
+    attention,events:events.slice(-60),
     members:team.members.map(member=>{
       const executionMode=member.executionMode??(member.threadId?'session':undefined);
       return {name:member.name,role:member.role,group:member.group,brief:member.brief,
+        ...(member.taskLabel?{taskLabel:member.taskLabel}:{}),
         status:member.status,writable:member.writable,threadId:member.threadId,
         ...(executionMode?{executionMode}:{}),
         ...(member.subagentName?{subagentName:member.subagentName}:{}),
@@ -131,7 +147,10 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
       case 'open_swarm_panel':return {teamId:team.id,title:team.title,host,navigation:{kind:'hive-swarm',teamId:team.id}};
       case 'board_history':return board.readHistory(id,{...args,actor:actor?.member});
       case 'read_board':return board.readPosts(id,{...args,actor:actor?.member});
-      case 'wait_for_board':return board.waitForBoard(id,args,context.signal);
+      case 'wait_for_board': {
+        const result=await board.waitForBoard(id,args,context.signal);
+        return {...result,status:view(result.status,actor?.member)};
+      }
       case 'post_message':return view(board.post(id,args.text,args.channel));
       case 'post_to_board':if(!actor)throw Error('An active worker identity is required.');return board.postFrom(id,actor.member,args.text,args.channel);
       case 'set_turn_outcome':
@@ -142,7 +161,14 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
       case 'resolve_recovery':return view(board.resolveRecovery(id,args.member,{action:args.action}));
       case 'retire_member':return view(board.retireMember(id,args.member,{actor:actor?.member}));
       case 'set_team_title':return view(board.setTeamTitle(id,args.title,actor?.member));
-      case 'set_team_plan':return view(board.setTeamPlan(id,args.threads,actor?.member));
+      case 'set_team_plan': {
+        const plan=Array.isArray(args)?args:{
+          ...(Object.hasOwn(args,'goalLine')?{goalLine:args.goalLine}:{}),
+          ...(Object.hasOwn(args,'tasks')?{tasks:args.tasks}:{}),
+          ...(Object.hasOwn(args,'threads')?{threads:args.threads}:{}),
+        };
+        return view(board.setTeamPlan(id,plan,actor?.member));
+      }
       case 'manage_channel':return board.manageChannel(id,args,actor?.member);
       case 'add_member': {
         const m=args.member;
@@ -220,6 +246,14 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
       timer=setTimeout(()=>finish(current('timeout')),duration);
     });
   }
+  async function screenshot({teamId,seq,index}={},context={}) {
+    ensureOpen();
+    const actor=actorOf(context.actor,{teamId});
+    const id=teamId??actor?.teamId;
+    if(!id)return null;
+    await ownTeam(id,context);
+    return readSafeScreenshot(board,dataDirectory,id,seq,index);
+  }
   function close() {
     if(closing)return closing;if(closed)return Promise.resolve({quiescent:true});
     closing=(async()=>{
@@ -231,5 +265,5 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
       return {quiescent};
     })();return closing;
   }
-  return {board,host,snapshot,command,subscribe,waitForUpdate,close};
+  return {board,host,snapshot,command,subscribe,waitForUpdate,screenshot,close};
 }
