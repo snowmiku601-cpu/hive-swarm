@@ -1,12 +1,13 @@
 import { execFile } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { lstat, mkdir } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import path, { isAbsolute, join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 
 const execute = promisify(execFile);
 const repoQueues = new Map();
+const pathOps = (platform = process.platform) => platform === 'win32' ? path.win32 : path.posix;
 
 function realPathSync(target) {
   return (realpathSync.native ?? realpathSync)(target);
@@ -17,20 +18,22 @@ function canonicalCase(target, platform = process.platform) {
 }
 
 export function samePath(left, right, platform = process.platform) {
-  return relative(canonicalCase(left, platform), canonicalCase(right, platform)) === '';
+  return pathOps(platform).relative(canonicalCase(left, platform), canonicalCase(right, platform)) === '';
 }
 
 export function within(root, target, platform = process.platform) {
-  const offset = relative(canonicalCase(root, platform), canonicalCase(target, platform));
-  return !isAbsolute(offset) && offset !== '..' && !offset.startsWith('..' + sep);
+  const ops = pathOps(platform);
+  const offset = ops.relative(canonicalCase(root, platform), canonicalCase(target, platform));
+  return !ops.isAbsolute(offset) && offset !== '..' && !offset.startsWith('..' + ops.sep);
 }
 
 function relativeOffset(root, target, platform = process.platform) {
-  if (platform !== 'win32') return relative(root, target);
-  const rel = relative(root.toLowerCase(), target.toLowerCase());
-  if (!rel || isAbsolute(rel) || rel === '..' || rel.startsWith('..' + sep)) return rel;
-  const cleanRoot = resolve(root);
-  const cleanTarget = resolve(target);
+  const ops = pathOps(platform);
+  if (platform !== 'win32') return ops.relative(root, target);
+  const rel = ops.relative(root.toLowerCase(), target.toLowerCase());
+  if (!rel || ops.isAbsolute(rel) || rel === '..' || rel.startsWith('..' + ops.sep)) return rel;
+  const cleanRoot = ops.resolve(root);
+  const cleanTarget = ops.resolve(target);
   if (cleanTarget.toLowerCase().startsWith(cleanRoot.toLowerCase())) {
     const rest = cleanTarget.slice(cleanRoot.length).replace(/^[\\/]+/, '');
     if (rest.toLowerCase() === rel.toLowerCase()) return rest;
