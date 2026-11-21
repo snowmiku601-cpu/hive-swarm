@@ -5,6 +5,8 @@ import beeSvg from 'hive:icon';
 import styles from './style.css';
 import {ownedSession} from './controller.mjs';
 
+const useSafeLayoutEffect=typeof document!=='undefined'?useLayoutEffect:useEffect;
+
 export const BEE_URL='data:image/svg+xml,'+encodeURIComponent(beeSvg);
 export function BeeIcon({size=22,className}) {
   return <img src={BEE_URL} width={size} height={size} className={className} alt="" aria-hidden="true" data-dsh-panel-entry="dsh-hive-swarm"/>;
@@ -12,7 +14,7 @@ export function BeeIcon({size=22,className}) {
 function Bee({name,status,coordinator=false}) {
   const ref=useRef(null);
   useEffect(()=>{const canvas=ref.current;if(!canvas)return;
-    const context=canvas.getContext('2d');if(context)context.drawImage(Bees.sprite(name,{status,coordinator}),0,0);
+    const context=canvas.getContext('2d');if(context){context.clearRect(0,0,canvas.width,canvas.height);context.drawImage(Bees.sprite(name,{status,coordinator}),0,0);}
   },[name,status,coordinator]);
   return <canvas ref={ref} width="20" height="18" aria-hidden="true" className="dsh-hive-bee"/>;
 }
@@ -20,7 +22,14 @@ const ignore=()=>{};
 const act=(controller,action,args)=>{void controller.command(action,args).catch(ignore);};
 const phaseLabels={working:'Working',waiting:'Waiting',done:'Done',paused:'Paused',budget:'Turn budget reached',
   stalled:'Needs you',quota:'Quota reached',retired:'Retired',failed:'Needs you',queued:'Queued',blocked:'Blocked',active:'Active'};
-function Status({value}) {return <span className="dsh-hive-status" data-status={value}>{phaseLabels[value]??value??'Ready'}</span>;}
+const executionModeLabels={subagent:'Subagent',attached:'Attached',session:'Session'};
+function Status({value}) {
+  return <span className="dsh-hive-status" data-status={value}><span className="dsh-hive-status-dot" aria-hidden="true"/>{phaseLabels[value]??value??'Ready'}</span>;
+}
+function ModeBadge({mode,subagentName}) {
+  if(!mode||!Object.hasOwn(executionModeLabels,mode))return null;
+  return <span className="dsh-hive-mode" data-mode={mode} title={subagentName?'Subagent: '+subagentName:undefined}>{executionModeLabels[mode]}</span>;
+}
 function Empty({title,children}) {return <section className="dsh-hive-empty"><h2>{title}</h2><p>{children}</p></section>;}
 function ErrorNotice({error,controller}) {return <div role="alert" className="dsh-hive-error">
   <p>{error.message}</p><p className="dsh-hive-secondary">{error.action?'The action may have reached the Host. Refresh to inspect the result, or retry the same request.':'Check the Host connection and workspace permission, then refresh.'}</p>
@@ -163,17 +172,30 @@ function Dialog({title,onClose,opener,closeOnBackdrop=false,children}) {
     {children}
   </dialog>;
 }
+function JournalStep({step}) {
+  const label=typeof step==='string'?step:String(step?.label??'');
+  const detail=typeof step==='object'&&step?.detail?String(step.detail):'';
+  const route=/^Verified route:\s*(.+)$/i.exec(label);
+  if (route||(typeof step==='object'&&step?.kind==='route')) {
+    const routeValue=route?route[1]:label;
+    return <li className="dsh-hive-route-item">
+      <span className="dsh-hive-route-badge"><span className="dsh-hive-route-check" aria-hidden="true">✓</span>Verified route: <code>{routeValue}</code></span>
+      {detail?<span className="dsh-hive-secondary"> — {detail}</span>:null}
+    </li>;
+  }
+  return <li>{label}{detail?' — '+detail:''}</li>;
+}
 function Journal({controller,journal,opener,onClose,onJumpPost}) {
   const jump=seq=>{onClose();onJumpPost(seq);};
   return <Dialog title="Journal" onClose={onClose} opener={opener} closeOnBackdrop>
-    <div className="dsh-hive-actions"><strong>@{journal.member}</strong><button type="button" disabled={journal.loading} onClick={()=>{void controller.openJournal(journal.member);}}>Refresh Journal</button></div>
+    <div className="dsh-hive-actions dsh-hive-journal-bar"><strong>@{journal.member}</strong><button type="button" disabled={journal.loading} onClick={()=>{void controller.openJournal(journal.member);}}>Refresh Journal</button></div>
     {journal.loading?<p role="status">Loading Journal…</p>:journal.error?<ErrorNotice error={journal.error} controller={{...controller,refresh:()=>controller.openJournal(journal.member)}}/>:
-      journal.turns.length?<ol className="dsh-hive-journal">{journal.turns.map((turn,index)=><li key={turn.turn??index}>
+      journal.turns.length?<ol className="dsh-hive-journal">{journal.turns.map((turn,index)=><li key={turn.turn??index} className="dsh-hive-journal-turn">
         <div className="dsh-hive-line"><h3>Turn {turn.turn??index+1}</h3><Status value={turn.status}/></div>
-        {turn.steps?.length?<ul>{turn.steps.map((step,i)=><li key={i}>{typeof step==='string'?step:step.label}{typeof step==='object'&&step.detail?' — '+step.detail:''}</li>)}</ul>:null}
+        {turn.steps?.length?<ul className="dsh-hive-journal-steps">{turn.steps.map((step,i)=><JournalStep key={i} step={step}/>)}</ul>:null}
         {turn.report?<RichText text={turn.report} onJumpPost={jump}/>:<p className="dsh-hive-secondary">No report saved for this turn.</p>}
       </li>)}</ol>:<p>No saved turns yet. Live work appears here after the Host records it.</p>}
-    {journal.live?.steps?.length?<section><h3>Current activity</h3><ul>{journal.live.steps.map((step,index)=><li key={index}>{typeof step==='string'?step:step.label}</li>)}</ul></section>:null}
+    {journal.live?.steps?.length?<section className="dsh-hive-live"><h3>Current activity</h3><ul>{journal.live.steps.map((step,index)=><li key={index}>{typeof step==='string'?step:step.label}</li>)}</ul></section>:null}
   </Dialog>;
 }
 
@@ -202,45 +224,45 @@ function Overview({state,controller,onJournal,onJumpPost,onMention}) {
   const milestones=useMemo(()=>events.filter(event=>['checkpoint','monitor'].includes(event.kind)||/\[done\]/i.test(event.text??'')).slice(-6).reverse(),[events]);
   const summary=useMemo(()=>events.findLast(event=>event.author==='coordinator'&&event.kind==='message'),[events]);
   return <div className="dsh-hive-overview">
-    <section>
+    <section className="dsh-hive-section">
       <h2>Goal and progress</h2>
       {longBrief?<details className="dsh-hive-details"><summary>Full brief</summary><RichText text={brief} onJumpPost={onJumpPost}/></details>:
         brief?<p className="dsh-hive-prose">{brief}</p>:null}
       <div className="dsh-hive-progress">
-        <label><span>Workers done</span><strong>{workersDone}/{workers.length}</strong><progress max={Math.max(workers.length,1)} value={workersDone}/></label>
-        <label><span>Turns used</span><strong>{team.turns}/{team.turnLimit}</strong><progress max={Math.max(team.turnLimit,1)} value={team.turns}/></label>
+        <label className="dsh-hive-stat-card"><span>Workers done</span><strong>{workersDone}/{workers.length}</strong><progress max={Math.max(workers.length,1)} value={workersDone}/></label>
+        <label className="dsh-hive-stat-card"><span>Turns used</span><strong>{team.turns}/{team.turnLimit}</strong><progress max={Math.max(team.turnLimit,1)} value={team.turns}/></label>
       </div>
       {summary?<div className="dsh-hive-summary">
         <div className="dsh-hive-line"><h3>Coordinator summary</h3><PostRef seq={summary.seq} onJumpPost={onJumpPost}/></div>
         <RichText text={summary.text} onJumpPost={onJumpPost}/>
       </div>:null}
     </section>
-    {team.attention?.length||needs.length?<section><h2>Needs you</h2><ul className="dsh-hive-attention">
+    {team.attention?.length||needs.length?<section className="dsh-hive-section"><h2>Needs you</h2><ul className="dsh-hive-attention">
       {(team.attention??[]).map((item,index)=>{
         const target=team.members.find(member=>member.name===item.member);
-        return <li key={'a-'+index}><p>{item.text??item.message??item.kind}</p>
+        return <li key={'a-'+index} className="dsh-hive-alert-card" data-kind={item.kind}><p>{item.text??item.message??item.kind}</p>
           <div className="dsh-hive-actions">
             {item.seq?<PostRef seq={item.seq} onJumpPost={onJumpPost}/>:null}
             {ownedSession(target)?<button type="button" onClick={event=>onJournal(item.member,event.currentTarget)}>Inspect @{item.member}</button>:null}
             {target?.recoveryRequired?<RecoveryButtons memberName={target.name} pending={state.pending||target.status==='working'} controller={controller}/>:null}
           </div></li>;
       })}
-      {needs.filter(member=>!team.attention?.some(item=>item.member===member.name)).map(member=><li key={member.name}>
+      {needs.filter(member=>!team.attention?.some(item=>item.member===member.name)).map(member=><li key={member.name} className="dsh-hive-alert-card" data-kind={member.recoveryRequired?'recovery':member.status}>
         <p>@{member.name}: {member.recoveryRequired?'Outcome unconfirmed. Inspect the owned session before continuing.':member.status==='quota'?'Model quota reached. Choose an available model before resuming.':'The last turn failed. Inspect the Journal for recovery details.'}</p>
         <div className="dsh-hive-actions">
           {ownedSession(member)?<button type="button" onClick={event=>onJournal(member.name,event.currentTarget)}>Inspect Journal</button>:null}
           {member.recoveryRequired?<RecoveryButtons memberName={member.name} pending={state.pending||member.status==='working'} controller={controller}/>:null}
         </div></li>)}
-    </ul></section>:<section><h2>Progress</h2><p>No blockers reported.</p></section>}
-    {threads.length?<section><h2>Threads</h2><ul className="dsh-hive-threads">{threads.map(({thread,state:ts})=><li key={thread.id} className="dsh-hive-thread">
+    </ul></section>:<section className="dsh-hive-section"><h2>Progress</h2><p className="dsh-hive-secondary">No blockers reported.</p></section>}
+    {threads.length?<section className="dsh-hive-section"><h2>Threads</h2><ul className="dsh-hive-threads">{threads.map(({thread,state:ts})=><li key={thread.id} className="dsh-hive-thread">
       <div className="dsh-hive-line"><strong>{thread.title}</strong><Status value={ts.key}/></div>
       {thread.goal?<p className="dsh-hive-secondary">{thread.goal}</p>:null}
-      {thread.members?.length?<p className="dsh-hive-secondary">{thread.members.map(name=>'@'+name).join(' · ')}</p>:null}
+      {thread.members?.length?<p className="dsh-hive-secondary dsh-hive-mono">{thread.members.map(name=>'@'+name).join(' · ')}</p>:null}
     </li>)}</ul></section>:null}
-    <section><h2>Member status</h2><ul className="dsh-hive-status-list">{team.members.map(member=>{
+    <section className="dsh-hive-section"><h2>Member status</h2><ul className="dsh-hive-status-list">{team.members.map(member=>{
       const latest=latestByAuthor.get(member.name);
       return <li key={member.name} className="dsh-hive-status-row">
-        <div className="dsh-hive-line"><strong>@{member.name}</strong><Status value={member.status}/></div>
+        <div className="dsh-hive-line"><strong>@{member.name}</strong><div className="dsh-hive-pill-group"><ModeBadge mode={member.executionMode} subagentName={member.subagentName}/><Status value={member.status}/></div></div>
         <p className="dsh-hive-secondary">{memberNow(member,team.activity?.[member.name],latest)}</p>
         <div className="dsh-hive-actions">
           {latest?<PostRef seq={latest.seq} onJumpPost={onJumpPost}/>:null}
@@ -249,23 +271,23 @@ function Overview({state,controller,onJournal,onJumpPost,onMention}) {
         </div>
       </li>;
     })}</ul></section>
-    {milestones.length?<section><h2>Milestones</h2><ul className="dsh-hive-milestones">{milestones.map(event=><li key={event.seq} className="dsh-hive-milestone">
+    {milestones.length?<section className="dsh-hive-section"><h2>Milestones</h2><ul className="dsh-hive-milestones">{milestones.map(event=><li key={event.seq} className="dsh-hive-milestone">
       <PostRef seq={event.seq} onJumpPost={onJumpPost}/><span>{compact(event.text,180)}</span>
     </li>)}</ul></section>:null}
-    <section><h2>Execution</h2><dl className="dsh-hive-facts">
+    <section className="dsh-hive-section"><h2>Execution</h2><dl className="dsh-hive-facts">
       <div><dt>Turns</dt><dd>{team.turns} of {team.turnLimit} used</dd></div>
       <div><dt>Members</dt><dd>{team.members.filter(member=>member.status!=='retired').length} active · {team.members.filter(member=>member.status==='working').length} working</dd></div>
       <div><dt>Model</dt><dd>{team.model??'Host default'}{team.effort?' · '+team.effort:''}</dd></div>
       {team.fallbackModel?<div><dt>Fallback</dt><dd>{team.fallbackModel}{team.fallbackEffort?' · '+team.fallbackEffort:''}</dd></div>:null}
       <div><dt>Workspace</dt><dd>{team.cwd}</dd></div>
     </dl>{team.phase==='budget'?<div className="dsh-hive-actions"><p>The turn budget is exhausted.</p><button type="button" disabled={state.pending} onClick={()=>act(controller,'resume_team',{extraTurns:8})}>Add 8 turns and resume</button></div>:null}</section>
-    <section><h2>Latest activity</h2>{events.length?<ol className="dsh-hive-feed">{events.slice(-4).map(event=><Post key={event.seq} event={event} onJumpPost={onJumpPost}/>)}</ol>:<p>The board has no posts yet.</p>}</section>
+    <section className="dsh-hive-section"><h2>Latest activity</h2>{events.length?<ol className="dsh-hive-feed">{events.slice(-4).map(event=><Post key={event.seq} event={event} onJumpPost={onJumpPost}/>)}</ol>:<p className="dsh-hive-secondary">The board has no posts yet.</p>}</section>
   </div>;
 }
-function Post({event,onJumpPost,focused=false}) {return <li className="dsh-hive-post" data-seq={event.seq} data-focused={focused?'true':undefined}>
-  <div className="dsh-hive-line"><strong>{event.author==='system'?'System':'@'+event.author}</strong>
-    {event.targets?.length?<span className="dsh-hive-mention">{'→ '+event.targets.map(name=>'@'+name).join(' ')}</span>:null}
-    <span className="dsh-hive-secondary">#{event.seq} · {event.channel??'main'}</span>
+function Post({event,onJumpPost,focused=false}) {return <li className="dsh-hive-post" data-seq={event.seq} data-kind={event.kind??'message'} data-focused={focused?'true':undefined}>
+  <div className="dsh-hive-line"><strong className="dsh-hive-author">{event.author==='system'?'System':'@'+event.author}</strong>
+    {event.targets?.length?<span className="dsh-hive-targets">{'→ '+event.targets.map(name=>'@'+name).join(' ')}</span>:null}
+    <span className="dsh-hive-secondary dsh-hive-mono">#{event.seq} · {event.channel??'main'}</span>
     {event.time?<time dateTime={event.time}>{new Date(event.time).toLocaleString()}</time>:null}</div>
   <RichText text={event.text} onJumpPost={onJumpPost}/>
 </li>;}
@@ -309,17 +331,19 @@ function Board({state,controller,focusedSeq,onClearFocus,mentionRequest,onConsum
         return <li key={member.name}><strong>@{member.name}</strong><span>{step?step.label+(step.detail?' · '+step.detail:''):'Working…'}</span></li>;
       })}</ul>
     </section>:null}
-    <div className="dsh-hive-filters"><label>Search board<input type="search" value={query} onChange={event=>setQuery(event.target.value)}/></label>
-      <label>Channel<select value={channel} onChange={event=>setChannel(event.target.value)}><option value="*">All channels</option>{state.team.channels.filter(item=>!item.archived).map(item=><option key={item.name}>{item.name}</option>)}</select></label>
-      <label>Author<select value={author} onChange={event=>setAuthor(event.target.value)}><option value="*">Everyone</option><option value="coordinator">Coordinator</option>{state.team.members.map(member=><option key={member.name}>{member.name}</option>)}</select></label>
-      <button type="button" aria-pressed={following} onClick={()=>setFollowing(value=>!value)}>Follow</button></div>
-    <div className="dsh-hive-actions"><button type="button" disabled={state.historyLoading} onClick={()=>{void controller.loadHistory({reset:true});}}>Load earlier history</button>
-      {state.hasMoreHistory?<button type="button" disabled={state.historyLoading} onClick={()=>{void controller.loadHistory();}}>Load next history page</button>:null}
-      {state.historyLoading?<span role="status">Loading history…</span>:null}</div>
-    {matching.length?<ol ref={feedRef} className="dsh-hive-feed" aria-label="Board posts">{matching.map(event=><Post key={event.seq} event={event} onJumpPost={onJumpPost} focused={focusedSeq===event.seq}/>)}</ol>:<p role="status">No posts match these filters.</p>}
+    <div className="dsh-hive-toolbar">
+      <div className="dsh-hive-filters"><label>Search board<input type="search" value={query} onChange={event=>setQuery(event.target.value)}/></label>
+        <label>Channel<select value={channel} onChange={event=>setChannel(event.target.value)}><option value="*">All channels</option>{state.team.channels.filter(item=>!item.archived).map(item=><option key={item.name}>{item.name}</option>)}</select></label>
+        <label>Author<select value={author} onChange={event=>setAuthor(event.target.value)}><option value="*">Everyone</option><option value="coordinator">Coordinator</option>{state.team.members.map(member=><option key={member.name}>{member.name}</option>)}</select></label>
+        <button type="button" aria-pressed={following} onClick={()=>setFollowing(value=>!value)}>Follow</button></div>
+      <div className="dsh-hive-actions"><button type="button" disabled={state.historyLoading} onClick={()=>{void controller.loadHistory({reset:true});}}>Load earlier history</button>
+        {state.hasMoreHistory?<button type="button" disabled={state.historyLoading} onClick={()=>{void controller.loadHistory();}}>Load next history page</button>:null}
+        {state.historyLoading?<span role="status" className="dsh-hive-secondary">Loading history…</span>:null}</div>
+    </div>
+    {matching.length?<ol ref={feedRef} className="dsh-hive-feed" aria-label="Board posts">{matching.map(event=><Post key={event.seq} event={event} onJumpPost={onJumpPost} focused={focusedSeq===event.seq}/>)}</ol>:<p role="status" className="dsh-hive-secondary">No posts match these filters.</p>}
     <form className="dsh-hive-compose" onSubmit={submit}><label>Post to the board<textarea ref={composeRef} required rows="3" maxLength="6000" value={text} onChange={event=>setText(event.target.value)} placeholder="Share direction or unblock a member…"/></label>
       <div className="dsh-hive-actions"><label>Post channel<select value={postChannel} onChange={event=>setPostChannel(event.target.value)}>{state.team.channels.filter(item=>!item.archived).map(item=><option key={item.name}>{item.name}</option>)}</select></label>
-        <button type="submit" disabled={state.pending||!text.trim()}>Post message</button></div>
+        <button type="submit" className="dsh-hive-primary" disabled={state.pending||!text.trim()}>Post message</button></div>
     </form>
   </div>;
 }
@@ -354,7 +378,7 @@ function MemberEditor({state,controller,member,opener,onClose}) {
       {mayResume?<label className="dsh-hive-check"><input type="checkbox" checked={resume} onChange={event=>setResume(event.target.checked)}/>Resume now</label>:null}
       {state.error?<p role="alert">{state.error.message}</p>:null}
       <div className="dsh-hive-actions"><button type="button" disabled={state.modelsLoading} onClick={()=>{void controller.loadModels();}}>Reload models</button>
-        <button type="submit" disabled={state.pending||!validModel||!validEffort||(member&&!model)||(!member&&(!name||!brief.trim()))}>{state.pending?'Saving…':member?'Apply model':'Add member'}</button></div>
+        <button type="submit" className="dsh-hive-primary" disabled={state.pending||!validModel||!validEffort||(member&&!model)||(!member&&(!name||!brief.trim()))}>{state.pending?'Saving…':member?'Apply model':'Add member'}</button></div>
     </form>
   </Dialog>;
 }
@@ -362,16 +386,18 @@ function MemberWorkspace({workspace}) {
   const path=[workspace?.cwd,workspace?.path,workspace].find(value=>typeof value==='string'&&value.trim());
   return path?<div><dt>Workspace</dt><dd>{path}</dd></div>:null;
 }
-function Members({state,controller,onJournal,onMention}) {
+function Members({state,controller,onJournal,onOpenSession,onMention}) {
   const [filter,setFilter]=useState(''),[editor,setEditor]=useState(null),[retire,setRetire]=useState(null);
   const members=state.team.members.filter(member=>member.name.toLowerCase().includes(filter.toLowerCase()));
-  return <div className="dsh-hive-members-view"><div className="dsh-hive-actions"><label>Find a member<input type="search" value={filter} onChange={event=>setFilter(event.target.value)}/></label>
+  return <div className="dsh-hive-members-view"><div className="dsh-hive-actions dsh-hive-member-bar"><label>Find a member<input type="search" value={filter} onChange={event=>setFilter(event.target.value)}/></label>
     <button type="button" disabled={state.pending} onClick={event=>setEditor({member:null,opener:event.currentTarget})}>Add member</button></div>
     {members.length?<ul className="dsh-hive-members">{members.map(member=>{
       const brief=member.brief?.trim()??'';
       const longBrief=brief.length>220||/\n/.test(brief);
-      return <li key={member.name} className="dsh-hive-member">
-      <div className="dsh-hive-line"><Bee name={member.name} status={member.status}/><h2>@{member.name}</h2><Status value={member.status}/></div>
+      const isCoordinator=member.role==='coordinator'||member.name==='coordinator';
+      return <li key={member.name} className="dsh-hive-member" data-role={isCoordinator?'coordinator':'worker'} data-status={member.status}>
+      <div className="dsh-hive-line dsh-hive-member-head"><Bee name={member.name} status={member.status} coordinator={isCoordinator}/><h2>@{member.name}</h2>
+        <div className="dsh-hive-pill-group"><ModeBadge mode={member.executionMode} subagentName={member.subagentName}/><Status value={member.status}/></div></div>
       {longBrief?<><p className="dsh-hive-prose">{compact(brief,200)}</p><details className="dsh-hive-details"><summary>Full brief</summary><p className="dsh-hive-prose">{brief}</p></details></>:
         <p className="dsh-hive-prose">{member.brief}</p>}
       <dl className="dsh-hive-facts"><div><dt>Model</dt><dd>{member.model}{member.effort?' · '+member.effort:''}</dd></div>
@@ -381,16 +407,16 @@ function Members({state,controller,onJournal,onMention}) {
         {member.group?<div><dt>Group</dt><dd>@{member.group}</dd></div>:null}
         {member.channels?.length?<div><dt>Channels</dt><dd>{member.channels.map(ch=>'#'+ch).join(', ')}</dd></div>:null}
         {member.pendingWaitFor?.length?<div><dt>Waiting for</dt><dd>{member.pendingWaitFor.map(name=>'@'+name).join(', ')}</dd></div>:null}</dl>
-      {member.recoveryRequired?<p role="status">Outcome unconfirmed. Inspect the owned session before continuing.</p>:null}
+      {member.recoveryRequired?<p role="status" className="dsh-hive-recovery-note">Outcome unconfirmed. Inspect the owned session before continuing.</p>:null}
       {state.team.activity?.[member.name]?.steps?.length?<p className="dsh-hive-secondary">{state.team.activity[member.name].steps.at(-1).label}</p>:null}
       <div className="dsh-hive-actions"><button type="button" aria-label={'Journal for '+member.name} disabled={!ownedSession(member)} onClick={event=>onJournal(member.name,event.currentTarget)}>Journal</button>
-        <button type="button" aria-label={'Open session for @'+member.name} disabled={!ownedSession(member)} onClick={()=>controller.openSession(member.name)}>Open session</button>
+        <button type="button" aria-label={'Open session for @'+member.name} disabled={!ownedSession(member)} onClick={event=>onOpenSession(member.name,event.currentTarget)}>Open session</button>
         {member.status!=='retired'&&!member.retireAfterTurn?<button type="button" aria-label={'@mention @'+member.name+' on board'} onClick={()=>onMention(member.name)}>@mention</button>:null}
         <button type="button" aria-label={'Change model for @'+member.name} disabled={state.pending||member.status==='working'||member.status==='retired'} onClick={event=>setEditor({member,opener:event.currentTarget})}>Change model</button>
         <button type="button" aria-label={'Retire @'+member.name} disabled={state.pending||member.status==='retired'||member.retireAfterTurn} onClick={event=>setRetire({member,opener:event.currentTarget})}>{member.retireAfterTurn?'Retiring after turn':'Retire'}</button>
         {member.recoveryRequired?<RecoveryButtons memberName={member.name} pending={state.pending||member.status==='working'} controller={controller}/>:null}
         {member.workspace&&(member.status==='retired'||state.team.phase==='done')?<button type="button" disabled={state.pending} aria-label={'Clean worktree for @'+member.name} onClick={()=>act(controller,'remove_worktree',{member:member.name})}>Clean worktree</button>:null}</div>
-    </li>;})}</ul>:<p>No members match your search.</p>}
+    </li>;})}</ul>:<p className="dsh-hive-secondary">No members match your search.</p>}
     {editor?<MemberEditor key={editor.member?.name??'new'} {...editor} state={state} controller={controller} onClose={()=>setEditor(null)}/>:null}
     {retire?<Dialog title={'Retire '+retire.member.name+'?'} opener={retire.opener} onClose={()=>setRetire(null)}>
       <p>This member will receive no further turns. Its Journal and session remain available.</p>
@@ -400,10 +426,17 @@ function Members({state,controller,onJournal,onMention}) {
   </div>;
 }
 
+function chevronPoints(end,angle) {
+  const cos=Math.cos(angle),sin=Math.sin(angle);
+  const pt=(lx,ly)=>(end.x+lx*cos-ly*sin).toFixed(1)+','+(end.y+lx*sin+ly*cos).toFixed(1);
+  return pt(1,0)+' '+pt(-8,-3.8)+' '+pt(-6.1,0)+' '+pt(-8,3.8);
+}
+
 function FlowGraph({state,controller,onJournal,onJumpPost}) {
   const [replay,setReplay]=useState(null),[playing,setPlaying]=useState(false),[pacing,setPacing]=useState('even'),[speed,setSpeed]=useState(1);
   const [hideInactive,setHideInactive]=useState(false),[expandBroadcast,setExpandBroadcast]=useState(false),[focus,setFocus]=useState(null);
-  const ref=useRef(null),[width,setWidth]=useState(360),arrow=useId().replaceAll(':','');
+  const [hoveredEdge,setHoveredEdge]=useState(null),[measuredBoxes,setMeasuredBoxes]=useState(null);
+  const ref=useRef(null),nodeRefs=useRef(new Map()),[width,setWidth]=useState(360),arrow=useId().replaceAll(':','');
   useEffect(()=>{const node=ref.current;if(!node||typeof ResizeObserver==='undefined')return;
     const observer=new ResizeObserver(entries=>setWidth(Math.max(280,entries[0].contentRect.width)));observer.observe(node);return()=>observer.disconnect();},[]);
   const posts=useMemo(()=>state.history.filter(Graph.isPost),[state.history]);
@@ -426,48 +459,116 @@ function FlowGraph({state,controller,onJournal,onJumpPost}) {
     setPlaying(true);
   };
   const projection=useMemo(()=>Graph.project(posts,state.team.members,cursor,{hideInactive,expandBroadcast}),[posts,state.team.members,cursor,hideInactive,expandBroadcast]);
-  const height=Math.max(380,Graph.minimumHeight(projection.nodes.length,width));
+  const height=Math.max(400,Graph.minimumHeight(projection.nodes.length,width));
+  const narrow=width<440;
+  const cardWidth=narrow?94:112;
   const points=useMemo(()=>Graph.layout(projection.nodes,width,height),[projection,width,height]);
+  useSafeLayoutEffect(()=>{
+    const next=new Map();
+    let changed=false;
+    for (const node of projection.nodes) {
+      const el=nodeRefs.current.get(node.name);
+      if (el&&el.offsetWidth>0&&el.offsetHeight>0) {
+        const box={halfW:el.offsetWidth/2,halfH:el.offsetHeight/2,offsetX:0,offsetY:0,radius:10};
+        next.set(node.name,box);
+        const prev=measuredBoxes?.get(node.name);
+        if (!prev||Math.abs(prev.halfW-box.halfW)>0.5||Math.abs(prev.halfH-box.halfH)>0.5) changed=true;
+      }
+    }
+    if (next.size&&(changed||!measuredBoxes||measuredBoxes.size!==next.size)) setMeasuredBoxes(next);
+  },[projection.nodes,width,cardWidth,narrow]);
+  const routed=useMemo(()=>Graph.routeEdges(projection,points,{
+    variant:'card',boxes:measuredBoxes,cardWidth,narrow,marginStart:6,marginEnd:7,obstacleMargin:14,
+  }),[projection,points,measuredBoxes,cardWidth,narrow]);
   const elapsed=Graph.elapsedSpan(posts.slice(0,index),{live:replay===null&&['working','queued'].includes(state.team.phase)});
-  return <div className="dsh-hive-graph-view"><div className="dsh-hive-filters">
-    <label className="dsh-hive-check"><input type="checkbox" checked={hideInactive} onChange={event=>setHideInactive(event.target.checked)}/>Hide inactive</label>
-    <label className="dsh-hive-check"><input type="checkbox" checked={expandBroadcast} onChange={event=>setExpandBroadcast(event.target.checked)}/>Expand broadcasts</label>
-    <label>Pacing<select value={pacing} onChange={event=>setPacing(event.target.value)}><option value="even">Even</option><option value="real">Real-time</option></select></label>
-    <label>Speed<select value={speed} onChange={event=>setSpeed(Number(event.target.value))}><option value="0.5">0.5×</option><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select></label>
-    <button type="button" disabled={state.historyLoading} onClick={()=>{void controller.loadHistory({reset:true});}}>Load full history</button>
-    {state.hasMoreHistory?<button type="button" disabled={state.historyLoading} onClick={()=>{void controller.loadHistory();}}>Load next history page</button>:null}</div>
-    <div className="dsh-hive-replay">
-      <div className="dsh-hive-actions">
-        <button type="button" aria-label="First post" disabled={!posts.length||index===1} onClick={()=>setPosition(1)}>|‹</button>
-        <button type="button" aria-label="Previous post" disabled={index===0} onClick={()=>setPosition(Math.max(0,index-1))}>‹</button>
-        <button type="button" aria-label={playing?'Pause replay':'Replay'} disabled={!posts.length} onClick={togglePlay}>{playing?'Ⅱ':'▶'}</button>
-        <button type="button" aria-label="Next post" disabled={index>=posts.length} onClick={()=>setPosition(index+1)}>›</button>
+  const hoveredPair=hoveredEdge?hoveredEdge.split('>'):null;
+  const connectedNodes=useMemo(()=>{
+    if (hoveredPair) return new Set(hoveredPair);
+    if (!focus) return null;
+    const set=new Set([focus]);
+    for (const link of projection.links) {
+      if (link.from===focus) set.add(link.to);
+      if (link.to===focus) set.add(link.from);
+    }
+    return set;
+  },[focus,hoveredEdge,projection.links]);
+  return <div className="dsh-hive-graph-view">
+    <div className="dsh-hive-graph-controls">
+      <div className="dsh-hive-filters dsh-hive-graph-filters">
+        <div className="dsh-hive-graph-toggles">
+          <label className="dsh-hive-check"><input type="checkbox" checked={hideInactive} onChange={event=>setHideInactive(event.target.checked)}/>Hide inactive</label>
+          <label className="dsh-hive-check"><input type="checkbox" checked={expandBroadcast} onChange={event=>setExpandBroadcast(event.target.checked)}/>Expand broadcasts</label>
+        </div>
+        <label>Pacing<select value={pacing} onChange={event=>setPacing(event.target.value)}><option value="even">Even</option><option value="real">Real-time</option></select></label>
+        <label>Speed<select value={speed} onChange={event=>setSpeed(Number(event.target.value))}><option value="0.5">0.5×</option><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select></label>
+        <button type="button" disabled={state.historyLoading} onClick={()=>{void controller.loadHistory({reset:true});}}>Load full history</button>
+        {state.hasMoreHistory?<button type="button" disabled={state.historyLoading} onClick={()=>{void controller.loadHistory();}}>Load next history page</button>:null}
       </div>
-      <label>Replay ({index}/{posts.length} · {elapsed})<input aria-label="Replay through post" type="range" min="0" max={posts.length} value={index} onChange={event=>setPosition(Number(event.target.value))}/></label>
-      <button type="button" aria-pressed={replay===null} onClick={()=>{setPlaying(false);setReplay(null);}}>Live</button></div>
-    <div ref={ref} className="dsh-hive-graph" style={{height}} role="group" aria-label="Message flow graph">
-      <svg width="100%" height={height} viewBox={'0 0 '+width+' '+height} aria-hidden="true"><defs><marker id={arrow} markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M1 1.5L9 5L1 8.5Z" fill="currentColor"/></marker></defs>
-        {projection.links.map(link=>{const a=points.get(link.from),b=points.get(link.to);if(!a||!b)return null;
-          const dx=b.x-a.x,dy=b.y-a.y,distance=Math.hypot(dx,dy);if(distance<16)return null;
-          const ux=dx/distance,uy=dy/distance,padStart=Math.min(48,distance*0.34),padEnd=Math.min(54,distance*0.4);
-          const sx=a.x+ux*padStart,sy=a.y+uy*padStart,ex=b.x-ux*padEnd,ey=b.y-uy*padEnd;
-          const seg=Math.hypot(ex-sx,ey-sy);if(seg<6)return null;
-          const bend=Math.min(24,seg*0.16),cx=(sx+ex)/2-uy*bend,cy=(sy+ey)/2+ux*bend;
-          return <path key={link.from+'>'+link.to} data-hive-edge={link.from+'>'+link.to} d={'M'+sx.toFixed(1)+' '+sy.toFixed(1)+' Q'+cx.toFixed(1)+' '+cy.toFixed(1)+' '+ex.toFixed(1)+' '+ey.toFixed(1)}
-            className="dsh-hive-edge" strokeWidth={Math.min(4,1+Math.sqrt(link.count))} strokeDasharray={link.direct?undefined:'5 5'}
-            opacity={!focus||focus===link.from||focus===link.to?1:.2} markerEnd={'url(#'+arrow+')'}/>;})}
-      </svg>
-      {projection.nodes.map(node=>{const point=points.get(node.name);const unmentioned=Graph.unmentionedNode(node);return <button key={node.name} type="button" className="dsh-hive-graph-node"
-        data-unmentioned={unmentioned?'true':undefined} style={{left:point.x/width*100+'%',top:point.y}} aria-pressed={focus===node.name} onClick={()=>setFocus(focus===node.name?null:node.name)}>
-        <Bee name={node.name} status={node.status} coordinator={node.name==='coordinator'}/><strong>{node.name}</strong><span>{node.posts??0} posts</span>
-      </button>;})}
+      <div className="dsh-hive-replay">
+        <div className="dsh-hive-actions dsh-hive-transport">
+          <button type="button" aria-label="First post" disabled={!posts.length||index===1} onClick={()=>setPosition(1)}>|‹</button>
+          <button type="button" aria-label="Previous post" disabled={index===0} onClick={()=>setPosition(Math.max(0,index-1))}>‹</button>
+          <button type="button" aria-label={playing?'Pause replay':'Replay'} disabled={!posts.length} onClick={togglePlay}>{playing?'Ⅱ':'▶'}</button>
+          <button type="button" aria-label="Next post" disabled={index>=posts.length} onClick={()=>setPosition(index+1)}>›</button>
+        </div>
+        <label>Replay ({index}/{posts.length} · {elapsed})<input aria-label="Replay through post" type="range" min="0" max={posts.length} value={index} onChange={event=>setPosition(Number(event.target.value))}/></label>
+        <button type="button" aria-pressed={replay===null} onClick={()=>{setPlaying(false);setReplay(null);}}>Live</button>
+      </div>
     </div>
-    <p className="dsh-hive-secondary">Directed mentions in loaded board history. {projection.broadcasts} broadcasts. Dashed lines show expanded broadcasts; dashed node rings posted without @mentions.</p>
+    <div ref={ref} className="dsh-hive-graph" style={{height}} role="group" aria-label="Message flow graph">
+      <svg width="100%" height={height} viewBox={'0 0 '+width+' '+height} aria-hidden="true">
+        <defs>
+          <marker id={arrow} markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto">
+            <path d="M0.5 1.2L9.5 5L0.5 8.8L2.4 5Z" fill="currentColor"/>
+          </marker>
+        </defs>
+        {routed.map(({link,edge})=>{
+          const key=link.from+'>'+link.to;
+          const isPulse=Boolean(current&&link.lastSeq===current.seq);
+          const isHovered=hoveredEdge===key;
+          const related=hoveredEdge?isHovered:(!focus||focus===link.from||focus===link.to);
+          const isAccent=isHovered||(isPulse&&related);
+          const strokeWidth=Math.min(2.8,1.2+Math.sqrt(link.count)*0.48);
+          const showBadge=related&&edge.length>=42&&(link.count>1||isAccent||Boolean(focus)||isHovered);
+          const label=String(link.count);
+          const pillW=Math.max(20,label.length*7+10);
+          return <g key={key} className="dsh-hive-edge-group" data-active={isAccent?'true':undefined}>
+            <path d={edge.d} fill="none" stroke="transparent" strokeWidth="14" className="dsh-hive-edge-hit"
+              onMouseEnter={()=>setHoveredEdge(key)} onMouseLeave={()=>setHoveredEdge(prev=>prev===key?null:prev)}/>
+            <path data-hive-edge={key} d={edge.d} className="dsh-hive-edge" data-active={isAccent?'true':undefined}
+              strokeWidth={isAccent?Math.max(2.2,strokeWidth+0.4):strokeWidth} strokeDasharray={link.direct?undefined:'5 4'}
+              opacity={related?(isAccent?1:0.78):0.16} markerEnd={'url(#'+arrow+')'}/>
+            {isAccent?<polygon className="dsh-hive-edge-tip" points={chevronPoints(edge.end,edge.endAngle)}/>:null}
+            {showBadge?<g className="dsh-hive-edge-pill" data-active={isAccent?'true':undefined} transform={'translate('+edge.mid.x.toFixed(1)+','+edge.mid.y.toFixed(1)+')'}>
+              <rect x={-pillW/2} y="-8" width={pillW} height="16" rx="8"/>
+              <text textAnchor="middle" dominantBaseline="central">{label}</text>
+            </g>:null}
+          </g>;
+        })}
+      </svg>
+      {projection.nodes.map(node=>{
+        const point=points.get(node.name);
+        const unmentioned=Graph.unmentionedNode(node);
+        const isCoordinator=node.role==='coordinator'||node.name==='coordinator';
+        const dimmed=Boolean(connectedNodes&&!connectedNodes.has(node.name));
+        return <button key={node.name} ref={el=>{if(el)nodeRefs.current.set(node.name,el);else nodeRefs.current.delete(node.name);}}
+          type="button" className="dsh-hive-graph-node" data-role={isCoordinator?'coordinator':'worker'} data-status={node.status??'observer'}
+          data-unmentioned={unmentioned?'true':undefined} data-dimmed={dimmed?'true':undefined}
+          style={{left:point.x/width*100+'%',top:point.y,width:cardWidth}} aria-pressed={focus===node.name}
+          onClick={()=>setFocus(focus===node.name?null:node.name)}>
+          <span className="dsh-hive-node-dot" aria-hidden="true"/>
+          <Bee name={node.name} status={node.status} coordinator={isCoordinator}/>
+          <strong className="dsh-hive-node-name">{node.name}</strong>
+          <span className="dsh-hive-node-posts">{node.posts??0} posts</span>
+        </button>;
+      })}
+    </div>
+    <p className="dsh-hive-secondary dsh-hive-graph-caption">Directed mentions in loaded board history. {projection.broadcasts} broadcasts. Dashed lines show expanded broadcasts; dashed node rings posted without @mentions.</p>
     {current?<section className="dsh-hive-selected-post">
       <div className="dsh-hive-line"><h3>Selected post</h3><strong>{current.author==='system'?'System':'@'+current.author}</strong><PostRef seq={current.seq} onJumpPost={onJumpPost}/></div>
       <RichText text={current.text} onJumpPost={onJumpPost}/>
     </section>:null}
-    {projection.links.length?<ul className="dsh-hive-flow-list" aria-label="Message flow counts">{projection.links.filter(link=>!focus||link.from===focus||link.to===focus).map(link=><li key={link.from+'>'+link.to}>@{link.from} → @{link.to}: {link.count} {link.count===1?'mention':'mentions'}</li>)}</ul>:<p>No directed mentions at this point in the replay.</p>}
+    {projection.links.length?<ul className="dsh-hive-flow-list" aria-label="Message flow counts">{projection.links.filter(link=>!focus||link.from===focus||link.to===focus).map(link=><li key={link.from+'>'+link.to}>@{link.from} → @{link.to}: {link.count} {link.count===1?'mention':'mentions'}</li>)}</ul>:<p className="dsh-hive-secondary">No directed mentions at this point in the replay.</p>}
     {ownedSession(state.team.members.find(member=>member.name===focus))?<button type="button" onClick={event=>onJournal(focus,event.currentTarget)}>Inspect @{focus} Journal</button>:null}
   </div>;
 }
@@ -487,6 +588,10 @@ export function SwarmView({controller,onExpand,mode='dock',visible=true}) {
   },[controller,visible]);
   useEffect(()=>{setRenaming(false);setFocusedSeq(null);setMentionRequest(null);},[state.team?.id]);
   const onJournal=(member,opener)=>{journalOwner.current=true;setJournal({opener,controller});void controller.openJournal(member);};
+  const onOpenSession=async(member,opener)=>{
+    const result=await controller.openSession(member,{fallbackToJournal:false});
+    if(result==='fallback')onJournal(member,opener);
+  };
   const closeJournal=()=>{journalOwner.current=false;setJournal(null);controller.closeJournal();};
   const onJumpPost=seq=>{
     setFocusedSeq(seq);
@@ -526,7 +631,7 @@ export function SwarmView({controller,onExpand,mode='dock',visible=true}) {
       <section role="tabpanel" tabIndex="0" id={prefix+'-panel-'+view} aria-labelledby={prefix+'-tab-'+view} className="dsh-hive-content">
         {view==='Overview'?<Overview state={state} controller={controller} onJournal={onJournal} onJumpPost={onJumpPost} onMention={onMention}/>:
           view==='Board'?<Board key={state.team.id} state={state} controller={controller} focusedSeq={focusedSeq} onClearFocus={()=>setFocusedSeq(null)} mentionRequest={mentionRequest} onConsumeMention={()=>setMentionRequest(null)} onJumpPost={onJumpPost}/>:
-          view==='Members'?<Members key={state.team.id} state={state} controller={controller} onJournal={onJournal} onMention={onMention}/>:
+          view==='Members'?<Members key={state.team.id} state={state} controller={controller} onJournal={onJournal} onOpenSession={onOpenSession} onMention={onMention}/>:
           <FlowGraph key={state.team.id} state={state} controller={controller} onJournal={onJournal} onJumpPost={onJumpPost}/>}
       </section>
     </>}

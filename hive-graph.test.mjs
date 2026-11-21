@@ -108,3 +108,86 @@ test('the canvas rings only nodes with posts but no outgoing mention or broadcas
   assert.equal(arcs.length,1);
   assert.deepEqual(arcs[0].slice(0,3),[50,100,31]);
 });
+
+test('nodeBox accounts for wrapped multi-line card names and asymmetric Codex hex labels', () => {
+  const {nodeBox}=globalThis.HiveGraph;
+  const shortCard=nodeBox({name:'qa',posts:30},{variant:'card'});
+  const longCard=nodeBox({name:'design-research',posts:7},{variant:'card'});
+  const assetCard=nodeBox({name:'asset-research',posts:4},{variant:'card'});
+  assert.ok(longCard.halfH>shortCard.halfH,'wrapped design-research card must be taller than qa');
+  assert.ok(assetCard.halfH>shortCard.halfH,'wrapped asset-research card must be taller than qa');
+  assert.equal(shortCard.offsetY,0);
+  const hex=nodeBox({name:'design-research',posts:7},{variant:'hex'});
+  assert.ok(hex.offsetY>0,'Codex hex+label bounding box shifts downward to cover the label');
+  assert.ok(hex.offsetY+hex.halfH>=46,'Codex box covers full label height below hex');
+});
+
+test('clipEdge and routeEdges keep every arrow and arrowhead cleanly outside node cards in the 6-node screenshot scenario', () => {
+  const {layout,minimumHeight,nodeBox,routeEdges,roundedRectSignedDistance}=globalThis.HiveGraph;
+  const screenshotNodes=[
+    {name:'coordinator',role:'coordinator',status:'waiting',posts:4},
+    {name:'design-research',role:'worker',status:'done',posts:7},
+    {name:'asset-research',role:'worker',status:'done',posts:4},
+    {name:'builder',role:'worker',status:'done',posts:34},
+    {name:'qa',role:'worker',status:'done',posts:30},
+    {name:'user',role:'worker',status:'observer',posts:43},
+  ];
+  const screenshotLinks=[
+    {from:'coordinator',to:'design-research',count:2,direct:2,broadcast:0,lastSeq:10},
+    {from:'coordinator',to:'asset-research',count:2,direct:2,broadcast:0,lastSeq:11},
+    {from:'asset-research',to:'coordinator',count:1,direct:1,broadcast:0,lastSeq:12},
+    {from:'user',to:'design-research',count:3,direct:3,broadcast:0,lastSeq:13},
+    {from:'user',to:'coordinator',count:4,direct:4,broadcast:0,lastSeq:14},
+    {from:'user',to:'qa',count:5,direct:5,broadcast:0,lastSeq:15},
+    {from:'user',to:'builder',count:6,direct:6,broadcast:0,lastSeq:16},
+    {from:'qa',to:'design-research',count:2,direct:2,broadcast:0,lastSeq:17},
+    {from:'qa',to:'builder',count:12,direct:12,broadcast:0,lastSeq:18},
+    {from:'builder',to:'qa',count:11,direct:11,broadcast:0,lastSeq:19},
+    {from:'builder',to:'design-research',count:4,direct:4,broadcast:0,lastSeq:20},
+    {from:'design-research',to:'builder',count:3,direct:3,broadcast:0,lastSeq:21},
+    {from:'asset-research',to:'builder',count:3,direct:3,broadcast:0,lastSeq:22},
+    {from:'builder',to:'asset-research',count:2,direct:2,broadcast:0,lastSeq:23},
+  ];
+  const projection={nodes:screenshotNodes,links:screenshotLinks};
+  const bezier=(a,c,b,t)=>{const u=1-t;return {x:u*u*a.x+2*u*t*c.x+t*t*b.x,y:u*u*a.y+2*u*t*c.y+t*t*b.y};};
+  const toAbs=(pt,box)=>({cx:pt.x+(box.offsetX??0),cy:pt.y+(box.offsetY??0),halfW:box.halfW,halfH:box.halfH,radius:box.radius??8});
+
+  for (const variant of ['card','hex']) {
+    for (const width of [480,620,680,960]) {
+      const height=Math.max(400,minimumHeight(screenshotNodes.length,width));
+      const points=layout(screenshotNodes,width,height);
+      const routed=routeEdges(projection,points,{variant,narrow:width<465,marginStart:6,marginEnd:7,obstacleMargin:8});
+      assert.equal(routed.length,screenshotLinks.length,'every edge renders at '+variant+'/'+width);
+      for (const {link,edge} of routed) {
+        const fromAbs=toAbs(points.get(link.from),nodeBox(screenshotNodes.find(n=>n.name===link.from),{variant,narrow:width<465}));
+        const toAbsBox=toAbs(points.get(link.to),nodeBox(screenshotNodes.find(n=>n.name===link.to),{variant,narrow:width<465}));
+        const dStart=roundedRectSignedDistance(edge.start.x,edge.start.y,fromAbs);
+        const dEnd=roundedRectSignedDistance(edge.end.x,edge.end.y,toAbsBox);
+        assert.ok(dStart>=5.5,'start outside source card for '+link.from+'->'+link.to+' ('+variant+'/'+width+'): '+dStart);
+        assert.ok(dEnd>=6.5,'arrowhead outside target card for '+link.from+'->'+link.to+' ('+variant+'/'+width+'): '+dEnd);
+        for (let step=0;step<=16;step++) {
+          const pt=bezier(edge.start,edge.control,edge.end,step/16);
+          assert.ok(roundedRectSignedDistance(pt.x,pt.y,fromAbs)>0,'curve never re-enters source box: '+link.from+'->'+link.to);
+          assert.ok(roundedRectSignedDistance(pt.x,pt.y,toAbsBox)>0,'curve never enters target box: '+link.from+'->'+link.to);
+        }
+      }
+      // Verify bidirectional pair qa <-> builder bows cleanly in opposite directions with distinct endpoints
+      const qaToBuilder=routed.find(r=>r.link.from==='qa'&&r.link.to==='builder').edge;
+      const builderToQa=routed.find(r=>r.link.from==='builder'&&r.link.to==='qa').edge;
+      assert.ok(Math.hypot(qaToBuilder.mid.x-builderToQa.mid.x,qaToBuilder.mid.y-builderToQa.mid.y)>=16,
+        'bidirectional qa<->builder midpoints stay well separated at '+variant+'/'+width);
+      assert.ok(Math.hypot(qaToBuilder.end.x-builderToQa.start.x,qaToBuilder.end.y-builderToQa.start.y)>=4,
+        'bidirectional qa<->builder endpoints separate cleanly at '+variant+'/'+width);
+      // Verify outer chords clear the center coordinator card
+      const coordAbs=toAbs(points.get('coordinator'),nodeBox(screenshotNodes[0],{variant,narrow:width<465}));
+      for (const [from,to] of [['user','builder'],['qa','design-research'],['builder','design-research'],['design-research','builder']]) {
+        const {edge}=routed.find(r=>r.link.from===from&&r.link.to===to);
+        for (let step=0;step<=16;step++) {
+          const pt=bezier(edge.start,edge.control,edge.end,step/16);
+          assert.ok(roundedRectSignedDistance(pt.x,pt.y,coordAbs)>0,
+            'outer chord '+from+'->'+to+' clears coordinator at '+variant+'/'+width);
+        }
+      }
+    }
+  }
+});
