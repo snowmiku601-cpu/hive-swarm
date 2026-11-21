@@ -787,15 +787,16 @@ function hexSlotGrid(cx,cy,radius,members) {
 }
 function fallbackLayoutHive(hiveModel,width,height) {
   const clusters=hiveModel.clusters??[];
-  const radius=clusters.length<=1?Math.max(78,Math.min(122,width*0.24,(height-36)/(2*Math.sqrt(3)+0.35))):Math.max(66,Math.min(104,width*0.2,height*0.24));
-  const apothem=radius*Math.sqrt(3)/2;
-  const gap=14;
+  const gap=18;
   const cellsById=new Map();
-  let coordCenter;
+  let radius,coordCenter;
   const laidClusters=[];
   if(!clusters.length) {
+    radius=Math.max(76,Math.min(118,width*0.24,height*0.32));
     coordCenter={x:width/2,y:height/2};
   } else if(clusters.length===1) {
+    radius=Math.max(76,Math.min(120,width*0.24,(height-36)/(2*Math.sqrt(3)+0.35)));
+    const apothem=radius*Math.sqrt(3)/2;
     const midY=height/2;
     const offset=apothem+gap/2;
     const cl=clusters[0];
@@ -805,12 +806,17 @@ function fallbackLayoutHive(hiveModel,width,height) {
     laidClusters.push(cell);
     cellsById.set(cl.id,cell);
   } else {
-    coordCenter={x:width/2,y:height*0.56};
-    const ringR=Math.min(width*0.33,apothem*2+gap+8);
+    coordCenter={x:width/2,y:height*0.70};
+    const span=clusters.length===2?Math.PI*0.44:clusters.length===3?Math.PI*0.64:Math.PI*0.74;
+    const delta=span/(clusters.length-1);
+    const ringR=Math.max(110,Math.min(width*0.34,coordCenter.y-82));
+    const minSpacing=Math.min(ringR,2*ringR*Math.sin(delta/2));
+    const maxApothem=Math.max(46,(minSpacing-gap)/2);
+    radius=Math.max(54,Math.min(92,maxApothem/(Math.sqrt(3)/2)));
     clusters.forEach((cl,i)=>{
-      const angle=-Math.PI/2+(i-(clusters.length-1)/2)*(Math.PI*0.65);
+      const angle=-Math.PI/2-span/2+i*delta;
       const cx=coordCenter.x+Math.cos(angle)*ringR;
-      const cy=coordCenter.y+Math.sin(angle)*Math.min(ringR,height*0.34);
+      const cy=coordCenter.y+Math.sin(angle)*ringR;
       const cell={...cl,x:cx,y:cy,radius,vertices:hexVertices(cx,cy,radius),slots:hexSlotGrid(cx,cy,radius,cl.members)};
       laidClusters.push(cell);
       cellsById.set(cl.id,cell);
@@ -1065,7 +1071,7 @@ function FlowGraph({state,controller,onJournal,onJumpPost}) {
         <svg width="100%" height={hiveHeight} viewBox={'0 0 '+width+' '+hiveHeight} aria-hidden="true">
           <defs>
             <marker id={arrow} markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto">
-              <path d="M0.5 1.2L9.5 5L0.5 8.8L2.4 5Z" fill="currentColor"/>
+              <path d="M0.5 1.2L9.5 5L0.5 8.8L2.4 5Z" fill="context-stroke"/>
             </marker>
           </defs>
           {hiveLayout.clusters.map(cell=><g key={cell.id} className="dsh-hive-hex-cell" data-tone={hiveTone(cell.tone)}>
@@ -1083,15 +1089,18 @@ function FlowGraph({state,controller,onJournal,onJumpPost}) {
           {(hiveModel?.connectors??[]).map((conn,i)=>{
             const lookup=id=>hiveLayout.cellsById?.get?.(id)??hiveLayout.cellsById?.[id]??(id==='coordinator'?hiveLayout.coordinator:hiveLayout.clusters.find(c=>c.id===id));
             const fromCell=lookup(conn.from),toCell=lookup(conn.to);
-            if(!fromCell||!toCell)return null;
+            if(!fromCell||!toCell||fromCell===toCell)return null;
             const dx=toCell.x-fromCell.x,dy=toCell.y-fromCell.y,dist=Math.hypot(dx,dy);
             if(dist<2)return null;
             const angle=Math.atan2(dy,dx);
-            const dFrom=hexBoundaryDist(fromCell.radius,angle)+3;
-            const dTo=hexBoundaryDist(toCell.radius,angle+Math.PI)+3;
+            const shift=conn.kind==='message'?8:conn.kind==='waiting'?-8:0;
+            const pad=shift?6:3;
+            const dFrom=hexBoundaryDist(fromCell.radius,angle)+pad;
+            const dTo=hexBoundaryDist(toCell.radius,angle+Math.PI)+pad;
             if(dFrom+dTo>=dist)return null;
-            const x1=fromCell.x+Math.cos(angle)*dFrom,y1=fromCell.y+Math.sin(angle)*dFrom;
-            const x2=toCell.x-Math.cos(angle)*dTo,y2=toCell.y-Math.sin(angle)*dTo;
+            const nx=-Math.sin(angle),ny=Math.cos(angle);
+            const x1=fromCell.x+Math.cos(angle)*dFrom+nx*shift,y1=fromCell.y+Math.sin(angle)*dFrom+ny*shift;
+            const x2=toCell.x-Math.cos(angle)*dTo+nx*shift,y2=toCell.y-Math.sin(angle)*dTo+ny*shift;
             return <line key={conn.from+'>'+conn.to+':'+conn.kind+':'+i} x1={x1.toFixed(1)} y1={y1.toFixed(1)} x2={x2.toFixed(1)} y2={y2.toFixed(1)}
               className="dsh-hive-hex-connector" data-kind={conn.kind}
               strokeDasharray={conn.kind==='waiting'?'4 4':undefined}
@@ -1125,7 +1134,7 @@ function FlowGraph({state,controller,onJournal,onJumpPost}) {
         <svg width="100%" height={mentionsHeight} viewBox={'0 0 '+width+' '+mentionsHeight} aria-hidden="true">
           <defs>
             <marker id={arrow} markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto">
-              <path d="M0.5 1.2L9.5 5L0.5 8.8L2.4 5Z" fill="currentColor"/>
+              <path d="M0.5 1.2L9.5 5L0.5 8.8L2.4 5Z" fill="context-stroke"/>
             </marker>
           </defs>
           {routed.map(({link,edge})=>{

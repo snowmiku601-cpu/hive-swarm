@@ -713,7 +713,15 @@ test('native Graph defaults to Hive mode, persists mode in sessionStorage, and c
     assert.equal(mentionsBtn.props['aria-pressed'],false);
     assert.ok(view.root.findByProps({'aria-label':'Hive cluster graph'}));
     assert.ok(view.root.findAllByProps({className:'dsh-hive-hex-poly'}).length>=2);
-    assert.equal(view.root.findByType('marker').props.markerUnits,'userSpaceOnUse');
+    const hiveMarker=view.root.findByType('marker');
+    assert.equal(hiveMarker.props.markerUnits,'userSpaceOnUse');
+    assert.equal(hiveMarker.findByType('path').props.fill,'context-stroke');
+    const hiveConnectors=view.root.findAllByProps({className:'dsh-hive-hex-connector'});
+    assert.ok(hiveConnectors.some(l=>l.props['data-kind']==='done'));
+    assert.ok(hiveConnectors.some(l=>l.props['data-kind']==='message'));
+    const doneConn=hiveConnectors.find(l=>l.props['data-kind']==='done');
+    const msgConn=hiveConnectors.find(l=>l.props['data-kind']==='message');
+    assert.notEqual(doneConn.props.x1+'|'+doneConn.props.y1,msgConn.props.x1+'|'+msgConn.props.y1);
     // Switch to Mentions -> persists in sessionStorage, renders switches + capsule pills
     await renderer.act(async()=>{mentionsBtn.props.onClick();await tick();});
     assert.equal(store.get('hive-swarm:dsh:graph-mode'),'mentions');
@@ -919,6 +927,19 @@ test('Graph Export GIF button invokes HiveGif.exportGraphReplayGif with active m
     await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
     await renderer.act(async()=>{view.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Graph')).props.onClick();await tick();});
     const exportBtn=()=>view.root.findByProps({className:'dsh-hive-export-gif'});
+    // Verify concurrent done + message connectors between done hex and coordinator hex offset laterally
+    const samePairTeam={...team(),members:[{name:'alpha',status:'done',brief:'Done work',model:'sol',writable:false}]};
+    const f2=fakeContext({snapshot:({teamId})=>({teams:[samePairTeam],team:teamId?samePairTeam:null})});
+    client.apply(f2.ctx);
+    const e2=f2.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let v2;
+    await renderer.act(async()=>{v2=renderer.create(React.createElement(e2.component,e2.options.inject('p2')));await tick();});
+    await renderer.act(async()=>{await v2.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
+    await renderer.act(async()=>{v2.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Graph')).props.onClick();await tick();});
+    const pairLines=v2.root.findAllByProps({className:'dsh-hive-hex-connector'});
+    const dLine=pairLines.find(l=>l.props['data-kind']==='done'),mLine=pairLines.find(l=>l.props['data-kind']==='message');
+    assert.ok(dLine&&mLine,'expected concurrent done and message connectors between done and coordinator');
+    assert.equal(Math.abs(Number(mLine.props.x1)-Number(dLine.props.x1)),8,'expected +8 lateral offset on concurrent message connector');
+    await renderer.act(async()=>{v2.unmount();});f2.dispose();
     await renderer.act(async()=>{await exportBtn().props.onClick();await tick();});
     assert.equal(exportCalls.length,1);
     assert.equal(exportCalls[0].mode,'hive');
