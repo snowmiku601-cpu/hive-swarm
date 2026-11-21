@@ -2,15 +2,15 @@
 
 Native worker sessions and a bee-marked **Swarm** Start card, right tab, and full panel for **DSH 0.2.2-rc.5**. The package pins the matching `hive-swarm` core. React and native SDK services are supplied by the Host.
 
-This is the **experimental `2.0.0` release** for DSH `0.2.2-rc.5` (native hidden child subagents via `ctx.subagents.startActivation` and `ctx.agents.resume` Turn 2+ continuations with zero workspace sidebar clutter, synchronous fail-closed sandbox & tool-restriction locks, `fork: "coordinator"`, exact box-clipped Graph arrows, and Design DNA UI overhaul). The core/build/native test suite passes on Windows, macOS, and Linux; live DSH Desktop qualification is Windows-specific.
+This is the **experimental `2.1.0` release** for DSH `0.2.2-rc.5` (Antigravity-style Overview & Dual-Mode `Hive`/`Mentions` Graph with zero-dependency **Export GIF**, confined `Screenshot:` timeline + lightbox, `goalLine`/`taskLabel` plan schema, B1–B7 bug fixes, native hidden child subagents via `ctx.subagents.startActivation` + `ctx.agents.resume`, and synchronous fail-closed sandbox & tool-restriction locks). The core/build/native test suite passes on Windows, macOS, and Linux; live DSH Desktop qualification is Windows-specific.
 
 Close Desktop and let DSH manage its profile:
 
 ```sh
-dsh plugin --profile desktop add dsh-hive-swarm@2.0.0
+dsh plugin --profile desktop add dsh-hive-swarm@2.1.0
 ```
 
-Use the native `/hive-swarm` skill for requested teams (pass `fork: "coordinator"` when a worker should inherit the active parent chat). Opening Swarm or reading a Journal does not start a model. Select an exact team in its workspace; the four views are **Overview** (progress, outcome threads, milestones, alerts), **Board** (safe Markdown, `#seq` jumps, channels, live activity), **Members** (`Subagent`/`Session` badges, model controls, recovery, worktree cleanup, `SubagentAddress` **Open session** with **Journal** fallback), and **Graph** (exact box-clipped flow inspection and replay). Worker Journals render host-verified `✓ Verified route:` pills, and native tool results can open their Host-verified team directly.
+Use the native `/hive-swarm` skill for requested teams (pass `fork: "coordinator"` when a worker should inherit the active parent chat). Opening Swarm or reading a Journal does not start a model. Select an exact team in its workspace; the four views are **Overview** (task summary accordion with `goalLine`/`taskLabel`/bee pills, outcome `threads` progress bars, confined `Screenshots` strip + lightbox, `Needs you` alerts, Coordinator honeycomb tile), **Board** (safe Markdown, `#seq` jumps, channels, deduplicated Author filter, live activity), **Members** (`Subagent`/`Session` badges, model controls, recovery, worktree cleanup, `SubagentAddress` **Open session** with **Journal** fallback), and **Graph** (**`Hive`** honeycomb clusters + **`Mentions`** capsule ring + **Export GIF** replay). Worker Journals render host-verified `✓ Verified route:` pills, and native tool results can open their Host-verified team directly.
 
 Non-worktree workers run as hidden native DSH child subagents (`ctx.subagents.startActivation`, zero workspace sidebar clutter) and enforce read-only or workspace-write sandboxing synchronously inside `subagent/start` before Turn 1 executes (failing closed on any violation). Turn 2+ resumes quietly via `ctx.agents.resume` + `followup` without waking the parent user chat, while `worktree: true` and fallback workers use `session/create` with clean pinned titles. Hive never changes global model defaults or grants wider roots; unknown outcomes remain **Needs you** with explicit **Retry fresh turn** and **Dismiss** recovery controls rather than automatically repeating potentially paid work.
 

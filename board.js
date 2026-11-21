@@ -956,7 +956,7 @@
 
     const coordMember=roster.find(member=>member.role==='coordinator')??{name:'coordinator',role:'coordinator',status:'observer'};
     $('overview-team-badge').replaceChildren(beeSprite(coordMember));
-    const goalMode=team.coordinator===false;
+    const goalMode=team.coordinator===false||!team.members?.some(member=>member.role==='coordinator');
     $('overview-team-role').textContent='Coordinator';
     $('overview-team-mode').textContent='Goal summary';
     $('overview-team-mode').hidden=!goalMode;
@@ -1654,7 +1654,7 @@
         btn.type='button';
         btn.style.left=x+'px';
         btn.style.top=y+'px';
-        if (Number.isFinite(slotWidth)&&slotWidth>0) btn.style.width=Math.max(50,Math.min(70,Math.floor(slotWidth-2)))+'px';
+        if (Number.isFinite(slotWidth)&&slotWidth>0) btn.style.width=Math.max(46,Math.min(70,Math.floor(slotWidth)))+'px';
         btn.dataset.graphName=member.name;
         btn.dataset.role=isCoordinator?'coordinator':'worker';
         btn.dataset.status=member.status??'waiting';

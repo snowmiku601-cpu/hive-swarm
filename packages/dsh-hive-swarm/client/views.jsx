@@ -1,6 +1,7 @@
 import React, {useEffect,useLayoutEffect,useId,useMemo,useRef,useState,useSyncExternalStore} from 'react';
 import Graph from 'hive:graph';
 import Bees from 'hive:bees';
+import Gif from 'hive:gif';
 import beeSvg from 'hive:icon';
 import styles from './style.css';
 import {ownedSession} from './controller.mjs';
@@ -981,7 +982,7 @@ function FlowGraph({state,controller,onJournal,onJumpPost}) {
 
   async function handleExportGif() {
     if(!posts.length||gifStatus.busy)return;
-    const gifApi=globalThis.HiveGif;
+    const gifApi=(typeof globalThis.HiveGif?.exportGraphReplayGif==='function'?globalThis.HiveGif:null)??Gif;
     if(typeof gifApi?.exportGraphReplayGif!=='function') {
       setGifStatus({busy:false,message:'GIF export is unavailable until the GIF module is bundled.',error:true});
       return;

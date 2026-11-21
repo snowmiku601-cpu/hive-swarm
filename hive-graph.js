@@ -830,13 +830,13 @@
     const halfH = (SQRT3 / 2) * radius;
     const rows = hiveSlotRows(count);
     const rowCount = rows.length;
-    const topBand = -halfH * 0.24;
-    const bottomBand = halfH * 0.62;
-    const bandCenter = rowCount === 1 ? halfH * 0.12 : (topBand + bottomBand) / 2;
+    const topBand = -halfH * 0.14;
+    const bottomBand = halfH * 0.50;
+    const bandCenter = rowCount === 1 ? halfH * 0.10 : (topBand + bottomBand) / 2;
     const bandSpan = bottomBand - topBand;
     const beeScale = count > 6
       ? Math.max(0.7, Math.min(0.98, radius / 106))
-      : Math.max(0.82, Math.min(1.12, radius / 95));
+      : Math.max(0.82, Math.min(1.08, radius / 98));
 
     const slots = [];
     let idx = 0;
@@ -846,11 +846,11 @@
         ? cy + bandCenter
         : cy + topBand + (r / (rowCount - 1)) * bandSpan;
       const dy = ry - cy;
-      // Exact horizontal half-span inside flat-top hexagon at dy (with margin for bee + label height).
-      const usableHalfW = Math.max(14, radius - (Math.abs(dy) + 14) / SQRT3 - 10);
-      const maxSpacing = count > 6 ? 42 : 58;
-      const stepX = cols === 1 ? 0 : Math.min(maxSpacing, (usableHalfW * 1.9) / Math.max(cols - 0.35, 1));
-      const slotWidth = cols === 1 ? Math.min(82, usableHalfW * 1.75) : Math.max(24, stepX - 4);
+      // Exact horizontal half-span inside flat-top hexagon covering bee top (-15) and label bottom (+18).
+      const usableHalfW = Math.max(18, radius - Math.max(Math.abs(dy - 15), Math.abs(dy + 18)) / SQRT3 - 8);
+      const maxSpacing = count > 6 ? 42 : 52;
+      const stepX = cols === 1 ? 0 : Math.min(maxSpacing, (usableHalfW * 2 - 4) / cols);
+      const slotWidth = cols === 1 ? Math.min(88, usableHalfW * 1.85) : Math.max(30, stepX - 2);
       for (let c = 0; c < cols; c++) {
         const rx = cx + (c - (cols - 1) / 2) * stepX;
         slots.push({
@@ -1322,8 +1322,8 @@
           scale: s,
         }, beesLib);
         ctx.fillStyle = slot.member.muted ? palette.muted : palette.ink;
-        ctx.font = '500 10px "Segoe UI", system-ui, sans-serif';
-        const maxChars = Math.max(5, Math.floor(slot.slotWidth / 5.4));
+        ctx.font = '500 9.5px "Segoe UI", system-ui, sans-serif';
+        const maxChars = Math.max(6, Math.floor(slot.slotWidth / 4.6));
         ctx.fillText(truncateFit(slot.member.name, maxChars), slot.x, slot.y + beeH * 0.62);
       }
     }

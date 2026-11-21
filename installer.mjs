@@ -20,7 +20,7 @@ const standardFiles = ['LICENSE', 'README.md', 'package.json'];
 export const CORE_PACKAGE_FILES = Object.freeze([
   '.agents/plugins/marketplace.json', '.codex-plugin/plugin.json', '.mcp.json',
   'assets/hive-swarm-banner.svg', 'assets/hive-swarm-flow.svg', 'assets/hive-swarm-icon.png', 'assets/hive-swarm-icon.svg',
-  'board.css', 'board.html', 'board.js', 'cli.mjs', 'codex.mjs', 'core.mjs', 'engine.mjs', 'hive-bees.js', 'hive-graph.js',
+  'board.css', 'board.html', 'board.js', 'cli.mjs', 'codex.mjs', 'core.mjs', 'engine.mjs', 'hive-bees.js', 'hive-gif.js', 'hive-graph.js',
   'installer.mjs', 'run-store.mjs', 'server.mjs', 'skills/swarm/SKILL.md', 'skills/swarm/agents/openai.yaml', 'worktrees.mjs',
   ...standardFiles,
 ].sort());

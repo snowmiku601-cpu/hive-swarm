@@ -1,6 +1,6 @@
 {
   "name": "hive-swarm",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Local multi-agent coordination, dependent tasks, and a shared Swarm board.",
   "type": "module",
   "license": "MIT",
@@ -37,6 +37,7 @@
     "core.mjs",
     "engine.mjs",
     "hive-bees.js",
+    "hive-gif.js",
     "hive-graph.js",
     "installer.mjs",
     "run-store.mjs",

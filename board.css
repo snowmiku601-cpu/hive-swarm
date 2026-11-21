@@ -357,7 +357,7 @@ button.bee-pill:hover:not(:disabled) {border-color:var(--gold-solid);background:
 .graph-hive-bee[data-role=coordinator] .bee-pixel {width:36px;height:32px}
 .graph-hive-bee[data-bee-muted=true] .bee-pixel {filter:grayscale(1) saturate(.25);opacity:.8}
 .graph-hive-bee[data-dimmed=true] {opacity:.26}
-.hive-bee-label {max-width:calc(100% - 4px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:560 10.5px/1.2 var(--sans);color:var(--muted)}
+.hive-bee-label {max-width:calc(100% - 2px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:560 9.5px/1.2 var(--sans);color:var(--muted)}
 .graph-hive-bee[aria-pressed=true] .hive-bee-label {color:var(--ink);font-weight:680}
 
 /* Mentions Mode Capsule Pill Nodes */

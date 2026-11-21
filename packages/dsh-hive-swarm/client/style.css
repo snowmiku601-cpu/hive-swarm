@@ -538,7 +538,7 @@ details[open] > summary .dsh-hive-chevron { rotate: 180deg; }
 .dsh-hive .dsh-hive-hex-coord-btn {
   position: absolute; transform: translate(-50%, -50%);
   display: grid; justify-items: center; gap: 2px;
-  min-height: 24px; padding: 3px 4px; border-radius: 8px;
+  min-height: 24px; padding: 3px 1px; border-radius: 8px;
   border: 1px solid transparent; background: transparent;
 }
 .dsh-hive .dsh-hive-hex-bee-btn:hover:not(:disabled),
@@ -552,7 +552,7 @@ details[open] > summary .dsh-hive-chevron { rotate: 180deg; }
 }
 .dsh-hive-hex-bee-name {
   display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 10px; line-height: 1.2; color: var(--hive-muted);
+  font-size: 9.5px; line-height: 1.35; color: var(--hive-muted);
 }
 
 /* Mentions Mode Capsule Pills */
