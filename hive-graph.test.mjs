@@ -444,3 +444,58 @@ test('HiveBee muted sprites omit Zzz and renderGrayscale while renderGraphFrame 
     }
   }
 });
+
+test('Goal mode (no dedicated coordinator) merges user posts/targets into coordinator in project and projectHive', () => {
+  const { project, projectHive, shouldMergeUserToCoordinator } = globalThis.HiveGraph;
+  const syntheticRoster = [
+    { name: 'coordinator', role: 'coordinator', external: true, status: 'waiting' },
+    { name: 'builder', role: 'worker', status: 'working' },
+    { name: 'qa', role: 'worker', status: 'done' },
+  ];
+  assert.equal(shouldMergeUserToCoordinator(syntheticRoster), true);
+  assert.equal(shouldMergeUserToCoordinator([{ name: 'builder' }]), true);
+
+  const events = [
+    { seq: 1, kind: 'brief', author: 'coordinator', targets: ['builder'], text: 'Build UI' },
+    { seq: 2, kind: 'message', author: 'user', targets: ['builder'], text: '@builder adjust padding' },
+    { seq: 3, kind: 'message', author: 'user', targets: ['coordinator'], coordinatorMention: true, text: '@coordinator check' },
+    { seq: 4, kind: 'message', author: 'builder', targets: ['coordinator'], coordinatorMention: true, text: '@coordinator done' },
+    { seq: 5, kind: 'message', author: 'qa', targets: ['user'], text: '@user ready for review' },
+    { seq: 6, kind: 'message', author: 'user', targets: ['builder'], text: '@builder ship it' },
+  ];
+
+  // Goal mode Mentions projection consolidates user into coordinator with zero separate user node.
+  const proj = project(events, syntheticRoster, 6, {});
+  assert.equal(proj.nodes.some(n => n.name === 'user'), false);
+  const coord = proj.nodes.find(n => n.name === 'coordinator');
+  assert.equal(coord.posts, 4);
+  assert.equal(coord.mentions, 3);
+  assert.equal(proj.links.find(l => l.from === 'coordinator' && l.to === 'builder').count, 3);
+  assert.equal(proj.links.find(l => l.from === 'coordinator' && l.to === 'coordinator'), undefined);
+  assert.equal(proj.links.find(l => l.from === 'builder' && l.to === 'coordinator').count, 1);
+  assert.equal(proj.links.find(l => l.from === 'qa' && l.to === 'coordinator').count, 1);
+
+  // Goal mode Hive projection keeps the purple "Message just sent" connector when lastPost.author is user.
+  const hive = projectHive(events, syntheticRoster, 6);
+  assert.equal(hive.coordinator.latestSeq, 6);
+  const msgConn = hive.connectors.find(c => c.kind === 'message');
+  assert.ok(msgConn, 'expected purple message connector from coordinator when Lead (user) posts');
+  assert.equal(msgConn.from, 'coordinator');
+  assert.equal(msgConn.to, 'working');
+
+  // Dedicated coordinator mode keeps user distinct only when human manually posts.
+  const dedicatedRoster = [
+    { name: 'coordinator', role: 'coordinator', status: 'working' },
+    { name: 'builder', role: 'worker', status: 'working' },
+  ];
+  assert.equal(shouldMergeUserToCoordinator(dedicatedRoster), false);
+  const noUserEvents = [
+    { seq: 1, kind: 'brief', author: 'coordinator', targets: ['builder'], text: 'Build UI' },
+    { seq: 2, kind: 'message', author: 'builder', targets: ['coordinator'], text: '@coordinator Done' },
+  ];
+  assert.equal(project(noUserEvents, dedicatedRoster, 2, {}).nodes.some(n => n.name === 'user'), false);
+  const withUserEvents = [...noUserEvents, { seq: 3, kind: 'message', author: 'user', targets: ['builder'], text: '@builder manual override' }];
+  const dedicatedProj = project(withUserEvents, dedicatedRoster, 3, {});
+  assert.equal(dedicatedProj.nodes.some(n => n.name === 'user'), true);
+  assert.equal(dedicatedProj.links.find(l => l.from === 'user' && l.to === 'builder').count, 1);
+});

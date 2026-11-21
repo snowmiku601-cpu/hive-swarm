@@ -669,3 +669,49 @@ test('B5: run() lazy-hydrates modelProviders via listModels() before falling bac
   assert.equal(calls.filter(c=>c.method==='thread/start')[2].params.modelProvider,'custom-prov');
   assert.equal(calls.some(c=>c.method==='config/read'),false);
 });
+
+test('Turn 1 sends full onboarding prompt and plain-text inbox while Turn 2+ sends lean delta resume prompt',async t=>{
+  const runner=new CodexRunner({ephemeral:true});
+  t.after(()=>runner.close());
+  runner.start=async()=>{};
+  const turns=[];
+  let seq=0;
+  runner.rpc=async (method,params)=>{
+    if (method==='model/list') return {data:[{model:'gpt-5.4',modelProvider:'openai',supportedReasoningEfforts:[]}]};
+    if (method==='thread/start') return {thread:{id:'thread-delta-1'},model:'gpt-5.4',modelProvider:'openai'};
+    if (method==='thread/resume') return {thread:{id:params.threadId},model:'gpt-5.4',modelProvider:'openai'};
+    if (method==='thread/name/set'||method==='thread/archive'||method==='thread/unarchive') return {};
+    assert.equal(method,'turn/start');
+    turns.push(params.input[0].text);
+    const id='turn-'+(++seq);
+    setImmediate(()=>{
+      runner.receive(JSON.stringify({method:'item/completed',params:{threadId:params.threadId,turnId:id,item:{type:'agentMessage',text:JSON.stringify({state:'waiting',message:'ok',notify:[],waitFor:[]})}}}));
+      runner.receive(JSON.stringify({method:'turn/completed',params:{threadId:params.threadId,turn:{id,status:'completed'}}}));
+    });
+    return {turn:{id}};
+  };
+
+  const member={
+    name:'builder',brief:'Build delta prompt',model:'gpt-5.4',
+    inbox:[{seq:3,author:'qa',channel:'verify',addressed:true,text:'Check #2'}],lastTurn:1,
+  };
+  const team={id:'team-d',title:'Delta',cwd:process.cwd(),task:'Ship delta prompts',members:[member,{name:'qa',status:'waiting'}]};
+  let saved={};
+  await runner.run({team,member,remember:patch=>{saved={...saved,...patch};}});
+  assert.match(turns[0],/^You are member @builder in Hive Swarm\./);
+  assert.match(turns[0],/User goal: Ship delta prompts/);
+  assert.match(turns[0],/Your assignment: Build delta prompt/);
+  assert.match(turns[0],/#3 @qa #verify \(addressed to you\):\nCheck #2/);
+  assert.doesNotMatch(turns[0],/"addressed":true/);
+
+  await runner.run({
+    team,
+    member:{...member,threadId:saved.threadId,inbox:[{seq:7,author:'qa',channel:'main',addressed:true,text:'Re-verify #6'}],lastTurn:2},
+    remember:patch=>{saved={...saved,...patch};},
+  });
+  assert.match(turns[1],/^Resume Hive Swarm turn 2 as @builder\. Active members: @qa\./);
+  assert.match(turns[1],/do not call read_board or list_models/i);
+  assert.match(turns[1],/#7 @qa \(addressed to you\):\nRe-verify #6/);
+  assert.doesNotMatch(turns[1],/User goal:/);
+  assert.doesNotMatch(turns[1],/Your assignment:/);
+});

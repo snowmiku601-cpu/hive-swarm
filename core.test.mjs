@@ -4,7 +4,7 @@ import {mkdtempSync,realpathSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
-import {createSwarmApplication} from './core.mjs';
+import {createSwarmApplication,createUpdateChecker,isNewerVersion,parseSemver} from './core.mjs';
 
 const workspace=process.cwd();
 function fixture(t,options={}) {
@@ -323,4 +323,71 @@ test('2.1.0 core projections: goalLine, taskLabel, dual tasks, safe screenshot U
   assert.equal(file.contentType,'image/png');
   assert.deepEqual(file.body,png);
   assert.equal(await app.screenshot({teamId:started.id,seq,index:1}),null);
+});
+
+test('parseSemver, isNewerVersion, and createUpdateChecker compare tags, cache results, deduplicate fetches, and fail silently offline',async()=>{
+  assert.equal(isNewerVersion('2.1.0','2.1.1'),true);
+  assert.equal(isNewerVersion('2.1.0','2.2.0'),true);
+  assert.equal(isNewerVersion('2.1.0','3.0.0'),true);
+  assert.equal(isNewerVersion('2.1.0','2.1.0'),false);
+  assert.equal(isNewerVersion('2.1.1','2.1.0'),false);
+  assert.equal(isNewerVersion('2.1.0-rc.1','2.1.0'),true);
+  assert.equal(isNewerVersion('2.1.0','2.1.0-rc.1'),false);
+  assert.equal(isNewerVersion('2.1.0','2.2.0-rc.1'),true);
+  assert.equal(isNewerVersion('2.1.0','javascript:alert(1)'),false);
+  assert.equal(parseSemver('invalid'),null);
+
+  // Disabled automatically in test context unless enabled: true
+  const disabledChecker=createUpdateChecker({packageName:'hive-swarm',currentVersion:'2.1.0',fetchImpl:async()=>{throw Error('Must not fetch');}});
+  const disabledStatus=disabledChecker.peek({start:true});
+  assert.equal(disabledStatus.available,false);
+  assert.equal(disabledStatus.checked,true);
+
+  // Multi-tag dist-tags check (pick highest of latest & next), caching & singleflight dedupe
+  let clock=1000,calls=0,tagPayload={latest:'1.8.0',next:'2.2.0'};
+  const checker=createUpdateChecker({
+    packageName:'dsh-hive-swarm',currentVersion:'2.1.0',tags:['latest','next'],
+    enabled:true,ttlMs:1000,errorTtlMs:300,now:()=>clock,
+    fetchImpl:async url=>{
+      calls++;
+      assert.equal(url,'https://registry.npmjs.org/-/package/dsh-hive-swarm/dist-tags');
+      await delay(15);
+      return {ok:true,json:async()=>tagPayload};
+    },
+  });
+  const pendingPeek=checker.peek({start:true});
+  assert.equal(pendingPeek.checked,false);
+  const [first,second]=await Promise.all([checker.check(),checker.check()]);
+  assert.equal(calls,1,'concurrent checks share one inflight fetch');
+  assert.equal(first.available,true);
+  assert.equal(first.latest,'2.2.0');
+  assert.equal(first.url,'https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.2.0');
+  assert.equal(second.latest,'2.2.0');
+
+  // Cached within TTL
+  await checker.check();
+  assert.equal(calls,1);
+
+  // Rejects malformed tags without throwing, and fails silently offline while preserving last known tag
+  clock+=1500;
+  tagPayload={latest:'not-a-semver',next:'https://evil.test/1.2.3'};
+  const invalidRes=await checker.check();
+  assert.equal(calls,2);
+  assert.equal(invalidRes.available,false);
+  assert.equal(invalidRes.latest,null);
+
+  clock+=1500;
+  const offlineChecker=createUpdateChecker({
+    packageName:'hive-swarm',currentVersion:'2.1.0',tags:['latest'],
+    enabled:true,ttlMs:1000,errorTtlMs:400,now:()=>clock,
+    fetchImpl:async()=>{calls++;throw Error('ECONNREFUSED');},
+  });
+  const offline=await offlineChecker.check();
+  assert.equal(offline.available,false);
+  assert.equal(offline.checked,true);
+  assert.equal(offline.url,null);
+  await offlineChecker.check();
+  assert.equal(calls,3,'backs off within errorTtlMs');
+  checker.dispose();
+  offlineChecker.dispose();
 });

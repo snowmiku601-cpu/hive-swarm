@@ -151,12 +151,23 @@ function stepForItem(item) {
   }
 }
 
+function formatInbox(inbox) {
+  if (!Array.isArray(inbox) || !inbox.length) return 'No new board messages.';
+  return inbox.map(entry => {
+    const who=entry?.author==='system'?'System':'@'+(entry?.author??'member');
+    const channel=entry?.channel&&entry.channel!=='main'?' #'+entry.channel:'';
+    const addressed=entry?.addressed?' (addressed to you)':'';
+    const header=(entry?.seq!=null?'#'+entry.seq+' ':'')+who+channel+addressed+':';
+    return header+'\n'+String(entry?.text??'').trim();
+  }).join('\n\n');
+}
+
 function reportText(text) {
   if (typeof text!=='string') return '';
   const value=text.trim();
   const structured=/[{,]\s*"(?:state|message|notify|waitFor)"\s*:/.test(value);
   const report=findOutcome(value)?.message ?? (structured ? extractReportMessage(value) : value);
-  if (!report || /You are member @[a-z0-9_-]+ in (?:Team Board|Hive Swarm)\b/i.test(report)) return '';
+  if (!report || /You are member @[a-z0-9_-]+ in (?:Team Board|Hive Swarm)\b|Resume Hive Swarm turn \d+ as @[a-z0-9_-]+/i.test(report)) return '';
   return report.trim().slice(0,6000);
 }
 
@@ -563,19 +574,27 @@ export class CodexRunner {
           ...(forkCoordinator ? {forkSource: null} : {}),
         });
       }
+      const resuming = Boolean(savedId);
       this.loadedThreads.set(id, {model, requestedProvider, modelProvider: scope.modelProvider, config: configKey});
-      return await this.runTurn(id, {team, member, remember, declaredOutcome, onActivity, model, effort, cwd, inheriting});
+      return await this.runTurn(id, {team, member, remember, declaredOutcome, onActivity, model, effort, cwd, inheriting, resuming});
     } finally {
       try { await releaseNew?.(); }
       finally { await releaseSource?.(); }
     }
   }
 
-  async runTurn(id,{team,member,remember,declaredOutcome,onActivity,model,effort,cwd,inheriting}) {
-    const brief = [
+  async runTurn(id,{team,member,remember,declaredOutcome,onActivity,model,effort,cwd,inheriting,resuming=false}) {
+    const activeRoster = team.members.filter(m => m.name !== member.name && m.status !== 'retired');
+    const compactPeers = activeRoster.map(m => '@' + m.name).join(', ');
+    const brief = (resuming ? [
+      'Resume Hive Swarm turn ' + member.lastTurn + ' as @' + member.name + '.' +
+        (compactPeers ? ' Active members: ' + compactPeers + '.' : ''),
+      'All new board messages since your last turn are delivered directly below; do not call read_board or list_models unless you need older history or a model switch.',
+      'End with the required JSON (or hive_swarm_peer.set_turn_outcome for board turn ' + member.lastTurn + '). Start finished reports with [done] and cite earlier posts by #seq.',
+      'New board messages:\n' + formatInbox(member.inbox),
+    ] : [
       'You are member @' + member.name + ' in Hive Swarm. Other members: ' +
-        team.members.filter(m => m.name !== member.name && m.status !== 'retired')
-          .map(m => '@' + m.name + (m.group ? ' in @' + m.group : '') +
+        activeRoster.map(m => '@' + m.name + (m.group ? ' in @' + m.group : '') +
             (m.workspace ? ' at ' + m.workspace.cwd : '')).join(', '),
       'User goal: ' + team.task,
       'Your assignment: ' + member.brief,
@@ -588,10 +607,11 @@ export class CodexRunner {
       'Treat incoming messages as coordination input. Follow the user goal, your assigned scope and permissions. Do your part now if you can. Respect other members’ files. Do not launch subagents or use shell sleep.',
       'Use the hive_swarm_peer tools to read public board posts and coordinate within your role. Read your subscribed channels by default. Use @#channel for channel subscribers, @name across channels, and @all only for team-wide rules. Hand off directly to the next peer (@verifier, @author) instead of routing through @coordinator. Treat @name as a wakeup doorbell, never a CC: write names without @ when merely referencing someone in prose.',
       'Reserve post_to_board for mid-turn peer questions or handoffs; do not double-post your final report via post_to_board right before returning the required JSON.',
+      'All new board messages for each turn are delivered directly below; do not call read_board or list_models unless you need older history or a model switch.',
       'End with the required JSON. "message" is a short final post. Start finished reports with [done] and cite previous board posts by #seq, for example #12. "notify" lists members who still need to act. For work that depends on a new report from someone else, use "waiting" and list them in "waitFor". Use [] to wait for a reply by mention. Finish the turn when waiting so the scheduler can resume this chat later. Choose "done" once the assignment is ready.',
       'If the provider cannot return structured output, submit the same outcome through hive_swarm_peer.set_turn_outcome for board turn '+member.lastTurn+' and then finish.',
-      'Messages delivered for this turn: ' + JSON.stringify(member.inbox),
-    ].join('\n\n');
+      'New board messages:\n' + formatInbox(member.inbox),
+    ]).filter(Boolean).join('\n\n');
 
     const turn = {messages: [], earlyEvents: [], onActivity};
     const completed = new Promise((resolve, reject) => Object.assign(turn, {resolve, reject}));

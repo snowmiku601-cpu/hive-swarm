@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.1.1 — published
+
+Published on npm as `hive-swarm@2.1.1` (`latest`, 26 files) and `dsh-hive-swarm@2.1.1` (`next`, 10 files), tagged `v2.1.1`. Verified across **341/341** tests (`npm test`) and local Light/Dark 2× Retina captures.
+
+### Lean Delta Resume Prompts & Plain-Text Inbox
+- **Turn 2+ Delta Prompts (`codex.mjs`, `packages/dsh-hive-swarm/runner.mjs`):** Keep full role/goal onboarding exclusively on Turn 1 (`!member.threadId`); Turn 2+ resumes send only `Resume Hive Swarm turn N`, compact teammate status/worktree markers, and a plain-text `#seq @author: text` inbox (`formatInbox`), cutting repeat wakeup payloads by ~55–70%.
+- **Prompt Discipline (`skills/swarm/SKILL.md`, `packages/dsh-hive-swarm/skills/hive-swarm/SKILL.md`):** Instruct members not to echo raw `set_turn_outcome` JSON on the board first and not to re-call `read_board` / `list_models` when the inbox or active turn already provides the context.
+
+### Antigravity-Style Board & Clutter-Free Clickable Members (DSH & Codex)
+- **Board Polish (`board.html`, `board.css`, `board.js`, `packages/dsh-hive-swarm/client/views.jsx`, `style.css`):** Single-row pill search bar + funnel toggle button opening a collapsible Author/Channel/Follow filter drawer, soft vertical gradient fade + **Show more / Show less** toggle on long posts (`>= 6` lines or `> 380` chars), and a floating **↓ Latest** pill when unfollowing or scrolling up.
+- **Clickable Members (`views.jsx`, `controller.mjs`, `board.js`):** Clicking a member row opens the owned session/chat directly (including jumping to `team.parentSessionId` when clicking `@coordinator` on DSH); secondary actions (`View journal`, `@mention`, `Switch model`, `Retire`, `Clean worktree`) move into a quiet `⋯` overflow popover menu, retired workers collapse under **`RETIRED · N`**, and active worktree paths render neatly above the message preview.
+
+### Unified Goal-Mode Graph (`hive-graph.js`, `views.jsx`, `board.js`)
+- **Consolidate Goal Lead `user` → `coordinator`:** When running without a dedicated coordinator worker (Goal / parent-chat mode, `coordinator: false`), `project()` and `projectHive()` merge `author: 'user'` and `@user` targets into the crowned `coordinator` node across both **Mentions** and **Hive** views — eliminating the duplicate `user` bee node and restoring purple **"Message just sent"** Hive connectors when the Goal Lead posts.
+- **Cleaner Human Labeling:** Dedicated coordinator runs that receive manual human messages render `'You'` cleanly on Mentions pills, `Selected post` headers, and flow counts instead of raw `'user'` / `'@user'`.
+
+### Dashboard Version Badge & Passive Update Reminder
+- **Live Version & npm `dist-tags` Check (`core.mjs`, `server.mjs`, `packages/dsh-hive-swarm/{host.mjs,routes.mjs}`, `scripts/build-dsh-client.mjs`):** Displays the installed **`v2.1.1`** badge in both DSH (`v2.1.1` next to status) and Codex (`Swarm | v2.1.1`) headers, backed by shared SemVer comparator & cached passive `createUpdateChecker` (`dist-tags` for `latest` / `next`, 6h TTL, 30m error backoff, 3.5s timeout, fail-silent offline, zero LLM tokens).
+- **Remind & Upgrade Popover (`views.jsx`, `controller.mjs`, `board.*`):** Shows a warm **`↑ vX.Y.Z available`** pill directly below the version badge when a newer release exists on npm; clicking opens the version diff, copyable host-specific upgrade command, GitHub Release notes link, and persistent per-version **Dismiss** toggle.
+
 ## 2.1.0 — published
 
 Published on npm as `hive-swarm@2.1.0` (`latest`, 26 files, SHA-512 `sha512-XlVGz1hvzq5x4Bnvwofq07KRXY5WDLHUGw3yQuolUS2AEXhvTU3CIsQx/w3ek5pybvDetetYuHvRwwfQDj/rvQ==`) and `dsh-hive-swarm@2.1.0` (`next`, 10 files, SHA-512 `sha512-ItJnHVuVbTbwNQ+T38g4TmPi0yn62ql0xqrWYltW4F6MwLc2p0RO+bWcmKkXW2Ew42HcpokM5izWnWTMbuyHYg==`), tagged `v2.1.0` ([PR #8](https://github.com/snowmiku601-cpu/hive-swarm/pull/8) `0956c27` & [PR #9](https://github.com/snowmiku601-cpu/hive-swarm/pull/9) `cb2c80f`).

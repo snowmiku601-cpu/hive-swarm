@@ -324,3 +324,56 @@ test('runner falls back to create/forkParent with clean title when subagent is u
   assert.equal(calls.length,callsBefore);
   assert.equal(blockedMember.recoveryRequired,undefined);
 });
+
+test('Turn 1 sends full onboarding prompt while Turn 2+ sends lean delta resume prompt and plain-text inbox',async t=>{
+  const {NativeRunner}=await import('./runner.mjs');
+  const {RunStore}=await import('../../run-store.mjs');
+  const store=new RunStore();t.after(()=>store.close());
+  const prompts=[];let releaseWait;
+  const native={
+    listModels:async()=>[{id:'p/m',provider:'p',model:'m',efforts:['max']}],
+    create:async()=>'sess-delta',
+    prepare:async()=>{},
+    prompt:async({content})=>{prompts.push(content[0].text);},
+    wait:async()=>{await new Promise(r=>{releaseWait=r;});return {reason:'idle',state:{running:false,queue:[],pendingInput:[]}};},
+    events:async()=>[],currentTurn:()=>({lastTurn:1,openTurnStartSeq:1}),state:async()=>({running:false,queue:[],pendingInput:[]}),
+    flush:async()=>{},cancel:async()=>releaseWait?.(),dispose:async()=>{},
+  };
+  const runner=new NativeRunner({native,store});
+  const member={
+    name:'builder',lastTurn:1,writable:true,model:'p/m',effort:'max',
+    brief:'Own Delta Resume Prompt only.',
+    inbox:[{seq:12,author:'qa',channel:'implementation',addressed:true,text:'Fix edge #12 cleanly'}],
+  };
+  const team={
+    id:'team-delta',cwd:process.cwd(),task:'Deliver lean resume prompts',
+    members:[member,{name:'qa',group:'verify',channels:['implementation'],status:'waiting'}],
+  };
+
+  const a1=new AbortController();
+  const r1=runner.run({team,member,remember:p=>Object.assign(member,p),signal:a1.signal});
+  await until(()=>prompts.length===1&&releaseWait);
+  assert.match(prompts[0],/You are Hive Swarm member @builder in team team-delta/);
+  assert.match(prompts[0],/Goal: Deliver lean resume prompts/);
+  assert.match(prompts[0],/Your assignment: Own Delta Resume Prompt only\./);
+  assert.match(prompts[0],/#12 @qa #implementation \(addressed to you\):\nFix edge #12 cleanly/);
+  assert.doesNotMatch(prompts[0],/"addressed":true/);
+  a1.abort();await assert.rejects(r1);
+
+  // Simulate Turn 2 on saved session
+  member.threadId='sess-delta';
+  member.pendingRun=undefined;
+  member.lastTurn=2;
+  member.inbox=[{seq:15,author:'qa',channel:'main',addressed:true,text:'Retest #14'}];
+  releaseWait=undefined;
+  const a2=new AbortController();
+  const r2=runner.run({team,member,remember:p=>Object.assign(member,p),signal:a2.signal});
+  await until(()=>prompts.length===2&&releaseWait);
+  assert.match(prompts[1],/^Resume Hive Swarm turn 2 as @builder \(teamId: team-delta\)\./);
+  assert.match(prompts[1],/Active teammates: @qa\./);
+  assert.match(prompts[1],/do not call hive_swarm_read_board or hive_swarm_list_models/i);
+  assert.match(prompts[1],/#15 @qa \(addressed to you\):\nRetest #14/);
+  assert.doesNotMatch(prompts[1],/Goal:/);
+  assert.doesNotMatch(prompts[1],/Your assignment:/);
+  a2.abort();await assert.rejects(r2);
+});

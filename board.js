@@ -6,6 +6,9 @@
   const emptyPanel=standalone && location.pathname==='/swarm';
   const tabs=['overview','board','members','graph'];
   const GRAPH_MODE_KEY='hive-swarm-graph-mode';
+  const DISMISSED_UPDATE_KEY='hive-swarm-dismissed-update';
+  const SEMVER_RE=/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+  const CODEX_UPDATE_CMD='npx hive-swarm@latest update --host codex --after-close';
   const states={queued:'Queued',working:'Working',waiting:'Waiting',done:'Done',failed:'Failed',
     quota:'Quota limit',retired:'Retired',observer:'Observer'};
   const executionModes={subagent:'Subagent',attached:'Attached',session:'Session'};
@@ -27,6 +30,8 @@
   let stream,streamOnline=false,modelCatalog,titleEditing=false,transcript,lightbox,extendingBudget=false;
   let requestNumber=0,refreshTimer,playTimer,playing=false,cursor=null,focusedNode=null,graphFrame=0;
   let graphMode=loadGraphMode(),exportingGif=false;
+  let appVersion=typeof globalThis.__HIVE_SWARM_VERSION__==='string'?globalThis.__HIVE_SWARM_VERSION__.trim():'';
+  let updateInfo=null,updateOpen=false;
 
   function loadGraphMode() {
     try {
@@ -204,10 +209,29 @@
     });
   }
   function bee(member,compact=false) {
-    const tile=node('span','bee-tile'+(compact?' compact':''));
-    tile.dataset.status=member.status??'observer';
-    tile.append(beeSprite(member));
+    const isCoord=member?.role==='coordinator'||member?.name==='coordinator';
+    const tile=node('span','bee-tile'+(compact?' compact':'')+(isCoord?' coord-tile':''));
+    tile.dataset.status=member?.status??'observer';
+    if (!isCoord && member?.name && member.name!=='system') {
+      const palette=beeTint(member);
+      if (tile.style?.setProperty) {
+        tile.style.setProperty('--tile-bg',palette.bg);
+        tile.style.setProperty('--tile-border',palette.border);
+      }
+    }
+    const muted=!isCoord&&['done','retired'].includes(member?.status);
+    tile.append(beeSprite(member,{muted}));
     return tile;
+  }
+  function openMemberTarget(member,opener) {
+    const url=chatUrl(member?.threadId);
+    if (!url) return false;
+    if (!standalone) {
+      rpc('ui/open-link',{url}).catch(error=>notice(error.message,true));
+      return true;
+    }
+    openTranscript(member,opener);
+    return true;
   }
   function beeTint(member) {
     if (typeof HiveBee?.tintStyle==='function') {
@@ -301,8 +325,71 @@
     return changed;
   }
 
+  function renderVersionTag(value=appVersion) {
+    const clean=typeof value==='string'?value.trim():'';
+    if (!clean) return;
+    appVersion=clean;
+    const tag=$('app-version');
+    if (!tag) return;
+    tag.textContent='v'+clean;
+    tag.title='Hive Swarm v'+clean;
+    tag.hidden=false;
+  }
+  function safeReleaseUrl(candidate,versionTag) {
+    for (const raw of [candidate,'https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v'+versionTag]) {
+      if (typeof raw!=='string'||!raw) continue;
+      try {
+        const parsed=new URL(raw);
+        if (parsed.protocol==='https:'||parsed.protocol==='http:') return parsed.href;
+      } catch {}
+    }
+    return 'https://github.com/snowmiku601-cpu/hive-swarm/releases';
+  }
+  function isDismissedUpdate(latest) {
+    try {return globalThis.localStorage?.getItem?.(DISMISSED_UPDATE_KEY)===latest;}
+    catch {return false;}
+  }
+  function renderUpdateBadge() {
+    const wrap=$('update-wrap'),pill=$('update-pill'),popover=$('update-popover');
+    if (!wrap||!pill||!popover) return;
+    const latest=typeof updateInfo?.latest==='string'?updateInfo.latest.trim():'';
+    const show=Boolean(updateInfo?.available===true&&latest&&SEMVER_RE.test(latest)&&!isDismissedUpdate(latest));
+    wrap.hidden=!show;
+    if (!show) {
+      updateOpen=false;
+      popover.hidden=true;
+      pill.setAttribute('aria-expanded','false');
+      return;
+    }
+    if (updateInfo?.current&&!appVersion) renderVersionTag(updateInfo.current);
+    const current=appVersion||(typeof updateInfo?.current==='string'?updateInfo.current.trim():'');
+    pill.textContent='↑ v'+latest+' available';
+    pill.title='Hive Swarm v'+latest+' is available on npm';
+    pill.setAttribute('aria-expanded',String(updateOpen));
+    $('update-diff').textContent=current?'v'+current+' → v'+latest:'v'+latest;
+    $('update-cmd').textContent=CODEX_UPDATE_CMD;
+    $('update-link').href=safeReleaseUrl(updateInfo?.url,latest);
+    popover.hidden=!updateOpen;
+  }
+  async function checkForUpdate() {
+    if (!standalone||typeof fetch!=='function') return;
+    try {
+      const response=await fetch('/swarm/update',{cache:'no-store'});
+      if (!response?.ok) return;
+      const data=await response.json();
+      if (!data||typeof data.available!=='boolean') return;
+      if (typeof data.current==='string'&&!appVersion) renderVersionTag(data.current);
+      updateInfo=data;
+      renderUpdateBadge();
+    } catch {}
+  }
+
   function acceptStatus(value) {
     if (!value?.id || !Array.isArray(value.members)) return;
+    if (value.update && typeof value.update.available==='boolean') {
+      updateInfo=value.update;
+      renderUpdateBadge();
+    }
     if (team?.id && team.id!==value.id) {
       if (transcript) closeTranscript();
       if (lightbox) closeLightbox();
@@ -386,6 +473,11 @@
         const details=node('div');
         details.append(node('strong','',author(member.name)),node('small','',condition(member)));
         item.append(bee(member,true),details);
+        if (chatUrl(member.threadId)) {
+          item.dataset.clickable='true';
+          item.title='Open '+author(member.name);
+          item.onclick=()=>openMemberTarget(member,item);
+        }
         return item;
       }));
       const retired=roster.length-live.length;
@@ -407,11 +499,19 @@
     return {filter,channel,query,matching};
   }
 
+  function syncBoardChrome() {
+    const activeFilter=Boolean($('member-filter').value||$('channel-filter').value||!following);
+    $('toggle-board-filters').dataset.active=String(activeFilter);
+    const feed=$('feed');
+    const away=(feed.scrollHeight-feed.scrollTop-feed.clientHeight)>48;
+    $('board-latest').hidden=(following&&!away)||!feed.children?.length;
+  }
+
   function renderFeed(roster=people()) {
     const {filter,channel,query,matching}=matchingPosts();
     if (following) seen=chronology.at(-1)?.seq??0;
     const key=JSON.stringify([team.id,filter,channel,query,following,feedLimit,matching.map(event=>event.seq)]);
-    if (key===feedKey) return;
+    if (key===feedKey) {syncBoardChrome();return;}
     feedKey=key;
     const feed=$('feed');
     const scroll=feed.scrollTop;
@@ -441,19 +541,52 @@
       const line=node('div','post-top');
       const who=node('div');
       who.append(node('strong','',author(event.author)));
-      if (event.channel&&event.channel!=='main') who.append(node('span','channel-tag','#'+event.channel));
       if (event.targets?.length) who.append(node('span','targets','→ '+event.targets.map(author).join(' ')));
+      if (event.channel&&event.channel!=='main') who.append(node('span','channel-tag','#'+event.channel));
       line.append(who,node('span','stamp',stamp(event)));
-      const content=node('div');
+      const content=node('div','post-body');
       const message=node('div','message');
       richText(message,event.text);
       content.append(line,message);
-      entry.append(bee(member,true),content);
+      const rawText=String(event.text??'');
+      if (rawText.length>360||rawText.split(/\r?\n/).length>6) {
+        message.dataset.clamped='true';
+        const more=node('button','expand-post-btn','Show more');
+        more.type='button';
+        more.setAttribute('aria-expanded','false');
+        const toggle=()=>{
+          const expand=message.dataset.clamped==='true';
+          message.dataset.clamped=expand?'false':'true';
+          more.textContent=expand?'Show less':'Show more';
+          more.setAttribute('aria-expanded',String(expand));
+        };
+        more.onclick=toggle;
+        message.onclick=ev=>{
+          if (message.dataset.clamped!=='true') return;
+          if (ev?.target?.closest?.('a, button, code, pre')) return;
+          if (globalThis.getSelection?.()?.toString?.()) return;
+          toggle();
+        };
+        content.append(more);
+      }
+      const tile=bee(member,true);
+      let avatar=tile;
+      if (chatUrl(member.threadId)) {
+        const avatarBtn=node('button','post-avatar-btn');
+        avatarBtn.type='button';
+        avatarBtn.setAttribute('aria-label','Open '+author(member.name)+' session');
+        avatarBtn.title='Open '+author(member.name);
+        avatarBtn.onclick=()=>openMemberTarget(member,avatarBtn);
+        avatarBtn.append(tile);
+        avatar=avatarBtn;
+      }
+      entry.append(avatar,content);
       items.push(entry);
     }
     if (!items.length) items.push(node('li','empty',query||filter||channel?'No matching posts.':'No posts yet.'));
     feed.replaceChildren(...items);
     feed.scrollTop=following?feed.scrollHeight:scroll;
+    syncBoardChrome();
   }
 
   async function jumpToPost(seq) {
@@ -1097,18 +1230,59 @@
   }
 
   function memberCard(member) {
-    const card=node('li','member-card'+(member.role==='coordinator'?' coordinator':''));
-    const info=node('div');
+    const isCoord=member.role==='coordinator'||member.name==='coordinator';
+    const card=node('li','member-card'+(isCoord?' coordinator':''));
+    card.dataset.status=member.status??'observer';
+    const draft=memberDrafts.get(member.name)??{};
+    card.dataset.menuOpen=draft.open||draft.confirmRetire?'true':'false';
+    if (member.recoveryRequired) card.dataset.recovery='true';
+    const canNav=Boolean(chatUrl(member.threadId));
+    if (canNav) {
+      card.dataset.clickable='true';
+      card.tabIndex=0;
+      card.title='Open '+author(member.name);
+      card.onclick=event=>{
+        if (event?.target?.closest?.('a, button, summary, details, input, select, textarea')) return;
+        if (globalThis.getSelection?.()?.toString?.()) return;
+        openMemberTarget(member,card);
+      };
+      card.onkeydown=event=>{
+        if (event.target===card&&(event.key==='Enter'||event.key===' ')) {
+          event.preventDefault();
+          openMemberTarget(member,card);
+        }
+      };
+    }
+    const info=node('div','member-main');
     const line=node('div','member-top');
+    const ident=node('div','member-ident');
+    const subtitle=isCoord?'Coordinator':smartTaskLabel(member);
+    ident.append(node('h3','member-name',author(member.name)),node('span','member-task',subtitle));
+    const last=latestByAuthor.get(member.name);
+    const meta=node('div','member-meta');
     const badge=node('span','status-word',condition(member));
     badge.dataset.status=member.status;
     const mode=modeBadge(member);
     const pills=node('span','member-pills');
     if (mode) pills.append(mode);
     pills.append(badge);
-    line.append(node('h3','member-name',author(member.name)),pills);
+    const modelInfo=[member.model,member.effort,last?'#'+last.seq:''].filter(Boolean).join(' · ');
+    meta.append(pills);
+    if (modelInfo) meta.append(node('span','minor member-context',modelInfo));
+    const menuBtn=node('button','member-menu-btn','⋯');
+    menuBtn.type='button';
+    menuBtn.setAttribute('aria-label','More actions for '+author(member.name));
+    menuBtn.setAttribute('aria-expanded',String(card.dataset.menuOpen==='true'));
+    menuBtn.onclick=event=>{
+      event?.stopPropagation?.();
+      const opening=card.dataset.menuOpen!=='true';
+      card.dataset.menuOpen=opening?'true':'false';
+      menuBtn.setAttribute('aria-expanded',String(opening));
+    };
+    meta.append(menuBtn);
+    line.append(ident,meta);
     info.append(line);
-    if (member.role==='coordinator'&&['stalled','budget'].includes(team.phase)) {
+    if (isCoord&&['stalled','budget'].includes(team.phase)) {
       card.dataset.needsYou='true';
       line.append(node('strong','needs-you','Needs you'));
       const alerts=attentionItems();
@@ -1116,23 +1290,34 @@
         alerts.find(issue=>issue.kind!=='worktree'))?.text);
       info.append(reason);
     }
-    const last=latestByAuthor.get(member.name);
-    const context=[member.model,member.effort,member.group?'@'+member.group:'',
-      ...(member.channels??[]).map(channel=>'#'+channel),member.addedBy?'Invited by '+author(member.addedBy):'',
-      last?'#'+last.seq:''].filter(Boolean);
-    if (context.length) info.append(node('p','minor member-context',context.join(' · ')));
+    const waiting=member.pendingWaitFor??member.waitFor;
+    const hasChips=Boolean(member.workspace||member.worktree||member.group||member.channels?.length||member.addedBy||waiting?.length);
+    if (hasChips) {
+      const chips=node('div','member-chips');
+      if (member.workspace) {
+        const pathEl=node('code','member-path',member.workspace.cwd);
+        pathEl.title=member.workspace.cwd;
+        chips.append(pathEl);
+      } else if (member.worktree) chips.append(node('span','member-chip','Worktree on turn 1'));
+      if (member.group) chips.append(node('span','member-chip','@'+member.group));
+      if (member.channels?.length) chips.append(node('span','member-chip',member.channels.map(c=>'#'+c).join(' ')));
+      if (member.addedBy) chips.append(node('span','member-chip','Invited by '+author(member.addedBy)));
+      if (waiting?.length) {
+        const waitChip=node('span','member-chip','Waiting on '+waiting.map(author).join(', '));
+        waitChip.dataset.tone='wait';
+        chips.append(waitChip);
+      }
+      info.append(chips);
+    }
     const detail=last?.text??member.brief;
     if (detail) {
       const summary=node('p','member-summary',detail);
       summary.title=detail;
       info.append(summary);
     }
-    const waiting=member.pendingWaitFor??member.waitFor;
-    if (waiting?.length) info.append(node('p','quiet','Waiting on '+waiting.map(author).join(', ')));
     if (member.recoveryRequired) info.append(node('p','needs-reason','Outcome unconfirmed. Inspect journal, then retry or dismiss.'));
-    if (member.workspace) info.append(node('code','member-path',member.workspace.cwd));
-    else if (member.worktree) info.append(node('p','quiet','Isolated worktree on first turn'));
     const actions=node('div','member-actions');
+    actions.onclick=event=>event?.stopPropagation?.();
     let modelControl;
     const url=chatUrl(member.threadId);
     if (url) {
@@ -1140,8 +1325,10 @@
       link.href=url;
       if (!standalone) link.onclick=event=>{
         event.preventDefault();
+        event?.stopPropagation?.();
         rpc('ui/open-link',{url:link.href}).catch(error=>notice(error.message,true));
       };
+      else link.onclick=event=>event?.stopPropagation?.();
       actions.append(link);
     }
     const journal=transcriptButton(member);
@@ -1150,12 +1337,11 @@
       const send=node('button','link-button','@mention');
       send.type='button';
       send.setAttribute('aria-label','@mention '+author(member.name)+' on board');
-      send.onclick=()=>mentionMember(member.name);
+      send.onclick=event=>{event?.stopPropagation?.();mentionMember(member.name);};
       actions.append(send);
     }
     if (standalone&&!member.external) {
       const active=member.status!=='retired'&&!member.retireAfterTurn;
-      const draft=memberDrafts.get(member.name)??{};
       memberDrafts.set(member.name,draft);
       if (member.recoveryRequired) {
         const busy=member.status==='working';
@@ -1191,7 +1377,10 @@
       }
     }
     if (actions.childElementCount) info.append(actions);
-    if (modelControl) info.append(modelControl);
+    if (modelControl) {
+      modelControl.onclick=event=>event?.stopPropagation?.();
+      info.append(modelControl);
+    }
     if (member.status==='working') info.append(activitySlot(member));
     card.append(bee(member),info);
     return card;
@@ -1224,10 +1413,12 @@
 
   /* Fallback graph & GIF helpers when HiveGraph 2.1 / HiveGif are not yet loaded */
   function fallbackProjectHive(events,roster,cursorSeq) {
+    const mergeUser=!roster.some(m=>(m.role==='coordinator'||m.name==='coordinator')&&!m.external)&&!roster.some(m=>m.name==='user');
+    const resolveActor=name=>(mergeUser&&name==='user')?'coordinator':name;
     const upTo=events.filter(event=>event.seq<=cursorSeq&&graph.isPost(event));
     const lastPost=upTo.at(-1)??null;
     const latestSeqByAuthor=new Map();
-    for (const post of upTo) latestSeqByAuthor.set(post.author,post.seq);
+    for (const post of upTo) latestSeqByAuthor.set(resolveActor(post.author),post.seq);
     const coordMember=roster.find(member=>member.role==='coordinator')??{name:'coordinator',role:'coordinator',status:'waiting'};
     const workers=roster.filter(member=>member.role!=='coordinator'&&!member.external);
     const buckets={working:[],waiting:[],needs:[],done:[]};
@@ -1264,8 +1455,10 @@
       connectors.push({from:'waiting',to:'coordinator',kind:'waiting',label:'Waiting on'});
     }
     if (lastPost&&(lastPost.targets?.length||coordPhase!=='done')) {
-      const from=lastPost.author==='coordinator'?'coordinator':(memberBucket.get(lastPost.author)??'coordinator');
-      const target=lastPost.targets?.find(name=>name!==lastPost.author);
+      const authorName=resolveActor(lastPost.author);
+      const from=authorName==='coordinator'?'coordinator':(memberBucket.get(authorName)??'coordinator');
+      const resolvedTargets=(lastPost.targets??[]).map(resolveActor);
+      const target=resolvedTargets.find(name=>name!==authorName);
       const to=target?(target==='coordinator'?'coordinator':(memberBucket.get(target)??'coordinator')):(from==='coordinator'&&clusters[0]?clusters[0].id:'coordinator');
       if (from!==to) connectors.push({from,to,kind:'message',label:'Message just sent',seq:lastPost.seq});
     }
@@ -1711,7 +1904,8 @@
         btn.setAttribute('aria-pressed',String(focusedNode===member.name));
         const dot=node('span','pill-dot');
         dot.setAttribute('aria-hidden','true');
-        btn.append(beeSprite(member,{muted:beeMuted}),node('span','pill-name',member.name),dot);
+        const label=member.name==='user'?'You':member.name==='system'?'System':member.name;
+        btn.append(beeSprite(member,{muted:beeMuted}),node('span','pill-name',label),dot);
         if (member.broadcasts) btn.append(node('span','node-broadcast','@all '+member.broadcasts));
         btn.onclick=()=>{
           focusedNode=focusedNode===member.name?null:member.name;
@@ -2010,6 +2204,48 @@
   }
 
   $('brand-bee').append(HiveBee.sprite('coordinator',{coordinator:true}));
+  renderVersionTag();
+  $('update-popover').hidden=true;
+  $('update-wrap').hidden=true;
+  $('update-pill').onclick=event=>{
+    event?.stopPropagation?.();
+    updateOpen=!updateOpen;
+    renderUpdateBadge();
+  };
+  $('update-copy').onclick=async()=>{
+    const btn=$('update-copy');
+    try {await globalThis.navigator?.clipboard?.writeText?.(CODEX_UPDATE_CMD);} catch {}
+    btn.textContent='Copied';
+    setTimeout(()=>{if (btn) btn.textContent='Copy command';},1800);
+  };
+  $('update-dismiss').onclick=()=>{
+    const latest=typeof updateInfo?.latest==='string'?updateInfo.latest.trim():'';
+    if (latest) {
+      try {globalThis.localStorage?.setItem?.(DISMISSED_UPDATE_KEY,latest);} catch {}
+    }
+    updateOpen=false;
+    renderUpdateBadge();
+  };
+  $('update-link').onclick=event=>{
+    if (!standalone) {
+      event?.preventDefault?.();
+      rpc('ui/open-link',{url:$('update-link').href}).catch(error=>notice(error.message,true));
+    }
+  };
+  document.addEventListener?.('click',event=>{
+    if (!updateOpen) return;
+    const wrap=$('update-wrap');
+    if (typeof wrap.contains==='function'&&wrap.contains(event?.target)) return;
+    updateOpen=false;
+    renderUpdateBadge();
+  });
+  document.addEventListener?.('keydown',event=>{
+    if (event?.key==='Escape'&&updateOpen) {
+      updateOpen=false;
+      renderUpdateBadge();
+      $('update-pill')?.focus?.();
+    }
+  });
   $('theme').onclick=()=>{
     const theme=document.documentElement.dataset.theme==='dark'?'light':'dark';
     setTheme(theme);
@@ -2034,11 +2270,31 @@
   $('search-posts').oninput=()=>renderFeed();
   $('member-filter').onchange=()=>renderFeed();
   $('channel-filter').onchange=()=>renderFeed();
+  $('board-filters').hidden=true;
+  $('toggle-board-filters').onclick=()=>{
+    const drawer=$('board-filters');
+    const opening=Boolean(drawer.hidden);
+    drawer.hidden=!opening;
+    $('toggle-board-filters').setAttribute('aria-expanded',String(opening));
+  };
   $('search-members').oninput=()=>renderMembers();
   $('follow').onclick=()=>{
     following=!following;
     $('follow').setAttribute('aria-pressed',String(following));
     renderFeed();
+  };
+  $('board-latest').onclick=()=>{
+    following=true;
+    $('follow').setAttribute('aria-pressed','true');
+    const feed=$('feed');
+    feed.scrollTop=feed.scrollHeight;
+    $('board-latest').hidden=true;
+    renderFeed();
+  };
+  $('feed').onscroll=()=>{
+    const feed=$('feed');
+    const away=(feed.scrollHeight-feed.scrollTop-feed.clientHeight)>48;
+    $('board-latest').hidden=(!away&&following)||!feed.children?.length;
   };
   $('compose').onsubmit=async event=>{
     event.preventDefault();
@@ -2149,6 +2405,7 @@
     refresh();
     scheduleGraph();
   });
+  if (standalone) void checkForUpdate();
   if (emptyPanel) {
     $('title').textContent='Swarm';
     $('meta').textContent='No swarms to display yet.';
@@ -2180,7 +2437,7 @@
       }
     });
     rpc('ui/initialize',{
-      appInfo:{name:'Hive Swarm',version:globalThis.__HIVE_SWARM_VERSION__||'2.1.0'},appCapabilities:{},protocolVersion:'2026-01-26',
+      appInfo:{name:'Hive Swarm',version:globalThis.__HIVE_SWARM_VERSION__||'2.1.1'},appCapabilities:{},protocolVersion:'2026-01-26',
     }).then(()=>{
       parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');
       refresh();

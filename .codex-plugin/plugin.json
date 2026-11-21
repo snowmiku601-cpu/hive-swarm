@@ -1,6 +1,6 @@
 {
   "name": "hive-swarm",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "license": "MIT",
   "description": "Cross-harness Hive Swarm plugin: coordinate dependent tasks and wake agents with @mentions.",
   "skills": "./skills/",

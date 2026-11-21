@@ -818,3 +818,40 @@ test('2.1.0 Codex schema, CSP img-src, and confined GET /board/:id/screenshot/:s
   }
   assert.equal((await fetch(server.origin+'/board/00000000-0000-0000-0000-000000000000/screenshot/1/0',{headers:same})).status,404);
 });
+
+test('GET /swarm/update enforces same-origin and open_board surfaces update info while board_status stays lean',async t=>{
+  const scratch=realpathSync(tmpdir());
+  const dataDirectory=mkdtempSync(join(scratch,'hive-update-srv-'));
+  const mockUpdate={current:'2.1.0',latest:'2.2.0',available:true,url:'https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.2.0',checked:true};
+  let disposed=false;
+  const updateChecker={
+    peek:()=>mockUpdate,
+    check:async()=>mockUpdate,
+    dispose:()=>{disposed=true;},
+  };
+  const server=await service({
+    dataDirectory,listenPort:0,
+    runner:{listModels:async()=>models,run:async()=>done,close(){}},
+    updateChecker,
+  });
+  t.after(async()=>{await server.close();assert.equal(disposed,true);rmSync(dataDirectory,{recursive:true,force:true});});
+
+  assert.equal((await fetch(server.origin+'/swarm/update')).status,403);
+  assert.equal((await fetch(server.origin+'/swarm/update',{headers:{'sec-fetch-site':'cross-site'}})).status,403);
+  const res=await fetch(server.origin+'/swarm/update',{headers:{'sec-fetch-site':'same-origin'}});
+  assert.equal(res.status,200);
+  assert.deepEqual(await res.json(),mockUpdate);
+
+  const key=readFileSync(join(dataDirectory,'service.key'),'utf8');
+  const invoke=async (name,args={})=>{
+    const response=await fetch(server.origin+'/tool',{method:'POST',headers:{
+      authorization:'Bearer '+key,'content-type':'application/json',
+    },body:JSON.stringify({name,arguments:args})});
+    return response.json();
+  };
+  const team=await invoke('start_team',{cwd:process.cwd(),task:'Update route check',members});
+  const statusPayload=await invoke('board_status',{teamId:team.id});
+  assert.equal(statusPayload.update,undefined);
+  const openPayload=await invoke('open_board',{teamId:team.id});
+  assert.deepEqual(openPayload.update,mockUpdate);
+});

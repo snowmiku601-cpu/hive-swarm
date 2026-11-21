@@ -8,7 +8,13 @@ const requestIdentity = () => globalThis.crypto.randomUUID();
 export const ownedSession = member => member?.session?.host===NATIVE_HOST?member.session.id:undefined;
 export function sessionTarget(team,member) {
   const id=ownedSession(member);
-  if(!id)return null;
+  if(!id) {
+    const isCoordinator=member?.role==='coordinator'||member?.name==='coordinator';
+    if(isCoordinator&&typeof team?.parentSessionId==='string'&&team.parentSessionId.trim()) {
+      return team.parentSessionId.trim();
+    }
+    return null;
+  }
   if(member?.executionMode==='subagent'&&typeof team?.parentSessionId==='string'&&team.parentSessionId.trim()) {
     return {parentSessionId:team.parentSessionId.trim(),childSessionId:id,mode:'continuable'};
   }
@@ -53,13 +59,15 @@ export function createController({connection,teamId=null,sessionId=null,workspac
   const workspaceId=workspaceKey(workspace);
   const inWorkspace=team=>!workspaceId||workspaceKey(team.cwd)===workspaceId;
   let selected=teamId||null,refs=0,disposed=false,generation=0,scope=null,cursor=null,retry=null,historyAfter=0,journalRequest=null;
+  let updateRetryScheduled=false,updateTimer=null;
   let state={teams:[],team:null,selectedId:selected,sessionId,workspace,loading:false,connection:'idle',error:null,pending:false,
-    models:[],modelsLoading:false,journal:null,history:[],hasMoreHistory:false,historyLoading:false};
+    models:[],modelsLoading:false,journal:null,history:[],hasMoreHistory:false,historyLoading:false,version:null,update:null};
   const listeners=new Set(),requests=new Set();
   const emit=patch=>{if(disposed)return;state={...state,...patch};for(const listener of listeners)listener();};
   const active=(token,signal)=>!disposed&&refs>0&&token===generation&&!signal.aborted;
   function cancel() {
     generation++;scope?.abort();scope=null;
+    clearTimeout(updateTimer);updateTimer=null;
     for(const request of requests)request.abort();requests.clear();
   }
   const rpc=(method,payload,signal)=>swarmRpc(connection,method,payload,signal);
@@ -85,7 +93,17 @@ export function createController({connection,teamId=null,sessionId=null,workspac
       try{accept(value.team);}catch(error){emit({teams,team:null});throw error;}
       if(!teams.some(team=>team.id===selected))teams.push(value.team);
     }else emit({team:null});
-    emit({teams,loading:false,error:state.error?.action?state.error:null,connection:'connected'});
+    emit({teams,loading:false,error:state.error?.action?state.error:null,connection:'connected',
+      ...(typeof value.version==='string'&&value.version.trim()?{version:value.version.trim()}:{}),
+      ...(value.update&&typeof value.update==='object'?{update:value.update}:{})});
+    if(value.update?.checked===false&&!updateRetryScheduled) {
+      updateRetryScheduled=true;
+      updateTimer=setTimeout(()=>{
+        updateTimer=null;
+        if(active(token,signal)&&state.update?.checked===false)void snapshot(signal,token).catch(()=>{});
+      },2500);
+      updateTimer.unref?.();
+    }
   }
   async function follow(signal,token) {
     try {
@@ -197,7 +215,8 @@ export function createController({connection,teamId=null,sessionId=null,workspac
       } catch(error){if(error?.name!=='AbortError')emit({historyLoading:false,error:errorOf(error)});}
     },
     async openSession(member,{fallbackToJournal=true}={}) {
-      const owned=state.team?.members.find(item=>item.name===member);
+      const owned=state.team?.members.find(item=>item.name===member)
+        ??(member==='coordinator'?{name:'coordinator',role:'coordinator'}:undefined);
       const target=sessionTarget(state.team,owned);
       if(!target){emit({error:{message:'This member has no owned session yet.'}});return 'none';}
       if(typeof openSession==='function') {
@@ -211,7 +230,7 @@ export function createController({connection,teamId=null,sessionId=null,workspac
       await api.openJournal(member);return 'journal';
     },
     setError:error=>emit({error:errorOf(error)}),
-    dispose(){if(disposed)return;cancel();disposed=true;listeners.clear();},
+    dispose(){if(disposed)return;cancel();clearTimeout(updateTimer);updateTimer=null;disposed=true;listeners.clear();},
   };
   return api;
 }

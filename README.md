@@ -5,9 +5,9 @@
 
   <p>
     <a href="https://github.com/snowmiku601-cpu/hive-swarm/actions/workflows/ci.yml"><img src="https://github.com/snowmiku601-cpu/hive-swarm/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
-    <a href="https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.1.0"><img src="https://img.shields.io/badge/release-v2.1.0-f6bc55?style=flat-square" alt="GitHub Release v2.1.0" /></a>
-    <a href="https://www.npmjs.com/package/hive-swarm"><img src="https://img.shields.io/badge/npm-hive--swarm%402.1.0-f6bc55?style=flat-square" alt="npm hive-swarm 2.1.0" /></a>
-    <a href="https://www.npmjs.com/package/dsh-hive-swarm"><img src="https://img.shields.io/badge/DSH%20(next)-dsh--hive--swarm%402.1.0-9a7138?style=flat-square" alt="npm dsh-hive-swarm 2.1.0 next" /></a>
+    <a href="https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.1.1"><img src="https://img.shields.io/badge/release-v2.1.1-f6bc55?style=flat-square" alt="GitHub Release v2.1.1" /></a>
+    <a href="https://www.npmjs.com/package/hive-swarm"><img src="https://img.shields.io/badge/npm-hive--swarm%402.1.1-f6bc55?style=flat-square" alt="npm hive-swarm 2.1.1" /></a>
+    <a href="https://www.npmjs.com/package/dsh-hive-swarm"><img src="https://img.shields.io/badge/DSH%20(next)-dsh--hive--swarm%402.1.1-9a7138?style=flat-square" alt="npm dsh-hive-swarm 2.1.1 next" /></a>
     <img src="https://img.shields.io/badge/runtime-Node.js%2022.19%20%7C%2024.2%2B-75baef?style=flat-square" alt="Node.js 22.19 or 24.2 and newer" />
     <img src="https://img.shields.io/badge/core_runtime_dependencies-0-55cbb2?style=flat-square" alt="Zero core runtime dependencies" />
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-b3ce64?style=flat-square" alt="MIT license" /></a>
@@ -30,8 +30,8 @@ Hive Swarm is a lightweight **multi-agent coordination engine and UI** for AI co
 
 The coordination core (`engine.mjs`, `core.mjs`, `run-store.mjs`) is harness-agnostic:
 
-- **Codex Desktop & Codex CLI (`hive-swarm@2.1.0`, npm `latest`)** — full MCP server, attached child threads on Codex `0.171+` (`fork: "coordinator"`, graceful `0.169.1` fallback), strict model locks, Antigravity-style inline MCP App, and standalone four-tab board UI with `Hive`/`Mentions` Graph and pure-JS GIF export.
-- **DeepSeek Harness Desktop `0.2.2-rc.5` (`dsh-hive-swarm@2.1.0`, npm `next`, experimental)** — hidden native DSH subagent workers (zero sidebar clutter), permission-scoped tools, bee-marked **Swarm** Start card, right-dock tab, and full React dashboard matching Antigravity Overview & Dual-Mode Graph.
+- **Codex Desktop & Codex CLI (`hive-swarm@2.1.1`, npm `latest`)** — full MCP server, attached child threads on Codex `0.171+` (`fork: "coordinator"`, graceful `0.169.1` fallback), lean Turn 2+ delta resume prompts, strict model locks, Antigravity-style inline MCP App, and standalone four-tab board UI with `Hive`/`Mentions` Graph, pure-JS GIF export, and passive npm update alerts.
+- **DeepSeek Harness Desktop `0.2.2-rc.5` (`dsh-hive-swarm@2.1.1`, npm `next`, experimental)** — hidden native DSH subagent workers (zero sidebar clutter), lean delta resume prompts, permission-scoped tools, bee-marked **Swarm** Start card, right-dock tab, and full React dashboard matching Antigravity Overview, Board, clickable Members & Dual-Mode Graph with built-in version & update alerts.
 
 The core runtime uses **Node.js ESM**, built-in `node:sqlite`, and **zero third-party runtime dependencies**. Pinned `devDependencies` are only used to build and test the DSH client bundle (React is supplied by DSH at runtime).
 
@@ -41,8 +41,8 @@ Requires **Node.js `^22.19.0 || >=24.2.0`** and either **Codex Desktop / Codex C
 
 | Host | Published package | Status | Worker & UI model |
 | --- | --- | --- | --- |
-| **Codex Desktop / CLI** | `hive-swarm@2.1.0` (`latest`) | Production adapter; attached threads on `0.171+` & qualified on `0.169.1` | Attached/per-member Codex threads, inline MCP App & standalone 4-tab dashboard |
-| **DeepSeek Harness `0.2.2-rc.5`** | `dsh-hive-swarm@2.1.0` (`next`) | Experimental; native subagent swarms & fail-closed tool sandboxing | Hidden native DSH subagents, Start card, right tab & Antigravity-style React dashboard |
+| **Codex Desktop / CLI** | `hive-swarm@2.1.1` (`latest`) | Production adapter; attached threads on `0.171+` & qualified on `0.169.1` | Attached/per-member Codex threads, lean delta wakeups, inline MCP App & standalone 4-tab dashboard |
+| **DeepSeek Harness `0.2.2-rc.5`** | `dsh-hive-swarm@2.1.1` (`next`) | Experimental; native subagent swarms & fail-closed tool sandboxing | Hidden native DSH subagents, lean delta wakeups, Start card, right tab & Antigravity React dashboard |
 
 ### 1. Codex Desktop / CLI (via npm — recommended)
 
@@ -78,7 +78,7 @@ After installing or updating, open a **new Codex Desktop chat** so the fresh MCP
 DSH manages plugins through its own profile manager. Close DSH Desktop, then run:
 
 ```sh
-dsh plugin --profile desktop add dsh-hive-swarm@2.1.0
+dsh plugin --profile desktop add dsh-hive-swarm@2.1.1
 ```
 
 - `npx hive-swarm@latest install --host dsh` prints this command and never edits a DSH profile directly.
@@ -119,19 +119,19 @@ Pass `--test` to run the test suite first (`./install.sh --test`).
 
 ## See it in action
 
-See what is running, which outcome threads are blocked or done, and where each result came from. The captures below use representative local demo data exported as 2× Retina PNGs and an interactive walkthrough. Click **Light PNG / Dark PNG** for full-resolution captures, or watch the **HD MP4 demo video** on [GitHub Releases (`v2.1.0`)](https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.1.0).
+See what is running, which outcome threads are blocked or done, and where each result came from. The captures below use representative local demo data exported as 2× Retina PNGs and an interactive walkthrough. Click **Light PNG / Dark PNG** for full-resolution captures, or watch the **HD MP4 demo video** on [GitHub Releases (`v2.1.1`)](https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.1.1).
 
 <p align="center">
-  <a href="https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.1.0">
-    <img src="./assets/hive-swarm-demo.gif" alt="Hive Swarm 2.1.0 interactive walkthrough — Overview accordion, Screenshots lightbox, Board, Members, Journal, Hive Honeycomb, Mentions capsule ring, and Export GIF" width="100%" />
+  <a href="https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.1.1">
+    <img src="./assets/hive-swarm-demo.gif" alt="Hive Swarm interactive walkthrough — Overview accordion, Screenshots lightbox, Board, Members, Journal, Hive Honeycomb, Mentions capsule ring, and Export GIF" width="100%" />
   </a>
 </p>
 
 <p align="center">
-  <sub>Animated 2.1.0 walkthrough (Overview → Screenshots lightbox → Board → Members → Journal → Hive Honeycomb → Mentions ring → Export GIF) · <a href="https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.1.0">Download 1280×800 H.264 MP4 on GitHub Releases</a></sub>
+  <sub>Animated walkthrough (Overview → Screenshots lightbox → Board → Members → Journal → Hive Honeycomb → Mentions ring → Export GIF) · <a href="https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.1.1">Download 1280×800 H.264 MP4 on GitHub Releases</a></sub>
 </p>
 
-### Inside the 2.1.0 dashboard (Light & Dark)
+### Inside the 2.1.1 dashboard (Light & Dark)
 
 <table>
   <tr>
@@ -139,11 +139,11 @@ See what is running, which outcome threads are blocked or done, and where each r
     <td align="center" width="50%"><a href="./assets/graph-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/graph-dark.png" /><img src="./assets/graph-light.png" alt="Graph Hive Honeycomb mode showing Waiting, Needs you, Coordinator and Done hex clusters" width="100%" /></picture></a><br/><sub><strong>Graph · Hive Mode</strong> · multi-cluster honeycomb (<code>Working</code>, <code>Waiting</code>, <code>Done</code>) &amp; animated message links<br/><a href="./assets/graph-light.png">Light PNG</a> · <a href="./assets/graph-dark.png">Dark PNG</a></sub></td>
   </tr>
   <tr>
-    <td align="center" width="50%"><a href="./assets/graph-mentions-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/graph-mentions-dark.png" /><img src="./assets/graph-mentions-light.png" alt="Graph Mentions mode showing capsule pills, Expand @all edge, Inspector edges and Export GIF" width="100%" /></picture></a><br/><sub><strong>Graph · Mentions Mode</strong> · outer-ring capsule pills, <code>@all</code> toggles, replay scrubber &amp; Export GIF<br/><a href="./assets/graph-mentions-light.png">Light PNG</a> · <a href="./assets/graph-mentions-dark.png">Dark PNG</a></sub></td>
-    <td align="center" width="50%"><a href="./assets/board-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/board-dark.png" /><img src="./assets/board-light.png" alt="Board with channel filters, searchable Markdown messages and live Hive summary" width="100%" /></picture></a><br/><sub><strong>Board</strong> · searchable Markdown feed, channels, mentions, <code>#seq</code> jumps &amp; Hive sidebar<br/><a href="./assets/board-light.png">Light PNG</a> · <a href="./assets/board-dark.png">Dark PNG</a></sub></td>
+    <td align="center" width="50%"><a href="./assets/graph-mentions-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/graph-mentions-dark.png" /><img src="./assets/graph-mentions-light.png" alt="Graph Mentions mode showing capsule pills, Expand @all edge, Inspector edges and Export GIF" width="100%" /></picture></a><br/><sub><strong>Graph · Mentions Mode</strong> · outer-ring capsule pills, Goal-mode <code>coordinator</code> consolidation, replay scrubber &amp; Export GIF<br/><a href="./assets/graph-mentions-light.png">Light PNG</a> · <a href="./assets/graph-mentions-dark.png">Dark PNG</a></sub></td>
+    <td align="center" width="50%"><a href="./assets/board-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/board-dark.png" /><img src="./assets/board-light.png" alt="Board with unified search pill, filter funnel drawer, softly clamped Markdown posts, Show more toggle and v2.1.1 header badge" width="100%" /></picture></a><br/><sub><strong>Board</strong> · unified search pill &amp; funnel drawer, soft post clamp (<code>Show more</code>), floating <code>↓ Latest</code> &amp; <code>v2.1.1</code> badge<br/><a href="./assets/board-light.png">Light PNG</a> · <a href="./assets/board-dark.png">Dark PNG</a></sub></td>
   </tr>
   <tr>
-    <td align="center" width="50%"><a href="./assets/members-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/members-dark.png" /><img src="./assets/members-light.png" alt="Members with Coordinator and worker cards, execution mode badges, Journal and model switch controls" width="100%" /></picture></a><br/><sub><strong>Members</strong> · <code>Session</code>/<code>Attached</code>/<code>Subagent</code> cards, model switching, recovery &amp; worktrees<br/><a href="./assets/members-light.png">Light PNG</a> · <a href="./assets/members-dark.png">Dark PNG</a></sub></td>
+    <td align="center" width="50%"><a href="./assets/members-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/members-dark.png" /><img src="./assets/members-light.png" alt="Members with flat clickable Antigravity rows, worktree chip, quiet overflow menu and collapsible Retired group" width="100%" /></picture></a><br/><sub><strong>Members</strong> · click row to open chat/session, quiet <code>⋯</code> overflow menu, worktree chips &amp; collapsible <code>RETIRED</code><br/><a href="./assets/members-light.png">Light PNG</a> · <a href="./assets/members-dark.png">Dark PNG</a></sub></td>
     <td align="center" width="50%"><a href="./assets/journal-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/journal-dark.png" /><img src="./assets/journal-light.png" alt="Worker Journal modal with turn-by-turn saved steps, Verified route pills and reports" width="100%" /></picture></a><br/><sub><strong>Worker Journal</strong> · inspect live steps, <code>Verified route:</code> proof &amp; saved turns without waking agents<br/><a href="./assets/journal-light.png">Light PNG</a> · <a href="./assets/journal-dark.png">Dark PNG</a></sub></td>
   </tr>
 </table>
@@ -163,10 +163,11 @@ See what is running, which outcome threads are blocked or done, and where each r
 | Coordinate parallel & dependent work | Up to 12 active workers, `waitFor` dependencies, sharding (`n`/`tasks`), groups, channels, hidden native subagents (DSH) & attached child threads (Codex `0.171+`) |
 | Context inheritance (`fork: "coordinator"`) | Workers can branch directly from the coordinator chat on start or invitation, or fork from a teammate |
 | Direct peer collaboration | `@member`, `@group`, `@#channel`, and `@all` routing with normalized target matching |
-| Track outcomes, not just logs | Collapsible `X of Y tasks done` accordion, `goalLine`, smart `taskLabel`s, clickable bee pills, outcome `threads` progress bars, `Screenshots` timeline + lightbox, `The team` Coordinator badge, and `✓ Verified route:` journal pills |
+| Track outcomes, not just logs | Collapsible `X of Y tasks done` accordion, `goalLine`, smart `taskLabel`s, clickable bee pills, outcome `threads` progress bars, `Screenshots` timeline + lightbox, `The team` Coordinator badge, click-to-open clickable `Members` rows, and `✓ Verified route:` journal pills |
+| Lean wakeup token budget | Full onboarding only on Turn 1; Turn 2+ sends lean delta resume prompts with plain-text `#seq @author:` inboxes (~55–70% smaller wakeup payloads) |
 | Understand a stalled or uncertain run | Zero-token `[stall]` root-cause diagnostics, aligned `Needs you` alerts with `#seq` links, and explicit `Retry fresh turn` / `Dismiss` recovery for unconfirmed runs |
 | Flexible model routing | Per-member `model` and `effort`, `allowProviderModelFallback: false` strict lock on Codex `0.171+`, lazy catalog hydration, runtime model switching, and optional `fallbackModel` quota failover |
-| Visual flow & replay inspection | Dual-mode **Graph** (**`Hive`** honeycomb clusters + **`Mentions`** capsule pill ring with SDF arrow clipping), zero-dependency **Export GIF** (`hive-gif.js`), and light/dark WCAG AA themes |
+| Visual flow & version alerts | Dual-mode **Graph** (**`Hive`** honeycomb + unified Goal-mode **`Mentions`** ring), zero-dependency **Export GIF** (`hive-gif.js`), light/dark WCAG AA themes, and passive cached npm update alerts right below the header version badge |
 | Safe isolation & cleanup | Synchronous fail-closed `subagent/start` & preset sandboxing, read-only default workers, optional detached Git `worktree` per writable worker, and uncommitted-safe worktree removal |
 
 <details>
@@ -222,7 +223,7 @@ $hive-swarm:swarm Split this feature into two isolated worktree builders (@api a
 - `scripts/` — verified core/DSH packagers (`pack-core.mjs`, `pack-dsh.mjs`) and DSH client builder (`build-dsh-client.mjs`)
 - `docs/releases/` — release qualification evidence and artifact manifests
 - `install.ps1`, `install.sh` — cross-platform source installers
-- `assets/` — banner, coordination diagram, icons, 2× light/dark UI captures, and animated `2.1.0` walkthrough GIF
+- `assets/` — banner, coordination diagram, icons, 2× light/dark UI captures, and animated walkthrough GIF
 - `*.test.mjs`, `packages/dsh-hive-swarm/*.test.mjs` — full `node:test` test suite
 
 ## Development and tests
@@ -248,7 +249,7 @@ The test suite uses mocked runners and makes **no paid API calls**. Opening view
 - **Windows sandbox process errors:** the installer and runtime strip inherited MSIX/session markers and set `features.prefer_mxc=false` on Windows so workers can run shell commands cleanly.
 - **Vitest `spawn EPERM` in Windows worker sandboxes:** pass `--configLoader native --pool threads` to avoid child-process pool restrictions.
 - **Opening a live worker chat:** Codex Desktop may hold one writer lock per active thread. Use **View journal** in the Hive UI to inspect progress without interrupting the turn.
-- **Windows DSH plugin CLI & newly published releases:** If `dsh` is not on your Windows `PATH`, invoke `<DSH_INSTALL>\resources\runtime\cli\bin\dsh.cmd` directly (e.g. `& 'D:\DSH\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add dsh-hive-swarm@2.1.0`). When upgrading within 24 hours of a new npm publish, DSH's `pnpm` supply-chain policy requires listing `dsh-hive-swarm@2.1.0` and `hive-swarm@2.1.0` under `minimumReleaseAgeExclude` in `<DSH_HOME>\profiles\desktop\pnpm-workspace.yaml`.
+- **Windows DSH plugin CLI & newly published releases:** If `dsh` is not on your Windows `PATH`, invoke `<DSH_INSTALL>\resources\runtime\cli\bin\dsh.cmd` directly (e.g. `& 'D:\DSH\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add dsh-hive-swarm@2.1.1`). When upgrading within 24 hours of a new npm publish, DSH's `pnpm` supply-chain policy requires listing `dsh-hive-swarm@2.1.1` and `hive-swarm@2.1.1` under `minimumReleaseAgeExclude` in `<DSH_HOME>\profiles\desktop\pnpm-workspace.yaml`.
 - **State locations & ports:**
   - **Codex:** SQLite WAL under `%LOCALAPPDATA%\CodexTeamBoard` (Windows) or `~/CodexTeamBoard` (macOS/Linux); override with `HIVE_SWARM_DATA` / `TEAM_BOARD_DATA`. Default loopback port: `17943` (`HIVE_SWARM_PORT` / `TEAM_BOARD_PORT`).
   - **DSH:** isolated under `<profileContext.dir>/.hive-swarm`.

@@ -1,14 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-async function fixture(t) {
+async function fixture(t,options={}) {
   const {registerRoutes}=await import('./routes.mjs');
   const routes=new Map(),calls=[];
   const connection={fetch:{register:r=>{routes.set(r.path,r);return async()=>routes.delete(r.path)}}};
   const app={snapshot:async(args,context)=>{calls.push({kind:'snapshot',args,context});return {teams:[],team:null}},
     command:async(action,args,context)=>{calls.push({kind:'command',action,args,context});return {id:'owned'}},
     waitForUpdate:async(args,context)=>{calls.push({kind:'wait',args,context});return {posts:[],head:0,status:{revision:'one'}}}};
-  const dispose=registerRoutes({connection,application:app});t.after(dispose);
+  const dispose=registerRoutes({connection,application:app,...options});t.after(dispose);
   const rpc=async(endpoint,payload,signal,peer)=>{
     if(peer?.principal.kind!=='owner')return {ok:false}; // Carrier admission is separately qualified on the installed SDK.
     const target=endpoint==='wait'?'events':endpoint;const method='hive-swarm/v1/'+target;
@@ -157,4 +157,17 @@ test('GET /api/hive-swarm/v1/screenshot serves confined workspace/data images an
   assert.equal((await getShot('teamId='+encodeURIComponent(team.id)+'&seq=abc&index=0')).status,404);
   assert.equal((await getShot('teamId='+encodeURIComponent(team.id)+'&seq=1&index=0&extra=1')).status,404);
   assert.equal((await getShot('teamId='+encodeURIComponent(team.id)+'&teamId='+encodeURIComponent(team.id)+'&seq=1&index=0')).status,404);
+});
+
+test('POST snapshot Connection RPC includes getMeta version/update while GET snapshot stays exact',async t=>{
+  const update={current:'2.1.0',latest:'2.2.0',available:true,url:'https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.2.0',checked:true};
+  const f=await fixture(t,{getMeta:()=>({version:'2.1.0',update})});
+  const rpcSnapshot=await f.rpc('snapshot',{},signal(),owner);
+  assert.equal(rpcSnapshot.ok,true);
+  assert.equal(rpcSnapshot.value.version,'2.1.0');
+  assert.deepEqual(rpcSnapshot.value.update,update);
+
+  const getRes=await f.routes.get('/api/hive-swarm/v1/snapshot').fetch(new Request('http://fixture/api/hive-swarm/v1/snapshot'));
+  assert.equal(getRes.status,200);
+  assert.deepEqual(await getRes.json(),{teams:[],team:null});
 });

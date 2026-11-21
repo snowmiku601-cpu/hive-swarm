@@ -957,3 +957,167 @@ test('Graph Export GIF button invokes HiveGif.exportGraphReplayGif with active m
     assert.equal(exportCalls[1].speed,2);
   }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
 });
+
+test('Antigravity Members rows click-to-open-session without double-triggering actions, group Retired, and Board filter/clamp/Latest pill work',async()=>{
+  const {client,React,renderer}=await loadClient();
+  const longPost=Array.from({length:9},(_,i)=>'Line '+(i+1)+' of detailed verification notes.').join('\n');
+  const rich={
+    ...team(),
+    parentSessionId:'parent-chat-1',
+    members:[
+      {name:'coordinator',role:'coordinator',status:'waiting',brief:'Lead team',model:'sol',writable:false},
+      {name:'alpha',status:'working',taskLabel:'Build Antigravity Board',brief:'Short brief',model:'sol',effort:'high',writable:true,
+        executionMode:'subagent',session:{host:'deepseek-harness',id:'child-alpha'},threadId:'child-alpha'},
+      {name:'legacy',status:'retired',taskLabel:'Old pass',brief:'Retired worker',model:'sol',writable:false,
+        session:{host:'deepseek-harness',id:'old-legacy'},threadId:'old-legacy'},
+    ],
+    events:[
+      {seq:1,kind:'message',author:'alpha',text:longPost,targets:['coordinator'],channel:'main'},
+      {seq:2,kind:'message',author:'coordinator',text:'Looks crisp!',targets:['alpha'],channel:'main'},
+    ],
+  };
+  const f=fakeContext({
+    snapshot:({teamId})=>({teams:[rich],team:teamId?rich:null}),
+    command:({action,args})=>action==='read_journal'?{member:args.member,threadId:'child-alpha',turns:[]}:rich,
+  });
+  client.apply(f.ctx);
+  const entry=f.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let view;
+  try{
+    await renderer.act(async()=>{view=renderer.create(React.createElement(entry.component,entry.options.inject('parent-chat-1')));await tick();});
+    await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
+    // Switch to Board -> filter drawer starts hidden, toggle button opens it, long post is clamped, Latest pill appears when Follow toggled off
+    await renderer.act(async()=>{view.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Board')).props.onClick();await tick();});
+    const drawer=()=>view.root.findByProps({className:'dsh-hive-filter-drawer'});
+    assert.equal(drawer().props.hidden,true);
+    const toggleBtn=view.root.findByProps({'aria-label':'Toggle board filters'});
+    await renderer.act(async()=>{toggleBtn.props.onClick();});
+    assert.equal(drawer().props.hidden,false);
+    assert.equal(toggleBtn.props['aria-expanded'],true);
+    const clampedBody=view.root.findAllByProps({className:'dsh-hive-post-body'}).find(b=>b.props['data-clamped']==='true');
+    assert.ok(clampedBody,'Long Board post must default to clamped state');
+    const showMore=view.root.findAllByType('button').find(b=>b.children.includes('Show more'));
+    await renderer.act(async()=>{showMore.props.onClick();});
+    assert.equal(view.root.findAllByProps({className:'dsh-hive-post-body'}).some(b=>b.props['data-clamped']==='true'),false);
+    const followBtn=drawer().findAllByType('button').find(b=>b.children.includes('Follow'));
+    await renderer.act(async()=>{followBtn.props.onClick();});
+    const latestPill=view.root.findByProps({className:'dsh-hive-latest-pill'});
+    await renderer.act(async()=>{latestPill.props.onClick();});
+    assert.equal(view.root.findAllByProps({className:'dsh-hive-latest-pill'}).length,0);
+    // Switch to Members -> Retired in collapsible details, clicking alpha & coordinator row opens session, clicking nested Journal button does not openSession
+    await renderer.act(async()=>{view.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Members')).props.onClick();await tick();});
+    const retiredGroup=view.root.findByProps({className:'dsh-hive-retired-group'});
+    assert.ok(textOf(retiredGroup).includes('RETIRED')&&textOf(retiredGroup).includes('@legacy'));
+    const memberRows=view.root.findAllByProps({className:'dsh-hive-member'});
+    const coordRow=memberRows.find(r=>textOf(r).includes('@coordinator'));
+    const alphaRow=memberRows.find(r=>textOf(r).includes('@alpha'));
+    await renderer.act(async()=>{await coordRow.props.onClick({currentTarget:null});await tick();});
+    await renderer.act(async()=>{await alphaRow.props.onClick({currentTarget:null});await tick();});
+    assert.deepEqual(f.sessions.map(s=>typeof s==='object'?{...s}:s),[
+      'parent-chat-1',
+      {parentSessionId:'parent-chat-1',childSessionId:'child-alpha',mode:'continuable'},
+    ]);
+    const moreBtn=view.root.findByProps({'aria-label':'More actions for @alpha'});
+    assert.equal(alphaRow.props['data-menu-open'],undefined);
+    await renderer.act(async()=>{moreBtn.props.onClick({stopPropagation(){}});});
+    assert.equal(view.root.findAllByProps({className:'dsh-hive-member'}).find(r=>textOf(r).includes('@alpha')).props['data-menu-open'],'true');
+    assert.equal(f.sessions.length,2,'Opening overflow menu must not call openSession');
+    await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Journal for alpha'}).props.onClick({currentTarget:null,stopPropagation(){}});await tick();});
+    assert.equal(f.sessions.length,2,'Clicking nested Journal action must not call openSession');
+    assert.equal(view.root.findAllByType('dialog').length,1);
+  }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
+});
+
+test('Mentions Graph hides duplicate user bee in Goal mode and renders user as You when dedicated coordinator exists',async()=>{
+  const store=new Map();
+  const sessionStorage={getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,String(v))};
+  const {client,React,renderer}=await loadClient({sessionStorage});
+  const goalTeam={
+    ...team(),
+    members:[
+      {name:'builder',status:'working',brief:'Build UI',model:'sol',writable:true},
+      {name:'qa',status:'waiting',brief:'Verify UI',model:'sol',writable:false},
+    ],
+    events:[
+      {seq:1,kind:'brief',author:'coordinator',targets:['builder'],text:'@builder build'},
+      {seq:2,kind:'message',author:'user',targets:['builder'],text:'@builder tweak colors'},
+      {seq:3,kind:'message',author:'builder',targets:['coordinator'],coordinatorMention:true,text:'@coordinator ready'},
+    ],
+  };
+  const dedicatedTeam={
+    ...team(),
+    members:[
+      {name:'coordinator',role:'coordinator',status:'working',brief:'Coordinator',model:'sol',writable:false},
+      {name:'builder',status:'working',brief:'Build UI',model:'sol',writable:true},
+    ],
+    events:[
+      {seq:1,kind:'brief',author:'coordinator',targets:['builder'],text:'@builder build'},
+      {seq:2,kind:'message',author:'user',targets:['builder'],text:'@builder manual check'},
+    ],
+  };
+
+  // 1. Goal mode: user posts merge into coordinator, no 'user' or 'You' pill appears
+  const f1=fakeContext({snapshot:({teamId})=>({teams:[goalTeam],team:teamId?goalTeam:null})});
+  client.apply(f1.ctx);
+  const e1=f1.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let v1;
+  try{
+    await renderer.act(async()=>{v1=renderer.create(React.createElement(e1.component,e1.options.inject('p-goal')));await tick();});
+    await renderer.act(async()=>{await v1.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
+    await renderer.act(async()=>{v1.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Graph')).props.onClick();await tick();});
+    const mentionsBtn1=v1.root.findAllByType('button').find(b=>b.children.join('')==='Mentions');
+    await renderer.act(async()=>{mentionsBtn1.props.onClick();await tick();});
+    const pillNames1=v1.root.findAllByProps({className:'dsh-hive-graph-pill-name'}).map(n=>n.children.join(''));
+    assert.deepEqual(pillNames1.sort(),['builder','coordinator','qa']);
+    const edgeKeys1=v1.root.findAll(x=>x.type==='path'&&x.props['data-hive-edge']).map(p=>p.props['data-hive-edge']).sort();
+    assert.deepEqual(edgeKeys1,['builder>coordinator','coordinator>builder']);
+  }finally{await renderer.act(async()=>v1?.unmount());f1.dispose();}
+
+  // 2. Dedicated coordinator + manual user post: displays 'You' cleanly instead of raw 'user' or '@user'
+  store.clear();
+  const f2=fakeContext({snapshot:({teamId})=>({teams:[dedicatedTeam],team:teamId?dedicatedTeam:null})});
+  client.apply(f2.ctx);
+  const e2=f2.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let v2;
+  try{
+    await renderer.act(async()=>{v2=renderer.create(React.createElement(e2.component,e2.options.inject('p-ded')));await tick();});
+    await renderer.act(async()=>{await v2.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
+    await renderer.act(async()=>{v2.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Graph')).props.onClick();await tick();});
+    const mentionsBtn2=v2.root.findAllByType('button').find(b=>b.children.join('')==='Mentions');
+    await renderer.act(async()=>{mentionsBtn2.props.onClick();await tick();});
+    const pillNames2=v2.root.findAllByProps({className:'dsh-hive-graph-pill-name'}).map(n=>n.children.join(''));
+    assert.ok(pillNames2.includes('You'),'dedicated coordinator mode must label user node as You');
+    assert.equal(pillNames2.includes('user'),false,'must never show raw "user" pill label');
+    const selectedPost=v2.root.findByProps({className:'dsh-hive-selected-post'});
+    assert.ok(textOf(selectedPost).includes('You')&&!textOf(selectedPost).includes('@user'));
+    const flowList=v2.root.findByProps({className:'dsh-hive-flow-list'});
+    assert.ok(textOf(flowList).includes('You → @builder')&&!textOf(flowList).includes('@user'));
+  }finally{await renderer.act(async()=>v2?.unmount());f2.dispose();}
+});
+
+test('DSH SwarmView renders version badge and update reminder pill below it with dismiss persistence',async()=>{
+  const storageMap=new Map();
+  const localStorage={getItem:k=>storageMap.get(k)??null,setItem:(k,v)=>storageMap.set(k,String(v))};
+  const {client,React,renderer}=await loadClient({localStorage});
+  const update={current:'2.1.0',latest:'2.2.0',available:true,url:'https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.2.0',checked:true};
+  const f=fakeContext({snapshot:({teamId})=>({teams:[team()],team:teamId?team():null,version:'2.1.0',update})});
+  client.apply(f.ctx);
+  const entry=f.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let view;
+  try{
+    await renderer.act(async()=>{view=renderer.create(React.createElement(entry.component,eArgs()));await tick();});
+    const versionTag=view.root.findByProps({className:'dsh-hive-version-tag'});
+    assert.equal(textOf(versionTag),'v2.1.0');
+    const pill=view.root.findByProps({className:'dsh-hive-update-pill'});
+    assert.equal(textOf(pill),'↑ v2.2.0 available');
+    assert.equal(pill.props['aria-expanded'],false);
+
+    await renderer.act(async()=>{pill.props.onClick();});
+    const popover=view.root.findByProps({className:'dsh-hive-update-popover'});
+    assert.ok(textOf(popover).includes('v2.1.0 → v2.2.0'));
+    assert.equal(textOf(popover.findByType('code')),'dsh plugin --profile desktop add dsh-hive-swarm@2.2.0');
+    assert.equal(popover.findByType('a').props.href,'https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.2.0');
+
+    const dismissBtn=popover.findAllByType('button').find(b=>textOf(b)==='Dismiss');
+    await renderer.act(async()=>{dismissBtn.props.onClick();});
+    assert.equal(view.root.findAllByProps({className:'dsh-hive-update-pill'}).length,0);
+    assert.equal(storageMap.get('hive-swarm:dsh:dismissed-update'),'2.2.0');
+  }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
+  function eArgs(){return entry.options.inject('parent-update');}
+});
