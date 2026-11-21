@@ -598,3 +598,23 @@ test('ephemeral runner never sends attachToSource, and attached teammate forks s
   assert.equal(saved.forkFrom,null);
   assert.equal(attCalls.find(c=>c.method==='thread/fork').params.attachToSource,true);
 });
+
+test('generic invalid params errors from thread/start do not latch supportsModelFallbackFlag to false',async()=>{
+  const runner=new CodexRunner();
+  const startCalls=[];
+  runner.start=async()=>{};
+  runner.rpc=async (method,params)=>{
+    if (method==='thread/start') {
+      startCalls.push(params);
+      throw Error('invalid params: cwd does not exist');
+    }
+    throw Error('Unexpected method '+method);
+  };
+  await assert.rejects(
+    runner.run({team:{id:'team',title:'Err',cwd:process.cwd(),task:'Err',members:[]},member:{name:'builder',brief:'Build',model:'gpt-5.4',inbox:[],lastTurn:1},remember:()=>{}}),
+    /invalid params: cwd does not exist/,
+  );
+  assert.equal(startCalls.length,1);
+  assert.equal(startCalls[0].allowProviderModelFallback,false);
+  assert.equal(runner.supportsModelFallbackFlag,true);
+});

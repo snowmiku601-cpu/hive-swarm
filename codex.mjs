@@ -191,7 +191,7 @@ function deliverTurnEvent(turn, event) {
 function isUnsupportedParam(error, name) {
   const msg = String(error?.message ?? error);
   if (name && new RegExp(name, 'i').test(msg)) return true;
-  return /unknown field|unrecognized field|invalid params|unexpected field|not supported|unsupported/i.test(msg);
+  return /unknown field|unrecognized field|unexpected field|not supported|unsupported/i.test(msg);
 }
 
 function isAttachFallbackError(error) {
@@ -425,7 +425,7 @@ export class CodexRunner {
       return await this.rpc('thread/fork', params);
     } catch (error) {
       if (attach && !beforeTurnId && isAttachFallbackError(error)) {
-        if (/unknown field|unrecognized field|not supported/i.test(String(error?.message ?? error))) {
+        if (isUnsupportedParam(error, 'attachToSource')) {
           this.supportsAttachToSource = false;
         }
         const {attachToSource: _, ...fallback} = params;
@@ -450,7 +450,7 @@ export class CodexRunner {
       return {response, scope: forkScope};
     } catch (error) {
       if (isAttachFallbackError(error) || /cannot change.*model provider/i.test(String(error?.message ?? error))) {
-        if (/unknown field|unrecognized field|not supported/i.test(String(error?.message ?? error))) {
+        if (isUnsupportedParam(error, 'attachToSource')) {
           this.supportsAttachToSource = false;
         }
         return null;

@@ -496,10 +496,9 @@ export async function service({dataDirectory = root, listenPort = port, runner} 
             verifyModels(runner,selections),
           ]);
           if (res.destroyed) return;
-          const trustedParent = !peerRequest
-            ? (context && typeof context === 'object' && Object.hasOwn(context, 'parentSessionId')
-              ? (context.parentSessionId == null || context.parentSessionId === '' ? undefined : context.parentSessionId)
-              : extractParentSessionId(null))
+          const trustedParent = !peerRequest && context && typeof context === 'object' &&
+            context.parentSessionId != null && context.parentSessionId !== ''
+            ? context.parentSessionId
             : undefined;
           team = board.create(args, source, {parentSessionId: trustedParent});
           break;

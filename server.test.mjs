@@ -626,6 +626,18 @@ test('extractParentSessionId reads MCP _meta keys and CODEX_THREAD_ID safely, wh
   assert.equal(spoofed.status,400);
   assert.match(spoofed.body.error,/host identity|cannot be supplied/i);
 
+  const priorThread=process.env.CODEX_THREAD_ID;
+  process.env.CODEX_THREAD_ID='daemon-env-leak-check';
+  t.after(()=>{
+    if (priorThread===undefined) delete process.env.CODEX_THREAD_ID;
+    else process.env.CODEX_THREAD_ID=priorThread;
+  });
+  const withoutContext=await postTool('start_team',{cwd:process.cwd(),task:'No context header',members});
+  assert.equal(withoutContext.status,200);
+  assert.equal(withoutContext.body.parentSessionId,undefined);
+  await api.waitFor(withoutContext.body.id,state=>state.phase==='done');
+  assert.deepEqual(seen.shift(),{name:'builder',parentSessionId:undefined,forkSource:undefined});
+
   const started=await postTool('start_team',{
     cwd:process.cwd(),task:'Attached Codex team',
     members:[{name:'researcher',brief:'Warm start',fork:'coordinator'}],
