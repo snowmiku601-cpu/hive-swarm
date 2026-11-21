@@ -8,7 +8,7 @@ const read = name => readFileSync(new URL(name,import.meta.url),'utf8');
 class ViewNode {
   children=[];
   dataset={};
-  style={};
+  style={setProperty(k,v){this[k]=v;}};
   attributes={};
   clientWidth=420;
   clientHeight=350;
@@ -23,11 +23,22 @@ class ViewNode {
   set innerHTML(_) {assert.fail('Use text or DOM nodes');}
   append(...children) {this.children.push(...children);}
   replaceChildren(...children) {this.children=children;}
+  remove() {this.removed=true;}
+  click() {this.clicked=true;}
   setAttribute(name,value) {this.attributes[name]=value;}
   focus() {this.focused=true;}
   showModal() {this.open=true;}
   close() {this.open=false;}
-  getContext() {return new Proxy({}, {get:(target,key)=>target[key]??(()=>{}),set:(target,key,value)=>(target[key]=value,true)});}
+  getContext() {
+    if (this._ctx) return this._ctx;
+    const ops=this.canvasOps??=[];
+    const rec=(op,args)=>ops.push({op,args});
+    this._ctx=new Proxy({}, {
+      get:(target,key)=>target[key]??((...args)=>{rec(key,args);}),
+      set:(target,key,value)=>(target[key]=value,rec('set:'+key,[value]),true),
+    });
+    return this._ctx;
+  }
   scrollIntoView() {this.scrolled=true;}
   querySelector(selector) {
     const sequence=/^\[data-seq="(\d+)"\]$/.exec(selector)?.[1];
@@ -36,16 +47,40 @@ class ViewNode {
   get firstElementChild() {return this.children[0];}
 }
 
-async function boardView(initial,{path='/board/'+initial.id,request,live=false}={}) {
+function memStorage(seed={}) {
+  const map=new Map(Object.entries(seed));
+  return {
+    getItem:key=>map.get(key)??null,
+    setItem:(key,value)=>{map.set(key,String(value));},
+    dump:()=>Object.fromEntries(map),
+  };
+}
+
+async function boardView(initial,{path='/board/'+initial.id,request,live=false,darkMatches=false,localStore=memStorage(),sessionStore=memStorage(),hiveGif,hiveGraphExt}={}) {
   const elements=new Map();
   const element=id=>{
     if (!elements.has(id)) elements.set(id,new ViewNode(id));
     return elements.get(id);
   };
   element('theme').append(new ViewNode('span'));
-  const focusEvents=new Map(),visibilityEvents=new Map();
+  const focusEvents=new Map(),visibilityEvents=new Map(),mediaListeners=[];
   const frame={addEventListener:(name,callback)=>focusEvents.set(name,callback)};
   const streams=[];
+  const body=new ViewNode('body');
+  const downloads=[];
+  const createdUrls=[];
+  const revokedUrls=[];
+  class TestURL extends URL {
+    static createObjectURL(blob) {
+      const url='blob:test/'+(createdUrls.length+1);
+      createdUrls.push({url,blob});
+      return url;
+    }
+    static revokeObjectURL(url) {revokedUrls.push(url);}
+  }
+  class TestBlob {
+    constructor(parts,opts={}){this.parts=parts;this.type=opts.type??'';}
+  }
   class EventSource {
     listeners=new Map();
     constructor(url){this.url=url;streams.push(this);}
@@ -56,25 +91,41 @@ async function boardView(initial,{path='/board/'+initial.id,request,live=false}=
   const navigation=[];
   let poll;
   let state=initial;
+  const docElement=new ViewNode('html');
   const screen={
-    window:frame,parent:frame,location:{pathname:path,assign:url=>navigation.push(url)},
-    document:{getElementById:element,documentElement:new ViewNode('html'),
+    window:frame,parent:frame,location:{pathname:path,origin:'http://127.0.0.1:17943',assign:url=>navigation.push(url)},
+    document:{getElementById:element,documentElement:docElement,body:{append:(...nodes)=>{
+      body.append(...nodes);
+      for (const n of nodes) if (n.tagName==='a'&&n.download) downloads.push(n);
+    }},
       addEventListener:(name,callback)=>visibilityEvents.set(name,callback),
       createElement:tag=>new ViewNode(tag),createTextNode:text=>({textContent:text})},
     Option:class {constructor(text,value) {Object.assign(this,{text,value});}},
     HiveBee:{sprite:()=>new ViewNode('svg')},
+    HiveGif:hiveGif,
     ResizeObserver:class {observe(){}},
+    localStorage:localStore,
+    sessionStorage:sessionStore,
+    Blob:TestBlob,
     devicePixelRatio:1,getComputedStyle:()=>({getPropertyValue:()=>'#d1a76a'}),
-    URL,URLSearchParams,Intl,AbortController,clearTimeout,setTimeout,EventSource:live?EventSource:undefined,matchMedia:()=>({matches:false}),
+    URL:TestURL,URLSearchParams,Intl,AbortController,clearTimeout,setTimeout,EventSource:live?EventSource:undefined,
+    matchMedia:query=>({
+      matches:query.includes('dark')?darkMatches:false,
+      addEventListener:(evt,cb)=>{if(evt==='change')mediaListeners.push(cb);},
+    }),
     requestAnimationFrame:callback=>{queueMicrotask(callback);return 1;},
     setInterval:callback=>{poll=callback;return 1;},
     fetch:async (url,options)=>({ok:true,json:async()=>
       (await request?.(url,options))??(url.includes('/history?')
         ? {posts:state.events,head:state.events.at(-1)?.seq??0} : url==='/swarm/teams'?{teams:[]}:state)}),
   };
-  runInNewContext(read('hive-graph.js')+'\n'+read('board.js'),screen);
+  const extCode=hiveGraphExt?'globalThis.HiveGraph = { ...globalThis.HiveGraph, ...globalThis.__EXT__ };\n':'';
+  if (hiveGraphExt) screen.__EXT__=hiveGraphExt;
+  runInNewContext(read('hive-graph.js')+'\n'+extCode+read('board.js'),screen);
   await new Promise(resolve=>setImmediate(resolve));
-  return {element,navigation,streams,update:async next=>{state=next;await poll();},
+  return {element,docElement,navigation,streams,downloads,createdUrls,revokedUrls,localStore,sessionStore,
+    update:async next=>{state=next;await poll();},
+    emitDarkChange:matches=>{for (const cb of mediaListeners) cb({matches});},
     focus:()=>focusEvents.get('focus')?.(),visible:()=>visibilityEvents.get('visibilitychange')?.()};
 }
 
@@ -602,4 +653,215 @@ test('board renders executionMode badges, Verified route journal badges, and lig
   const updated=view.element('graph-nodes').children;
   assert.equal(updated.find(n=>n.dataset.graphName==='builder').dataset.dimmed,'false');
   assert.equal(updated.find(n=>n.dataset.graphName==='legacy').dataset.dimmed,'true');
+});
+
+test('reactive prefers-color-scheme: dark listener tracks OS preference until user overrides theme',async()=>{
+  const view=await boardView({id:'team',title:'Theme test',cwd:'fixture',members:[],events:[],phase:'done'},{darkMatches:true});
+  assert.equal(view.docElement.dataset.theme,'dark');
+  view.emitDarkChange(false);
+  assert.equal(view.docElement.dataset.theme,'light');
+  view.emitDarkChange(true);
+  assert.equal(view.docElement.dataset.theme,'dark');
+  view.element('theme').onclick();
+  assert.equal(view.docElement.dataset.theme,'light');
+  assert.equal(view.localStore.getItem('team-board-color'),'light');
+  view.emitDarkChange(true);
+  assert.equal(view.docElement.dataset.theme,'light');
+});
+
+test('overview 2.1.0 renders goalLine, smartTaskLabel accordion with bee pills, synthesized Tasks thread, and Goal summary',async()=>{
+  const state={
+    id:'team',title:'Hive Swarm 2.1.0',goalLine:'Ship Antigravity Dashboard and bug fixes',
+    coordinator:false,cwd:'fixture',phase:'done',turns:4,turnLimit:8,
+    members:[
+      {name:'core-fixes',status:'done',taskLabel:'Fix DSH and Codex bugs',threadId:'thread-core-fixes'},
+      {name:'codex-ui',status:'working',brief:'You are Hive Swarm member @codex-ui for Hive Swarm 2.1.0. Overhaul Codex board UI in D:\\Codex CLI\\hive-swarm.',lastTurn:2},
+    ],
+    events:[
+      {seq:1,kind:'message',author:'core-fixes',text:'[done] All 6 backend fixes committed.',targets:[]},
+      {seq:2,kind:'message',author:'user',text:'[done] Goal summary confirmed without coordinator.',targets:[]},
+    ],
+  };
+  const view=await boardView(state,{request:url=>{
+    if (url.endsWith('/member/core-fixes/transcript')) {
+      return {member:'core-fixes',threadId:'thread-core-fixes',status:'done',live:null,turns:[]};
+    }
+  }});
+  view.element('tab-overview').onclick();
+  assert.equal(view.element('overview-goal-line').hidden,false);
+  assert.equal(view.element('overview-goal-line').textContent,'Ship Antigravity Dashboard and bug fixes');
+  assert.equal(Boolean(view.element('overview-tasks-accordion').open),false);
+  assert.equal(view.element('overview-tasks-heading').textContent,'1 of 2 tasks done');
+  const taskTitles=childrenOf(view.element('overview-members')).filter(n=>n.className==='task-row-title').map(n=>n.textContent);
+  assert.equal(taskTitles[0],'Fix DSH and Codex bugs');
+  assert.doesNotMatch(taskTitles[1],/^You are/i);
+  assert.match(taskTitles[1],/Overhaul Codex board UI/);
+  const pills=childrenOf(view.element('overview-members')).filter(n=>n.className==='bee-pill');
+  assert.deepEqual(pills.map(p=>p.textContent),['core-fixes','codex-ui']);
+  await pills[0].onclick();
+  assert.equal(view.element('member-transcript').open,true);
+  assert.equal(view.element('transcript-title').textContent,'Journal · @core-fixes');
+  view.element('close-transcript').onclick();
+  // Auto-synthesized Tasks thread when team.threads is empty
+  assert.equal(view.element('overview-threads-panel').hidden,false);
+  assert.deepEqual(childrenOf(view.element('overview-threads')).filter(n=>n.tagName==='strong').map(n=>n.textContent),['Tasks']);
+  assert.ok(childrenOf(view.element('overview-threads')).some(n=>n.className==='thread-fraction mono'&&n.textContent==='1/2'));
+  // The team card renders Goal summary for coordinator: false
+  assert.equal(view.element('overview-team-mode').hidden,false);
+  assert.equal(view.element('overview-team-mode').textContent,'Goal summary');
+  assert.match(view.element('overview-summary').textContent,/Goal summary confirmed without coordinator/);
+  assert.match(view.element('overview-execution').textContent,/4\/8 turns/);
+});
+
+test('overview screenshots strip filters unsafe URLs and opens accessible lightbox with focus restoration',async()=>{
+  const state={
+    id:'team',title:'Visual verification',cwd:'fixture',phase:'done',turns:2,turnLimit:4,
+    members:[{name:'ui',status:'done'}],
+    screenshots:[
+      {id:'5:0',seq:5,index:0,author:'ui',caption:'Hive honeycomb view',url:'/board/team/screenshot/5/0'},
+      {id:'6:0',seq:6,index:0,author:'ui',caption:'Blocked bad scheme',url:'javascript:alert(1)'},
+    ],
+    events:[{seq:5,kind:'message',author:'ui',text:'Screenshot: out.png | Hive honeycomb view',targets:[]}],
+  };
+  const view=await boardView(state);
+  view.element('tab-overview').onclick();
+  assert.equal(view.element('overview-screenshots-panel').hidden,false);
+  assert.equal(view.element('overview-screenshots-count').textContent,'1 capture');
+  const thumbs=childrenOf(view.element('overview-screenshots')).filter(n=>n.className==='screenshot-thumb-btn');
+  assert.equal(thumbs.length,1);
+  thumbs[0].onclick();
+  const lightbox=view.element('screenshot-lightbox');
+  assert.equal(lightbox.open,true);
+  assert.equal(view.element('lightbox-caption').textContent,'Hive honeycomb view');
+  assert.equal(view.element('lightbox-image').src,'/board/team/screenshot/5/0');
+  view.element('close-lightbox').onclick();
+  assert.equal(lightbox.open,false);
+  assert.equal(thumbs[0].focused,true);
+});
+
+test('graph defaults to Hive mode, persists Mentions mode in sessionStorage, renders pills, and exports GIF',async()=>{
+  const html=read('board.html');
+  assert.match(html,/id="hide-inactive"[^>]*\bswitch\b/);
+  assert.match(html,/id="expand-all"[^>]*\bswitch\b/);
+  const sharedSession=memStorage();
+  const gifCalls=[];
+  const mockGif={
+    async exportGraphReplayGif(opts) {
+      gifCalls.push(opts);
+      return {bytes:new Uint8Array([0x47,0x49,0x46,0x38,0x39,0x61,0x3B]),frameCount:6,width:opts.width,height:opts.height};
+    },
+  };
+  const state={
+    id:'team',title:'Antigravity Swarm UI',cwd:'fixture',phase:'done',turns:3,turnLimit:8,
+    members:[
+      {name:'coordinator',role:'coordinator',status:'waiting'},
+      {name:'builder',status:'done'},
+      {name:'legacy',status:'retired'},
+    ],
+    events:[
+      {seq:1,kind:'brief',author:'coordinator',targets:['builder'],text:'Build UI',time:'2026-11-21T10:00:00Z'},
+      {seq:2,kind:'message',author:'builder',targets:[],text:'[done] UI complete.',time:'2026-11-21T10:05:00Z'},
+    ],
+  };
+  const view=await boardView(state,{sessionStore:sharedSession,hiveGif:mockGif,darkMatches:false});
+  view.element('tab-graph').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  // Default mode is Hive
+  assert.equal(view.element('graph-mode-hive').attributes['aria-pressed'],'true');
+  assert.equal(view.element('graph-mode-mentions').attributes['aria-pressed'],'false');
+  assert.equal(view.element('mentions-options').hidden,true);
+  assert.equal(view.element('legend-hive').hidden,false);
+  assert.equal(view.element('legend-mentions').hidden,true);
+  assert.equal(view.element('graph-stage').dataset.mode,'hive');
+  assert.ok(view.element('graph-nodes').children.every(n=>n.className==='graph-node graph-hive-bee'));
+
+  // Switch to Mentions mode
+  view.element('graph-mode-mentions').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(sharedSession.getItem('hive-swarm-graph-mode'),'mentions');
+  assert.equal(view.element('mentions-options').hidden,false);
+  assert.equal(view.element('legend-mentions').hidden,false);
+  assert.equal(view.element('graph-stage').dataset.mode,'mentions');
+  const pills=view.element('graph-nodes').children;
+  assert.ok(pills.every(n=>n.className==='graph-node graph-pill-node'));
+  const coordPill=pills.find(n=>n.dataset.graphName==='coordinator');
+  const legacyPill=pills.find(n=>n.dataset.graphName==='legacy');
+  const builderPill=pills.find(n=>n.dataset.graphName==='builder');
+  assert.equal(legacyPill.dataset.status,'retired');
+  assert.equal(builderPill.dataset.unmentioned,'true');
+  assert.ok(Number.parseFloat(coordPill.style.top)<Number.parseFloat(legacyPill.style.top));
+
+  // Export GIF delegates to HiveGif.exportGraphReplayGif and triggers download
+  await view.element('export-gif').onclick();
+  assert.equal(gifCalls.length,1);
+  assert.equal(gifCalls[0].mode,'mentions');
+  assert.equal(gifCalls[0].theme,'light');
+  assert.equal(view.downloads.length,1);
+  assert.equal(view.downloads[0].download,'antigravity-swarm-ui-graph.gif');
+  assert.match(view.element('notice').textContent,/Exported antigravity-swarm-ui-graph\.gif \(6 frames\)/);
+
+  // Second view sharing sessionStorage remembers Mentions, and inline fallback produces valid GIF89a without HiveGif
+  const second=await boardView(state,{sessionStore:sharedSession});
+  second.element('tab-graph').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(second.element('graph-mode-mentions').attributes['aria-pressed'],'true');
+  await second.element('export-gif').onclick();
+  assert.equal(second.downloads.length,1);
+  const rawGif=second.createdUrls[0].blob.parts[0];
+  assert.equal(Buffer.from(rawGif.slice(0,6)).toString('ascii'),'GIF89a');
+  assert.equal(rawGif[rawGif.length-1],0x3B);
+});
+
+test('threads count retired members as done and Hive connectors skip self-loops while offsetting concurrent edges',async()=>{
+  const state={
+    id:'team',title:'Connector & Thread Audit',cwd:'fixture',phase:'working',turns:2,turnLimit:8,
+    threads:[{id:'t-retired',title:'Retired stream',goal:'Done work',members:['legacy']}],
+    members:[
+      {name:'coordinator',role:'coordinator',status:'waiting'},
+      {name:'legacy',status:'retired'},
+      {name:'waiter',status:'waiting',pendingWaitFor:['legacy']},
+    ],
+    events:[
+      {seq:1,kind:'message',author:'legacy',targets:['coordinator'],text:'[done] Retired after completing.',time:'2026-11-21T10:00:00Z'},
+    ],
+  };
+  const customGraph={
+    projectHive:()=>({
+      currentSeq:1,lastPost:{seq:1},
+      coordinator:{name:'coordinator',role:'coordinator',status:'waiting',doneCount:1,totalWorkers:1,phase:'working'},
+      clusters:[
+        {id:'done',label:'Done',tone:'done',count:1,members:[{name:'legacy',status:'retired',role:'worker'}]},
+        {id:'waiting',label:'Waiting',tone:'waiting',count:1,members:[{name:'waiter',status:'waiting',role:'worker'}]},
+      ],
+      connectors:[
+        {from:'done',to:'coordinator',kind:'done',label:'Tasks done'},
+        {from:'done',to:'coordinator',kind:'message',label:'Message just sent',seq:1},
+        {from:'waiting',to:'waiting',kind:'waiting',label:'Self loop'},
+      ],
+    }),
+    layoutHive:(_m,w,h)=>{
+      const verts=(cx,cy,r)=>Array.from({length:6},(_,k)=>({x:cx+r*Math.cos(k*Math.PI/3),y:cy+r*Math.sin(k*Math.PI/3)}));
+      const doneCell={id:'done',label:'Done',tone:'done',count:1,x:140,y:120,radius:70,vertices:verts(140,120,70),slots:[{member:{name:'legacy',status:'retired'},x:140,y:120}]};
+      const waitCell={id:'waiting',label:'Waiting',tone:'waiting',count:1,x:280,y:120,radius:70,vertices:verts(280,120,70),slots:[{member:{name:'waiter',status:'waiting'},x:280,y:120}]};
+      const coordCell={id:'coordinator',x:210,y:270,radius:70,vertices:verts(210,270,70),model:{doneCount:1,totalWorkers:1,phase:'working'}};
+      return {width:w,height:h,radius:70,coordinator:coordCell,clusters:[doneCell,waitCell],
+        cellsById:new Map([['done',doneCell],['waiting',waitCell],['coordinator',coordCell]])};
+    },
+    hiveMinimumHeight:()=>420,
+  };
+  const view=await boardView(state,{hiveGraphExt:customGraph});
+  view.element('tab-overview').onclick();
+  assert.match(view.element('overview-threads').textContent,/Done/);
+  assert.ok(childrenOf(view.element('overview-threads')).some(n=>n.className==='thread-fraction mono'&&n.textContent==='1/1'));
+
+  view.element('tab-graph').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  const ops=view.element('graph-canvas').canvasOps;
+  const moves=ops.filter(item=>item.op==='moveTo').map(item=>item.args);
+  assert.equal(moves.length>=2,true);
+  const [mDone,mMsg]=moves;
+  const dist=Math.hypot(mMsg[0]-mDone[0],mMsg[1]-mDone[1]);
+  assert.ok(dist>=7.5&&dist<=9.5,'Expected ~8px lateral offset between concurrent done and message connectors, got '+dist);
+  const dashedWires=ops.filter(item=>item.op==='setLineDash'&&item.args[0]?.length>0);
+  assert.equal(dashedWires.length,0);
 });
