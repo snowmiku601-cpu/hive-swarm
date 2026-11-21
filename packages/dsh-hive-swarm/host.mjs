@@ -5,13 +5,14 @@ import {createNativeAccess} from './native.mjs';
 import {ownerActions,registerRoutes} from './routes.mjs';
 
 export const name='dsh-hive-swarm';
-export const inject=['connection','typertGateway','sessionController','sessions','agents','agentPresets','llm','sandboxPolicy','fs','shell','workspaceRegistry','tools','skills','profileContext'];
+export const inject=['connection','typertGateway','sessionController','sessions','agents','agentPresets','llm','sandboxPolicy','fs','shell','workspaceRegistry','tools','skills','profileContext','subagents'];
 const hosts=new WeakMap();
 const workerVisible=new Set(['list_models','board_status','board_history','read_board','post_message','set_turn_outcome','add_member','retire_member','set_member_model','manage_channel']);
 const coordinatorVisible=new Set([...workerVisible,'set_team_title','set_team_plan']);
 const memberSchema={type:'object',properties:{
   name:{type:'string'},brief:{type:'string'},group:{type:['string','null']},model:{type:['string','null']},effort:{type:['string','null']},
   fallbackModel:{type:['string','null']},fallbackEffort:{type:['string','null']},writable:{type:['boolean','null']},worktree:{type:['boolean','null']},
+  fork:{type:['string','null'],description:'Optional fork source: "coordinator" to branch from the parent chat (or a teammate name in add_member), or null.'},
   waitFor:{type:['array','null'],items:{type:'string'}},channels:{type:['array','null'],items:{type:'string'}},
   n:{type:['integer','null'],minimum:2,maximum:8,description:'Optional sharding count: spawns name-1..name-n as separate parallel workers in group name. Pass null or omit for a single worker.'},
   tasks:{type:['array','null'],items:{type:'string'},minItems:2,maxItems:8,description:'Optional sharding targets: spawns one parallel worker per item (name-1..name-k) in group name. Pass null or omit for a single worker; put a single worker checklist in brief.'},
@@ -51,7 +52,7 @@ const descriptions={
   set_team_plan:'Set or update outcome-grouped threads for the Swarm Overview.',
   set_member_model:'Switch a member model and reasoning effort (pass effort: null for model default, resume: true to wake an idle member).',
   manage_channel:'List channels or manage subscriptions (create, list, subscribe, unsubscribe, archive).',
-  add_member:'Add or replace a worker, optionally inheriting a teammate chat via fork.',
+  add_member:'Add or replace a worker, optionally inheriting a teammate or coordinator chat via fork.',
   retire_member:'Retire a named member or shard group.',
   wait_for_board:'Wait without polling for matching posts or a stopped phase (timeoutSec 1–55).',
 };
@@ -136,7 +137,8 @@ export async function createHost(ctx,{dataDirectory=resolveDataDirectory(ctx),co
           if(!native.isCurrentAgent(agent))throw Error('A trusted current native Agent is required.');
           const owned=store.findSession(agent.id);const actor=runner.actorForSession(agent.id);
           if(owned&&!actor)throw Error('This owned worker session has no active Hive turn.');
-          const context={signal:exec.signal,...actor?{actor}:{parentWorkspace:agent.session?.header?.cwd},
+          const context={signal:exec.signal,...actor?{actor}:{parentWorkspace:agent.session?.header?.cwd,
+            ...(action==='start_team'&&typeof agent.id==='string'&&agent.id?{parentSessionId:agent.id}:{})},
             ...exec.callId?{requestId:String(exec.callId)}:{}};
           if(action==='set_turn_outcome') {
             if(!actor||args.turn!==actor.turn)throw Error('The outcome must match this owned active turn.');

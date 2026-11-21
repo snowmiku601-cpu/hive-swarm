@@ -29,6 +29,7 @@ test('RPC owner admission is independent of caller-supplied identity and reads d
   assert.deepEqual(f.calls.map(x=>x.kind),['snapshot']);
   assert.equal((await f.rpc('snapshot',{actor:{member:'admin'}},signal(),owner)).ok,false);
   assert.equal((await f.rpc('command',{action:'arbitrary',args:{},requestId:'x'},signal(),owner)).ok,false);
+  assert.equal((await f.rpc('command',{action:'pause_team',args:{teamId:'one',parentSessionId:'spoof'},requestId:'x'},signal(),owner)).ok,false);
   assert.equal((await f.rpc('command',{action:'pause_team',args:{teamId:'one'},requestId:'x'},signal(),owner)).ok,true);
   assert.equal(f.calls.at(-1).context.actor,undefined);
   assert.equal(f.calls.at(-1).context.requestId,'x');
