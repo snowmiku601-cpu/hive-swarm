@@ -1214,3 +1214,179 @@ test('restoring legacy 1.8/1.9 SQLite teams defaults executionMode to session on
   assert.equal(restored.members[0].executionMode,'session');
   assert.equal(restored.members[1].executionMode,undefined);
 });
+
+test('B4: teamPhase does not falsely stall when workers are done and coordinator posted summary or has no pending work',async t=>{
+  const board=new TeamBoard(':memory:',async({member})=>{
+    if(member.name==='coordinator')return {state:'waiting',message:'[done] Summary.',notify:[],waitFor:[]};
+    return report('[done] Worker finished.');
+  });
+  t.after(()=>board.close());
+  const {id}=board.create({cwd:process.cwd(),task:'Coordinator summary check',coordinator:true,turnLimit:10,
+    members:[{name:'builder',brief:'Build'},{name:'extra',brief:'Extra'}]});
+  await until(()=>teamPhase(board.get(id))==='done');
+  const settled=board.get(id);
+  assert.equal(teamPhase(settled),'done');
+  // Unaddressed user post after completion must keep teamPhase === done.
+  board.post(id,'Thanks team!');
+  assert.equal(teamPhase(board.get(id)),'done');
+  // Retiring a done worker after summary still keeps teamPhase === done.
+  board.retireMember(id,'extra');
+  assert.equal(teamPhase(board.get(id)),'done');
+  // Already-satisfied waitFor or unaddressed inbox entry on coordinator does not falsely stall.
+  const satisfiedWait=board.get(id);
+  satisfiedWait.members[2].waitFor=['builder'];
+  satisfiedWait.members[2].waitAfter={builder:0};
+  satisfiedWait.members[2].inbox=[{seq:99,author:'user',text:'@all FYI'}];
+  assert.equal(teamPhase(satisfiedWait),'done');
+
+  // Pending summary before queueCoordinator runs reports queued (never stalled) when turn budget remains.
+  const transient={
+    paused:false,turns:1,turnLimit:8,
+    members:[
+      {name:'builder',role:'worker',status:'done',waitFor:[],completed:1,lastReport:{seq:3}},
+      {name:'coordinator',role:'coordinator',status:'waiting',waitFor:[],inbox:[],completed:0},
+    ],
+    events:[{seq:3,kind:'message',author:'builder',text:'[done] Complete.',targets:[]}],
+  };
+  assert.equal(teamPhase(transient),'queued');
+  // If coordinator already posted a summary after worker posts, phase is done even without lastRound matching.
+  transient.events.push({seq:4,kind:'message',author:'coordinator',text:'Summary posted.',targets:[]});
+  assert.equal(teamPhase(transient),'done');
+});
+
+test('2.1.0 schema: goalLine, taskLabel, dual tasks formats, backward-compatible setTeamPlan and 1.8-2.0 SQLite restore',t=>{
+  const dir=mkdtempSync(join(tmpdir(),'hive-schema-210-'));
+  const file=join(dir,'teams.sqlite');
+  let board=new TeamBoard(file,()=>assert.fail('Paused board must not run'));
+  t.after(()=>{board.close();rmSync(dir,{recursive:true,force:true});});
+
+  assert.throws(()=>board.create({cwd:dir,task:'Goal len',goalLine:'x'.repeat(141),members:[{name:'a',brief:'Go'}]}),/1–140/);
+  assert.throws(()=>board.create({cwd:dir,task:'Task len',members:[{name:'a',brief:'Go',taskLabel:'x'.repeat(97)}]}),/1–96/);
+
+  const created=board.create({
+    cwd:dir,task:'Full schema',goalLine:'  Ship 2.1.0 backend cleanly  ',
+    threads:[{id:'core',title:'Core',goal:'Fix bugs',members:['builder']}],
+    members:[{name:'builder',brief:'Fix core bugs',taskLabel:'  Core fixes & schema  '}],
+  });
+  board.pause(created.id);
+  assert.equal(created.goalLine,'Ship 2.1.0 backend cleanly');
+  assert.equal(created.members[0].taskLabel,'Core fixes & schema');
+
+  board.addMember(created.id,{name:'reviewer',brief:'Audit changes',taskLabel:'Audit diff'});
+  assert.equal(board.get(created.id).members[1].taskLabel,'Audit diff');
+
+  // Legacy array argument preserves goalLine and taskLabels.
+  const legacyThreads=board.setTeamPlan(created.id,[{id:'audit',title:'Audit',goal:'Verify',members:['reviewer']}]);
+  assert.equal(legacyThreads.goalLine,'Ship 2.1.0 backend cleanly');
+  assert.equal(legacyThreads.members[0].taskLabel,'Core fixes & schema');
+  assert.deepEqual(legacyThreads.threads,[{id:'audit',title:'Audit',goal:'Verify',members:['reviewer']}]);
+
+  // Object form with plain { [member]: label } map, preserving omitted goalLine/threads.
+  const mapUpdated=board.setTeamPlan(created.id,{tasks:{builder:'Updated builder label',reviewer:null}});
+  assert.equal(mapUpdated.goalLine,'Ship 2.1.0 backend cleanly');
+  assert.equal(mapUpdated.members[0].taskLabel,'Updated builder label');
+  assert.equal(mapUpdated.members[1].taskLabel,undefined);
+  assert.deepEqual(mapUpdated.threads,[{id:'audit',title:'Audit',goal:'Verify',members:['reviewer']}]);
+
+  // Strict-mode [{ member, label }] array + goalLine update/clear.
+  const arrayUpdated=board.setTeamPlan(created.id,{
+    goalLine:'New concise goal',
+    tasks:[{member:'@reviewer',label:'Final review'},{member:'builder',label:''}],
+  });
+  assert.equal(arrayUpdated.goalLine,'New concise goal');
+  assert.equal(arrayUpdated.members[0].taskLabel,undefined);
+  assert.equal(arrayUpdated.members[1].taskLabel,'Final review');
+
+  const clearedGoal=board.setTeamPlan(created.id,{goalLine:null});
+  assert.equal(clearedGoal.goalLine,undefined);
+
+  // Backward compatibility: older 2.0 DB record without goalLine/taskLabel/screenshots restores and backfills screenshots.
+  board.save({
+    id:'legacy-20',paused:true,cwd:dir,task:'Legacy 2.0',title:'Legacy 2.0',
+    concurrency:2,turns:1,turnLimit:8,channels:[{name:'main',archived:false}],
+    events:[
+      {seq:1,kind:'brief',author:'coordinator',time:'2026-11-21T00:00:00Z',text:'Screenshot: shot.png | Ignored brief',targets:['a']},
+      {seq:2,kind:'message',author:'a',time:'2026-11-21T00:01:00Z',text:'Done.\nScreenshot: shot.png | Legacy shot',targets:[]},
+    ],
+    members:[{name:'a',brief:'Run',status:'done',writable:false,waitFor:[],channels:[],threadId:'t-1',inbox:[],completed:1}],
+  });
+  board.close();
+  board=new TeamBoard(file,()=>assert.fail('Must not dispatch'));
+  const restored=board.get('legacy-20');
+  assert.equal(restored.goalLine,undefined);
+  assert.equal(restored.screenshots.length,1);
+  assert.deepEqual(restored.screenshots[0],{id:'2:0',seq:2,index:0,author:'a',caption:'Legacy shot',time:'2026-11-21T00:01:00Z'});
+  assert.equal(Object.hasOwn(restored.screenshots[0],'path'),false);
+});
+
+test('Screenshot parsing and readSafeScreenshot strictly enforce roots, extensions, symlinks, traversal, and size limit',async t=>{
+  const {mkdirSync,symlinkSync,writeFileSync}=await import('node:fs');
+  const root=mkdtempSync(join(tmpdir(),'hive-shots-'));
+  const dataDir=join(root,'data');
+  // Nest repo inside dataDir too so relative .. traversal into dataDir is explicitly tested.
+  const repoDir=join(dataDir,'repo');
+  const outsideDir=join(root,'outside');
+  mkdirSync(join(repoDir,'shots'),{recursive:true});
+  mkdirSync(join(dataDir,'worktrees','team-x'),{recursive:true});
+  mkdirSync(outsideDir,{recursive:true});
+
+  const pngBytes=Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]);
+  const webpBytes=Buffer.from('RIFF\0\0\0\0WEBP');
+  writeFileSync(join(repoDir,'shots','ui.png'),pngBytes);
+  writeFileSync(join(repoDir,'shots','photo.JPG'),Buffer.from([0xff,0xd8,0xff]));
+  writeFileSync(join(dataDir,'worktrees','team-x','wt.webp'),webpBytes);
+  writeFileSync(join(dataDir,'secret.png'),pngBytes);
+  writeFileSync(join(outsideDir,'secret.png'),pngBytes);
+  writeFileSync(join(repoDir,'shots','note.txt'),'not an image');
+  writeFileSync(join(repoDir,'shots','vector.svg'),'<svg/>');
+  writeFileSync(join(repoDir,'shots','huge.png'),Buffer.alloc(10*1024*1024+1));
+  symlinkSync(outsideDir,join(repoDir,'shots','escape-dir'),process.platform==='win32'?'junction':'dir');
+  try { symlinkSync(join(repoDir,'shots','note.txt'),join(repoDir,'shots','fake.png')); } catch {}
+
+  const board=new TeamBoard(join(dataDir,'teams.sqlite'),()=>assert.fail('Paused'));
+  t.after(()=>{board.close();rmSync(root,{recursive:true,force:true});});
+
+  const created=board.create({
+    cwd:repoDir,task:'Check screenshots',
+    members:[{name:'ui',brief:'Screenshot: shots/ui.png | Brief should not be indexed'}],
+  });
+  board.pause(created.id);
+  board.record(created,'system','Screenshot: shots/ui.png | System post ignored');
+  board.save(created);
+
+  const postText=[
+    'Updated view.\r',
+    'Screenshot: shots/ui.png | Valid PNG\r',
+    'Screenshot: '+join(repoDir,'shots','photo.JPG')+' | Valid JPG',
+    'Screenshot: '+join(dataDir,'worktrees','team-x','wt.webp')+' | Worktree WEBP',
+    'Screenshot: ../secret.png | Traversal into parent dataDir',
+    'Screenshot: '+join(outsideDir,'secret.png')+' | Outside root absolute',
+    'Screenshot: shots/note.txt | Non-image extension',
+    'Screenshot: shots/vector.svg | SVG disallowed',
+    'Screenshot: shots/escape-dir/secret.png | Symlink escape',
+    'Screenshot: shots/huge.png | Over 10 MiB',
+    'Screenshot: shots/fake.png | Symlink to txt',
+  ].join('\n');
+  const updated=board.post(created.id,postText);
+  const seq=updated.events.at(-1).seq;
+  assert.equal(updated.screenshots.length,10);
+  for (const item of updated.screenshots) {
+    assert.equal(Object.hasOwn(item,'path'),false,'team.screenshots must never expose raw filesystem paths');
+  }
+
+  const okPng=engine.readSafeScreenshot(board,dataDir,created.id,seq,0);
+  assert.equal(okPng.contentType,'image/png');
+  assert.deepEqual(okPng.body,pngBytes);
+
+  const okJpg=engine.readSafeScreenshot(board,dataDir,created.id,seq,1);
+  assert.equal(okJpg.contentType,'image/jpeg');
+
+  const okWt=engine.readSafeScreenshot(board,dataDir,created.id,seq,2);
+  assert.equal(okWt.contentType,'image/webp');
+
+  for (const badIdx of [3,4,5,6,7,8,9,99]) {
+    assert.equal(engine.readSafeScreenshot(board,dataDir,created.id,seq,badIdx),null,'index '+badIdx+' must be blocked');
+  }
+  assert.equal(engine.readSafeScreenshot(board,dataDir,'missing-team',seq,0),null);
+  assert.equal(engine.readSafeScreenshot(board,dataDir,created.id,1,0),null);
+});

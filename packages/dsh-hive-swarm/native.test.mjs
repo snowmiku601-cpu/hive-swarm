@@ -344,3 +344,80 @@ test('rename truncates UTF-8 titles below 80 bytes for ordinary sessions and ski
   await assert.rejects(native.rename('foreign','Attempt'),/owned/);
   await native.dispose();
 });
+
+test('B1 & B6: sessionRoute invokes function agent.model.current(), Cordis ctx.get resolves optional services, and rename falls back to synchronous sessionTitle.rename',async()=>{
+  const {createNativeAccess}=await import('./native.mjs');
+  const f=subagentFixture();
+  const titleRenames=[];
+  const origInvoke=f.ctx.typertGateway.invoke;
+  f.ctx.typertGateway.invoke=async request=>{
+    if(request.method==='rename')throw Error('session/rename unavailable');
+    return origInvoke(request);
+  };
+  const ordinarySession={id:'ordinary-1',header:{cwd:process.cwd()}};
+  f.sessions.set('ordinary-1',ordinarySession);
+
+  // Enforce Cordis-style ctx.get() without exposing sessionTitle or subagents directly on ctx.
+  const cordisServices=new Map([
+    ['subagents',f.ctx.subagents],
+    ['sessionTitle',{rename:(session,title)=>{titleRenames.push({session,title});}}],
+  ]);
+  const strictCtx=new Proxy({
+    ...f.ctx,
+    get:name=>cordisServices.get(name),
+  },{
+    get(target,key){
+      if(key==='subagents'||key==='sessionTitle')throw Error('cannot get property '+String(key)+' without inject');
+      return Reflect.get(target,key);
+    },
+  });
+
+  const native=createNativeAccess(strictCtx,{ownsSession:id=>id==='ordinary-1'||id==='sub-1'});
+
+  // B1: agent.model.current as a function in DSH 0.2.2-rc.5
+  const fnRoute=await native.sessionRoute({
+    id:'parent-chat',
+    session:{header:{cwd:process.cwd()}},
+    model:{current:()=>({provider:'deepseek',model:'deepseek-reasoner',reasoningEffort:'high'})},
+  });
+  assert.deepEqual(fnRoute,{
+    sessionId:'parent-chat',
+    cwd:process.cwd(),
+    model:'deepseek/deepseek-reasoner',
+    provider:'deepseek',
+    modelId:'deepseek-reasoner',
+    effort:'high',
+  });
+
+  // Plain object current remains supported
+  const objRoute=await native.sessionRoute({
+    id:'parent-chat',
+    session:{header:{cwd:process.cwd()}},
+    model:{current:{provider:'p',model:'m'}},
+  });
+  assert.equal(objRoute.model,'p/m');
+
+  // B6: gateway session/rename failure falls back synchronously to sessionTitle.rename(session, clean)
+  await native.rename('ordinary-1','🐝 @builder · '+'y'.repeat(120));
+  assert.equal(titleRenames.length,1);
+  assert.equal(titleRenames[0].session,ordinarySession);
+  assert.ok(Buffer.byteLength(titleRenames[0].title,'utf8')<=80);
+
+  // Subagents still skip rename fallback
+  native.registerSubagent('sub-1','parent-chat');
+  await native.rename('sub-1','🐝 @sub · ignored');
+  assert.equal(titleRenames.length,1);
+  await native.dispose();
+});
+
+test('B2: samePath handles Windows drive-letter case mismatch in prepare and create',async()=>{
+  if(process.platform!=='win32')return;
+  const f=await fixture();
+  const flipDrive=value=>value.replace(/^[A-Za-z]:/,d=>d===d.toUpperCase()?d.toLowerCase():d.toUpperCase());
+  const flipped=flipDrive(process.cwd());
+  assert.notEqual(flipped,process.cwd());
+  await f.native.prepare('owned',{cwd:flipped,writable:false,model:{provider:'p',model:'m'},effort:'max'});
+  f.ctx.workspaceRegistry={list:()=>[{id:'ws-case',path:flipped}]};
+  assert.equal(await f.native.create({cwd:process.cwd()}),'owned');
+  assert.equal(f.calls.findLast(c=>c.method==='create').args.request.workspaceId,'ws-case');
+});

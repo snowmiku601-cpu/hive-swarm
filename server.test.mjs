@@ -712,3 +712,109 @@ test('stdio MCP bridge exposes member.fork and forwards trusted _meta or CODEX_T
   assert.equal(fromMeta.result.isError,undefined);
   assert.equal(fromMeta.result.structuredContent.parentSessionId,'meta-parent-456');
 });
+
+test('2.1.0 Codex schema, CSP img-src, and confined GET /board/:id/screenshot/:seq/:idx endpoint',async t=>{
+  const {symlinkSync}=await import('node:fs');
+  const root=mkdtempSync(join(tmpdir(),'hive-server-shots-'));
+  const dataDirectory=join(root,'data');
+  // Nest repo inside dataDirectory so relative .. traversal into dataDirectory is explicitly verified blocked.
+  const repoDir=join(dataDirectory,'repo');
+  const outsideDir=join(root,'outside');
+  mkdirSync(join(repoDir,'shots'),{recursive:true});
+  mkdirSync(join(dataDirectory,'worktrees','wt'),{recursive:true});
+  mkdirSync(outsideDir,{recursive:true});
+
+  const png=Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]);
+  const jpg=Buffer.from([0xff,0xd8,0xff,0xe0]);
+  const webp=Buffer.from('RIFF\0\0\0\0WEBP');
+  writeFileSync(join(repoDir,'shots','home.png'),png);
+  writeFileSync(join(repoDir,'shots','card.jpeg'),jpg);
+  writeFileSync(join(dataDirectory,'worktrees','wt','panel.webp'),webp);
+  writeFileSync(join(dataDirectory,'secret.png'),png);
+  writeFileSync(join(outsideDir,'secret.png'),png);
+  writeFileSync(join(repoDir,'shots','notes.txt'),'text');
+  writeFileSync(join(repoDir,'shots','big.png'),Buffer.alloc(10*1024*1024+1));
+  symlinkSync(outsideDir,join(repoDir,'shots','escape'),process.platform==='win32'?'junction':'dir');
+
+  const server=await service({dataDirectory,listenPort:0,runner:{
+    listModels:async()=>models,
+    run:async ({member,remember})=>{remember({threadId:'thr-'+member.name});return done;},
+    readTranscript:async()=>[],
+    close(){},
+  }});
+  t.after(async()=>{await server.close();rmSync(root,{recursive:true,force:true});});
+  const key=readFileSync(join(dataDirectory,'service.key'),'utf8');
+  const invoke=async (name,args)=>{
+    const response=await fetch(server.origin+'/tool',{method:'POST',headers:{authorization:'Bearer '+key,'content-type':'application/json'},
+      body:JSON.stringify({name,arguments:args})});
+    const body=await response.json();
+    if (!response.ok) throw Error(body.error);
+    return body;
+  };
+
+  const started=await invoke('start_team',{
+    cwd:repoDir,task:'UI polish & screenshots',goalLine:'Deliver 2.1.0 Overview & Graph',
+    members:[{name:'ui',brief:'Build dashboard',taskLabel:'Dashboard UI'}],
+  });
+  assert.equal(started.goalLine,'Deliver 2.1.0 Overview & Graph');
+  assert.equal(started.members[0].taskLabel,'Dashboard UI');
+
+  const updated=await invoke('set_team_plan',{
+    teamId:started.id,goalLine:'Final 2.1.0 polish',
+    tasks:[{member:'ui',label:'Overview & Graph UI'}],
+    threads:[{id:'ui-thread',title:'UI',goal:'Ship dashboard',members:['ui']}],
+  });
+  assert.equal(updated.goalLine,'Final 2.1.0 polish');
+  assert.equal(updated.members[0].taskLabel,'Overview & Graph UI');
+
+  // Verify CSP allows img-src 'self' data: blob: on board HTML.
+  const pageRes=await fetch(started.url);
+  assert.equal(pageRes.status,200);
+  const csp=pageRes.headers.get('content-security-policy');
+  assert.match(csp,/img-src 'self' data: blob:/);
+
+  const posted=await invoke('post_message',{
+    teamId:started.id,
+    text:[
+      'Screenshots ready:',
+      'Screenshot: shots/home.png | Home overview',
+      'Screenshot: '+join(repoDir,'shots','card.jpeg')+' | Card JPEG',
+      'Screenshot: '+join(dataDirectory,'worktrees','wt','panel.webp')+' | Worktree WEBP',
+      'Screenshot: ../secret.png | Traversal',
+      'Screenshot: '+join(outsideDir,'secret.png')+' | Outside root',
+      'Screenshot: shots/notes.txt | Non-image',
+      'Screenshot: shots/escape/secret.png | Symlink escape',
+      'Screenshot: shots/big.png | Oversized',
+    ].join('\n'),
+  });
+  const seq=posted.events.at(-1).seq;
+  assert.equal(posted.screenshots.length,8);
+  assert.equal(posted.screenshots[0].url,'/board/'+started.id+'/screenshot/'+seq+'/0');
+  assert.equal(Object.hasOwn(posted.screenshots[0],'path'),false);
+
+  const shotUrl=idx=>server.origin+'/board/'+started.id+'/screenshot/'+seq+'/'+idx;
+  assert.equal((await fetch(shotUrl(0))).status,403);
+  assert.equal((await fetch(shotUrl(0),{headers:{'sec-fetch-site':'cross-site'}})).status,403);
+
+  const same={'sec-fetch-site':'same-origin'};
+  const res0=await fetch(shotUrl(0),{headers:same});
+  assert.equal(res0.status,200);
+  assert.equal(res0.headers.get('content-type'),'image/png');
+  assert.equal(res0.headers.get('cache-control'),'no-store');
+  assert.equal(res0.headers.get('x-content-type-options'),'nosniff');
+  assert.equal(res0.headers.get('cross-origin-resource-policy'),'same-origin');
+  assert.deepEqual(Buffer.from(await res0.arrayBuffer()),png);
+
+  const res1=await fetch(shotUrl(1),{headers:same});
+  assert.equal(res1.status,200);
+  assert.equal(res1.headers.get('content-type'),'image/jpeg');
+
+  const res2=await fetch(shotUrl(2),{headers:same});
+  assert.equal(res2.status,200);
+  assert.equal(res2.headers.get('content-type'),'image/webp');
+
+  for (const badIdx of [3,4,5,6,7,88]) {
+    assert.equal((await fetch(shotUrl(badIdx),{headers:same})).status,404,'index '+badIdx+' must 404');
+  }
+  assert.equal((await fetch(server.origin+'/board/00000000-0000-0000-0000-000000000000/screenshot/1/0',{headers:same})).status,404);
+});

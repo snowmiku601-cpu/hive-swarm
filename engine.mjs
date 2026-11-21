@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { realpathSync, statSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
+import { extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 function text(value, label, max) {
@@ -8,6 +9,11 @@ function text(value, label, max) {
     throw new Error(label + ' must contain 1–' + max + ' characters.');
   }
   return value.trim();
+}
+
+function optionalText(value, label, max) {
+  if (value === undefined || value === null || value === '') return undefined;
+  return text(value, label, max);
 }
 
 function integer(value, min, max, label) {
@@ -175,10 +181,12 @@ function newMember(spec) {
   if (!spec || typeof spec !== 'object') throw Error('Member details are required.');
   const waitFor = spec.waitFor ?? [];
   if (!Array.isArray(waitFor)) throw Error('waitFor must be a list of member names.');
+  const taskLabel = optionalText(spec.taskLabel, 'Task label', 96);
   return {
     name: memberLabel(spec.name, 'Member name'),
     group: spec.group == null ? undefined : memberLabel(spec.group, 'Group name'),
     brief: text(spec.brief, 'Member brief', 4000),
+    ...(taskLabel ? {taskLabel} : {}),
     model: spec.model == null ? undefined : text(spec.model, 'Model', 100),
     effort: reasoningEffort(spec.effort),
     ...(spec.fallbackModel ? {fallbackModel: text(spec.fallbackModel, 'Fallback model', 100)} : {}),
@@ -268,6 +276,105 @@ function numberPosts(team) {
   return team;
 }
 
+const screenshotLine = /^Screenshot:\s*(.+?)\s*\|\s*(.{1,140})$/gm;
+const screenshotMimeTypes = new Map([
+  ['.png', 'image/png'],
+  ['.jpg', 'image/jpeg'],
+  ['.jpeg', 'image/jpeg'],
+  ['.webp', 'image/webp'],
+]);
+const maxScreenshotBytes = 10 * 1024 * 1024;
+
+export function extractScreenshots(event) {
+  if (!event || event.author === 'system' || ['brief', 'monitor', 'checkpoint'].includes(event.kind)) {
+    return [];
+  }
+  if (typeof event.text !== 'string' || !event.text.includes('Screenshot:')) return [];
+  const normalized = event.text.replace(/\r\n?/g, '\n');
+  const items = [];
+  screenshotLine.lastIndex = 0;
+  let match;
+  while ((match = screenshotLine.exec(normalized)) !== null) {
+    const path = match[1].trim();
+    const caption = match[2].trim();
+    if (!path || !caption || caption.length > 140) continue;
+    const index = items.length;
+    items.push({
+      id: event.seq + ':' + index,
+      seq: event.seq,
+      index,
+      author: event.author,
+      caption,
+      time: event.time,
+      path,
+    });
+  }
+  return items;
+}
+
+function publicScreenshot({id, seq, index, author, caption, time}) {
+  return {id, seq, index, author, caption, time};
+}
+
+function realPathSync(target) {
+  return (realpathSync.native ?? realpathSync)(target);
+}
+
+function withinScreenshotRoot(root, target) {
+  const a = process.platform === 'win32' ? root.toLowerCase() : root;
+  const b = process.platform === 'win32' ? target.toLowerCase() : target;
+  const offset = relative(a, b);
+  return Boolean(offset) && !isAbsolute(offset) && offset !== '..' && !offset.startsWith('..' + sep);
+}
+
+export function readSafeScreenshot(board, dataDirectory, teamId, seq, index) {
+  if (typeof teamId !== 'string' || !teamId || !Number.isSafeInteger(seq) || seq < 1 ||
+      !Number.isSafeInteger(index) || index < 0) return null;
+  let team;
+  try { team = board.get(teamId); } catch { return null; }
+  const row = board.readPost?.get(teamId, seq);
+  const post = row ? JSON.parse(row.value) : team.events?.find(event => event.seq === seq);
+  if (!post) return null;
+  const shot = extractScreenshots(post)[index];
+  if (!shot?.path || shot.path.includes('\0')) return null;
+  if (!screenshotMimeTypes.has(extname(shot.path).toLowerCase())) return null;
+  let realCwd;
+  try { realCwd = realPathSync(team.cwd); } catch { return null; }
+  let realData = null;
+  if (dataDirectory) {
+    try { realData = realPathSync(dataDirectory); } catch {}
+  }
+  const relativeTarget = !isAbsolute(shot.path);
+  const candidate = relativeTarget ? resolve(realCwd, shot.path) : resolve(shot.path);
+  let realTarget;
+  try { realTarget = realPathSync(candidate); } catch { return null; }
+  const contentType = screenshotMimeTypes.get(extname(realTarget).toLowerCase());
+  if (!contentType) return null;
+  const allowed = relativeTarget
+    ? withinScreenshotRoot(realCwd, realTarget)
+    : (withinScreenshotRoot(realCwd, realTarget) || (realData !== null && withinScreenshotRoot(realData, realTarget)));
+  if (!allowed) return null;
+  let fd;
+  try {
+    fd = openSync(realTarget, 'r');
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size < 0 || info.size > maxScreenshotBytes) return null;
+    const body = Buffer.allocUnsafe(info.size);
+    let offset = 0;
+    while (offset < info.size) {
+      const bytesRead = readSync(fd, body, offset, info.size - offset, offset);
+      if (!bytesRead) break;
+      offset += bytesRead;
+    }
+    if (offset !== info.size || offset > maxScreenshotBytes) return null;
+    return {body, contentType};
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) try { closeSync(fd); } catch {}
+  }
+}
+
 function restore(team) {
   numberPosts(team);
   team.host ??= 'codex';
@@ -275,6 +382,12 @@ function restore(team) {
   for (const member of team.members) {
     member.channels ??= [];
     if (member.threadId && !executionModes.has(member.executionMode)) member.executionMode = 'session';
+  }
+  if (!Array.isArray(team.screenshots)) {
+    const recovered = team.events.flatMap(event => extractScreenshots(event).map(publicScreenshot));
+    if (recovered.length) team.screenshots = recovered.slice(-200);
+  } else {
+    team.screenshots = team.screenshots.map(publicScreenshot);
   }
   delete team.overview;
   const removed = new Set(team.members.filter(member=>member.role==='narrator').map(member=>member.name));
@@ -309,18 +422,38 @@ function completedWorkerRound(workers) {
   return workers.map(worker => worker.name + ':' + worker.completed).join(',');
 }
 
+function hasCoordinatorSummary(team, coordinator, workers) {
+  const events = team.events ?? [];
+  const workerNames = new Set(workers.map(worker => worker.name));
+  const lastSummarySeq = Math.max(
+    coordinator.lastReport?.seq ?? 0,
+    events.findLast(event => event.author === coordinator.name && event.kind !== 'brief')?.seq ?? 0,
+  );
+  if (!lastSummarySeq) return false;
+  const lastWorkerSeq = Math.max(
+    0,
+    ...workers.map(worker => worker.lastReport?.seq ?? 0),
+    events.findLast(event => workerNames.has(event.author) && event.kind !== 'brief')?.seq ?? 0,
+  );
+  return lastSummarySeq >= lastWorkerSeq;
+}
+
 export function teamPhase(team) {
   if (team.paused) return 'paused';
   const members = team.members.filter(member => member.status !== 'retired');
   if (!members.length && team.members.length) return 'retired';
   const coordinator = members.find(member => member.role === 'coordinator');
-  const round = coordinator && completedWorkerRound(members.filter(isWorker));
-  const summaryPending = round && coordinator.lastRound !== round;
+  const workers = members.filter(isWorker);
+  const round = coordinator && completedWorkerRound(workers);
+  const summaryPosted = coordinator && (!workers.length || hasCoordinatorSummary(team, coordinator, workers));
+  const summaryPending = Boolean(round && coordinator.lastRound !== round && !summaryPosted);
+  const coordinatorCanSummarize = coordinator && !['failed', 'quota'].includes(coordinator.status);
   if (!summaryPending && members.every(member => member.status === 'done' ||
-    (member === coordinator && member.status === 'waiting' && !member.waitFor.length))) return 'done';
+    (member === coordinator && member.status === 'waiting' &&
+      !pendingWaitFor(team, member).length && !(member.inbox?.some(post => post.addressed))))) return 'done';
   if (members.some(member => member.status === 'working')) return 'working';
   if (team.turns >= team.turnLimit) return 'budget';
-  if (members.some(member => member.status === 'queued')) return 'queued';
+  if (members.some(member => member.status === 'queued') || (summaryPending && coordinatorCanSummarize)) return 'queued';
   return 'stalled';
 }
 
@@ -445,6 +578,7 @@ export class TeamBoard {
     `);
     this.read = this.db.prepare('SELECT value FROM teams WHERE id = ?');
     this.write = this.db.prepare('INSERT INTO teams VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET value = excluded.value');
+    this.readPost = this.db.prepare('SELECT value FROM posts WHERE team_id = ? AND seq = ?');
     this.writePost = this.db.prepare('INSERT INTO posts VALUES (?, ?, ?) ON CONFLICT(team_id,seq) DO NOTHING');
     this.bounds = this.db.prepare('SELECT coalesce(min(seq),0) AS earliest, coalesce(max(seq),0) AS head FROM posts WHERE team_id = ?');
     const filter = " AND (? IS NULL OR COALESCE(json_extract(posts.value,'$.channel'),'main') IN (SELECT value FROM json_each(?)))" +
@@ -527,9 +661,11 @@ export class TeamBoard {
     if (members.some(member => member.worktree) && !worktreeSource) throw Error('A Git workspace is required for worktrees.');
 
     const task = text(input.task, 'Task', 8000);
+    const goalLine = optionalText(input.goalLine, 'Goal line', 140);
     const threads = normalizeThreads(input.threads, members);
     const team = {
       id: randomUUID(), host: this.host, cwd, task, title: text(input.title ?? task.slice(0, 95), 'Title', 95),
+      ...(goalLine ? {goalLine} : {}),
       ...(parent ? {parentSessionId: parent} : {}),
       ...(input.model ? {model: text(input.model, 'Model', 100)} : {}),
       effort: reasoningEffort(input.effort),
@@ -700,14 +836,51 @@ export class TeamBoard {
     return team;
   }
 
-  setTeamPlan(id, threads, actor) {
+  setTeamPlan(id, plan, actor) {
     const team = this.get(id);
     if (actor && this.peerMember(team, actor).role !== 'coordinator') {
       throw Error('Only the user or coordinator can update outcome threads.');
     }
-    const normalized = normalizeThreads(threads, team.members);
-    if (normalized?.length) team.threads = normalized;
-    else delete team.threads;
+    const spec = plan === undefined ? {threads: []} : Array.isArray(plan) ? {threads: plan} : plan;
+    if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+      throw Error('Team plan must be an object or a list of outcome threads.');
+    }
+    const {goalLine, tasks, threads} = spec;
+    if (goalLine === undefined && tasks === undefined && threads === undefined) {
+      throw Error('Specify goalLine, tasks, or threads to update the team plan.');
+    }
+    if (goalLine !== undefined) {
+      const next = optionalText(goalLine, 'Goal line', 140);
+      if (next) team.goalLine = next;
+      else delete team.goalLine;
+    }
+    if (tasks !== undefined && tasks !== null) {
+      let entries;
+      if (Array.isArray(tasks)) {
+        entries = tasks.map(entry => {
+          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+            throw Error('Each task label entry must be a {member, label} object.');
+          }
+          return [entry.member, entry.label];
+        });
+      } else if (typeof tasks === 'object') {
+        entries = Object.entries(tasks);
+      } else {
+        throw Error('Task labels must be a member map or a list of {member, label} entries.');
+      }
+      for (const [rawName, rawLabel] of entries) {
+        const name = normalizeTarget(text(rawName, 'Member name', 30));
+        const target = this.liveMember(team, name);
+        const label = optionalText(rawLabel, 'Task label', 96);
+        if (label) target.taskLabel = label;
+        else delete target.taskLabel;
+      }
+    }
+    if (threads !== undefined) {
+      const normalized = normalizeThreads(threads, team.members);
+      if (normalized?.length) team.threads = normalized;
+      else delete team.threads;
+    }
     this.save(team);
     return team;
   }
@@ -919,6 +1092,12 @@ export class TeamBoard {
     const event = {seq: (team.events.at(-1)?.seq ?? 0) + 1, time: new Date().toISOString(), kind, author, text: body, targets,channel};
     team.events.push(event);
     if (team.events.length > 300) team.events.shift();
+    const shots = extractScreenshots(event);
+    if (shots.length) {
+      team.screenshots ??= [];
+      team.screenshots.push(...shots.map(publicScreenshot));
+      if (team.screenshots.length > 200) team.screenshots.splice(0, team.screenshots.length - 200);
+    }
     return event;
   }
 

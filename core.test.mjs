@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,rmSync} from 'node:fs';
+import {mkdtempSync,realpathSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
@@ -218,4 +218,109 @@ test('trusted context.parentSessionId, fork: coordinator, executionMode and suba
   app.board.save(raw);
   const restored=(await app.snapshot({teamId:started.id})).team;
   assert.equal(restored.members[0].executionMode,'session');
+});
+
+test('B4: presentTeam aligns attention with server.mjs (stallIssues only when stalled; hard blockers & budget always preserved)',async t=>{
+  const {presentTeam}=await import('./core.mjs');
+  const baseTeam={
+    id:'team-b4',host:'deepseek-harness',title:'B4',cwd:workspace,task:'Check attention',
+    paused:false,turns:1,turnLimit:8,channels:[{name:'main',archived:false}],
+    members:[
+      {name:'alpha',role:'worker',status:'working',writable:false,waitFor:[],channels:[]},
+      {name:'beta',role:'worker',status:'failed',writable:false,waitFor:[],channels:[],recoveryRequired:true,inputRequired:true},
+    ],
+    events:[
+      {seq:1,kind:'message',author:'alpha',text:'Unaddressed message while working',targets:[]},
+    ],
+    lastDispatchSeq:0,
+  };
+  const working=presentTeam(baseTeam);
+  assert.equal(working.phase,'working');
+  assert.equal(working.attention.some(i=>i.kind==='unaddressed'),false);
+  assert.equal(working.attention.some(i=>i.kind==='input'),true);
+  assert.equal(working.attention.some(i=>i.kind==='recovery'),true);
+  assert.equal(working.attention.some(i=>i.kind==='failed'),true);
+
+  const doneTeam={
+    ...baseTeam,
+    members:[{name:'alpha',role:'worker',status:'done',writable:false,waitFor:[],channels:[]}],
+  };
+  const doneView=presentTeam(doneTeam);
+  assert.equal(doneView.phase,'done');
+  assert.deepEqual(doneView.attention,[]);
+
+  const budgetTeam={
+    ...baseTeam,turns:8,turnLimit:8,
+    members:[{name:'alpha',role:'worker',status:'waiting',writable:false,waitFor:[],channels:[]}],
+  };
+  const budgetView=presentTeam(budgetTeam);
+  assert.equal(budgetView.phase,'budget');
+  assert.equal(budgetView.attention[0].kind,'budget');
+  assert.equal(budgetView.attention.some(i=>i.kind==='unaddressed'),false);
+
+  const stalledTeam={
+    ...baseTeam,
+    members:[{name:'alpha',role:'worker',status:'waiting',writable:false,waitFor:[],channels:[]}],
+  };
+  const stalledView=presentTeam(stalledTeam);
+  assert.equal(stalledView.phase,'stalled');
+  assert.equal(stalledView.attention.some(i=>i.kind==='unaddressed'),true);
+});
+
+test('2.1.0 core projections: goalLine, taskLabel, dual tasks, safe screenshot URLs and workspace-scoped screenshot reader',async t=>{
+  const {mkdirSync,writeFileSync}=await import('node:fs');
+  const root=mkdtempSync(join(tmpdir(),'hive-core-210-'));
+  const cwd=join(root,'repo');
+  const dataDir=join(root,'state');
+  mkdirSync(join(cwd,'shots'),{recursive:true});
+  const png=Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]);
+  writeFileSync(join(cwd,'shots','view.png'),png);
+  writeFileSync(join(root,'outside.png'),png);
+
+  const app=createSwarmApplication({
+    dataDirectory:dataDir,host:'deepseek-harness',
+    runner:{listModels:async()=>[{id:'fixture/model',label:'Fixture',efforts:['max'],defaultEffort:'max'}],run:async()=>new Promise(()=>{}),close:async()=>{}},
+    workspaceAllowed:async dir=>dir===realpathSync(cwd),
+  });
+  t.after(async()=>{await app.close();rmSync(root,{recursive:true,force:true});});
+
+  const started=await app.command('start_team',{
+    cwd,task:'Project 2.1.0 fields',goalLine:'Polish 2.1.0 schema',
+    members:[{name:'builder',brief:'Implement 2.1.0',taskLabel:'Schema & endpoints'}],
+  });
+  assert.equal(started.goalLine,'Polish 2.1.0 schema');
+  assert.equal(started.members[0].taskLabel,'Schema & endpoints');
+
+  const updated=await app.command('set_team_plan',{
+    teamId:started.id,
+    goalLine:'Updated 2.1.0 goal',
+    tasks:[{member:'builder',label:'Updated via array'}],
+    threads:[{id:'t1',title:'Schema',goal:'Ship 2.1.0',members:['builder']}],
+  });
+  assert.equal(updated.goalLine,'Updated 2.1.0 goal');
+  assert.equal(updated.members[0].taskLabel,'Updated via array');
+  assert.equal(updated.threads.length,1);
+
+  const mapUpdated=await app.command('set_team_plan',{
+    teamId:started.id,
+    tasks:{builder:'Updated via object map'},
+  });
+  assert.equal(mapUpdated.members[0].taskLabel,'Updated via object map');
+
+  const posted=await app.command('post_message',{
+    teamId:started.id,
+    text:'Check image:\nScreenshot: shots/view.png | Overview preview\nScreenshot: ../outside.png | Blocked traversal',
+  });
+  const seq=posted.events.at(-1).seq;
+  assert.equal(posted.screenshots.length,2);
+  assert.deepEqual(posted.screenshots[0],{
+    id:seq+':0',seq,index:0,author:'user',caption:'Overview preview',time:posted.events.at(-1).time,
+    url:'/api/hive-swarm/v1/screenshot?teamId='+encodeURIComponent(started.id)+'&seq='+seq+'&index=0',
+  });
+  assert.equal(Object.hasOwn(posted.screenshots[0],'path'),false);
+
+  const file=await app.screenshot({teamId:started.id,seq,index:0});
+  assert.equal(file.contentType,'image/png');
+  assert.deepEqual(file.body,png);
+  assert.equal(await app.screenshot({teamId:started.id,seq,index:1}),null);
 });

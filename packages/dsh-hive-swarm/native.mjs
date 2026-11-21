@@ -2,7 +2,16 @@ import {randomUUID} from 'node:crypto';
 import {realpathSync} from 'node:fs';
 
 const never=()=>new AbortController().signal;
-const samePath=(left,right)=>realpathSync(left)===realpathSync(right);
+const realPathSync=target=>(realpathSync.native??realpathSync)(target);
+const normalizePath=(target,platform=process.platform)=>{
+  const resolved=realPathSync(target);
+  return platform==='win32'?resolved.toLowerCase():resolved;
+};
+const samePath=(left,right,platform=process.platform)=>normalizePath(left,platform)===normalizePath(right,platform);
+const optionalService=(ctx,name)=>{
+  try{if(typeof ctx?.get==='function'){const value=ctx.get(name);if(value!==undefined)return value;}}catch{}
+  try{return ctx?.[name];}catch{return undefined;}
+};
 const readTools=new Set(['read','read_image','glob','grep','skill','web_search','web_fetch','todo_write','working_directory','job_list','job_output']);
 const writeTools=new Set(['write','edit','apply_patch','job_kill']);
 const shellTools=new Set(['bash','pwsh']);
@@ -36,7 +45,8 @@ function isFallbackSubagentError(error) {
 export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=[]}={}) {
   if(typeof ctx.connection?.createPeer!=='function'||typeof ctx.typertGateway?.invoke!=='function')throw Error('Native DSH Gateway and Connection are unavailable.');
   const peer=ctx.connection.createPeer({principal:{kind:'owner'},interactions:'none'});
-  const subagents=ctx.subagents;
+  const subagents=optionalService(ctx,'subagents');
+  const sessionTitle=optionalService(ctx,'sessionTitle');
   const created=new Set(),scopes=new Map();
   const subagentsSeen=new Set(),subagentParents=new Map(),subagentActivations=new Map(),subagentResumes=new Map(),pendingStarts=new Map(),usedSubagentNames=new Set();
   let disposed=false;
@@ -171,7 +181,14 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
     owned(id);
     if(subagentsSeen.has(id)||typeof title!=='string'||!title.trim())return;
     const clean=truncateUtf8(title,80);
-    try{await invoke('rename',{sessionId:id,title:clean},signal);}catch{/* Ignore hosts without session/rename */}
+    try{await invoke('rename',{sessionId:id,title:clean},signal);return;}
+    catch{/* Fall back to local sessionTitle service when gateway rename is unavailable */}
+    if(signal?.aborted)return;
+    const titleService=sessionTitle??optionalService(ctx,'sessionTitle');
+    const session=ctx.sessions?.get(id);
+    if(session&&typeof titleService?.rename==='function') {
+      try{titleService.rename(session,clean);}catch{/* Ignore local sessionTitle failure */}
+    }
   }
 
   async function prepare(id,{cwd,writable,model,effort},signal) {
@@ -432,7 +449,8 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
   async function sessionRoute(agent,signal) {
     if(!agent)return null;
     const cwd=agent.session?.header?.cwd;
-    const sel=agent.model?.current??agent.model?.selection??(typeof agent.model?.get==='function'?agent.model.get():null);
+    const currentModel=typeof agent.model?.current==='function'?agent.model.current():agent.model?.current;
+    const sel=currentModel??agent.model?.selection??(typeof agent.model?.get==='function'?agent.model.get():null);
     let provider=sel?.provider,model=sel?.model,effort=sel?.reasoningEffort;
     if(!provider||!model) {
       try {

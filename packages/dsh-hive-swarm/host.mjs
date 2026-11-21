@@ -10,7 +10,7 @@ const hosts=new WeakMap();
 const workerVisible=new Set(['list_models','board_status','board_history','read_board','post_message','set_turn_outcome','add_member','retire_member','set_member_model','manage_channel']);
 const coordinatorVisible=new Set([...workerVisible,'set_team_title','set_team_plan']);
 const memberSchema={type:'object',properties:{
-  name:{type:'string'},brief:{type:'string'},group:{type:['string','null']},model:{type:['string','null']},effort:{type:['string','null']},
+  name:{type:'string'},brief:{type:'string'},taskLabel:{type:['string','null'],description:'Optional short Overview task label (<= 96 chars).'},group:{type:['string','null']},model:{type:['string','null']},effort:{type:['string','null']},
   fallbackModel:{type:['string','null']},fallbackEffort:{type:['string','null']},writable:{type:['boolean','null']},worktree:{type:['boolean','null']},
   fork:{type:['string','null'],description:'Optional fork source: "coordinator" to branch from the parent chat (or a teammate name in add_member), or null.'},
   waitFor:{type:['array','null'],items:{type:'string'}},channels:{type:['array','null'],items:{type:'string'}},
@@ -20,13 +20,16 @@ const memberSchema={type:'object',properties:{
 const threadSchema={type:'object',properties:{
   id:{type:'string'},title:{type:'string'},goal:{type:'string'},members:{type:['array','null'],items:{type:'string'}},
 },required:['id','title','goal'],additionalProperties:false};
+const taskUpdateSchema={type:'object',properties:{
+  member:{type:'string'},label:{type:['string','null']},
+},required:['member','label'],additionalProperties:false};
 const fields={
-  start_team:['cwd','task','title','members','coordinator','model','effort','fallbackModel','fallbackEffort','threads','concurrency','turnLimit'],
+  start_team:['cwd','task','title','goalLine','members','coordinator','model','effort','fallbackModel','fallbackEffort','threads','concurrency','turnLimit'],
   list_teams:[],list_models:[],board_status:['teamId'],board_history:['teamId','after','limit','channel'],
   read_board:['teamId','after','limit','channel','mentionsOnly'],open_swarm_panel:['teamId'],
   post_message:['teamId','text','channel'],pause_team:['teamId'],resume_team:['teamId','extraTurns'],
   resolve_recovery:['teamId','member','action'],
-  set_team_title:['teamId','title'],set_team_plan:['teamId','threads'],manage_channel:['teamId','op','channel','member','topic'],
+  set_team_title:['teamId','title'],set_team_plan:['teamId','goalLine','tasks','threads'],manage_channel:['teamId','op','channel','member','topic'],
   add_member:['teamId','member','replaces','fork'],retire_member:['teamId','member'],
   set_member_model:['teamId','member','model','effort','resume'],remove_worktree:['teamId','member','force'],
   read_journal:['teamId','member'],wait_for_board:['teamId','since','timeoutSec','channel','mentionsOnly'],
@@ -36,12 +39,12 @@ const requiredFields={
   start_team:['cwd','task','members'],
   open_swarm_panel:['teamId'],pause_team:['teamId'],resume_team:['teamId'],wait_for_board:['teamId'],
   resolve_recovery:['teamId','member'],remove_worktree:['teamId','member'],read_journal:['teamId','member'],
-  post_message:['text'],set_team_title:['title'],set_team_plan:['threads'],manage_channel:['op'],
+  post_message:['text'],set_team_title:['title'],manage_channel:['op'],
   add_member:['member'],retire_member:['member'],set_member_model:['member','model'],
   set_turn_outcome:['turn','state','message'],
 };
 const descriptions={
-  start_team:'Start a native Hive Swarm only when the user asks. Use this chat as coordinator; assign disjoint file ownership, peer-to-peer handoffs, and optional outcome threads or fallbackModel.',
+  start_team:'Start a native Hive Swarm only when the user asks. Use this chat as coordinator; assign disjoint file ownership, peer-to-peer handoffs, optional goalLine (<= 140 chars), member taskLabel (<= 96 chars), outcome threads, and fallbackModel.',
   list_models:'List available native models and reasoning efforts, plus host-verified currentSession workspace and active model route.',
   set_turn_outcome:'Submit this owned worker turn result (state, message, notify, waitFor) and conclude the turn. Do not duplicate the same report via hive_swarm_post_message first.',
   post_message:'Post a message on the shared board. Tag @name, @group, @#channel, or @all only for members who must act.',
@@ -49,7 +52,7 @@ const descriptions={
   board_history:'Page through saved board history (up to 200 posts per call).',
   board_status:'Read current team status, roster, channels, threads, and stall alerts.',
   resolve_recovery:'Resolve an unconfirmed native worker outcome after inspecting the owned session: action is "dismiss" or "retry".',
-  set_team_plan:'Set or update outcome-grouped threads for the Swarm Overview.',
+  set_team_plan:'Set or update optional team goalLine, member task labels (tasks: [{member, label}]), and outcome-grouped threads for the Swarm Overview.',
   set_member_model:'Switch a member model and reasoning effort (pass effort: null for model default, resume: true to wake an idle member).',
   manage_channel:'List channels or manage subscriptions (create, list, subscribe, unsubscribe, archive).',
   add_member:'Add or replace a worker, optionally inheriting a teammate or coordinator chat via fork.',
@@ -68,12 +71,13 @@ const baseParameter=(action,key)=>key==='limit'&&action==='read_board'?{type:'in
   key==='effort'||key==='fallbackEffort'?{type:['string','null']}:
   ['coordinator','resume','force','mentionsOnly'].includes(key)?{type:'boolean'}:
   key==='members'?{type:'array',items:memberSchema}:
+  key==='tasks'&&action==='set_team_plan'?{type:'array',items:taskUpdateSchema}:
   key==='threads'?{type:'array',items:threadSchema}:
   ['notify','waitFor'].includes(key)?{type:'array',items:{type:'string'}}:
   key==='member'?(action==='add_member'?memberSchema:{type:'string'}):{type:'string'};
 const parameter=(action,key)=>nullable(baseParameter(action,key),Boolean(requiredFields[action]?.includes(key)));
 const keepNull=new Set(['effort','fallbackEffort']);
-const emptyAsOmit=new Set(['teamId','title','group','model','fallbackModel','channel','replaces','fork','topic','member']);
+const emptyAsOmit=new Set(['teamId','title','taskLabel','group','model','fallbackModel','channel','replaces','fork','topic','member']);
 function plain(value){return value&&typeof value==='object'&&!Array.isArray(value);}
 function cleanObject(obj,required=new Set()) {
   const out={};
@@ -98,7 +102,7 @@ function navigation(value){const target=value?.navigation;
   return value?.host==='deepseek-harness'&&target?.kind==='hive-swarm'&&typeof target.teamId==='string'&&/^[a-f0-9-]{36}$/.test(target.teamId)?
     {navigation:{kind:'hive-swarm',teamId:target.teamId}}:null;}
 function checkFields(action,args){if(!plain(args)||Object.keys(args).some(key=>!fields[action]?.includes(key)))throw Error('Invalid command fields or caller-supplied identity.');}
-function canonical(path){try{return realpathSync(path)}catch{throw Error('Workspace is unavailable.')}}
+function canonical(path){try{return (realpathSync.native??realpathSync)(path);}catch{throw Error('Workspace is unavailable.');}}
 export function resolveDataDirectory(ctx) {
   const directory=ctx.profileContext?.dir;
   if(typeof directory!=='string'||!isAbsolute(directory))throw Error('DSH profileContext is required for isolated Hive storage.');
@@ -170,7 +174,11 @@ export async function createHost(ctx,{dataDirectory=resolveDataDirectory(ctx),co
         const result=await application.close();closeStore(result);return result;})();}};
   } catch(error){await releaseRoutes?.();for(const release of releases.reverse())await release();const result=await application?.close();if(!application)await runner?.close();closeStore(result);throw error;}
 }
-function same(left,right){return typeof left==='string'&&typeof right==='string'&&canonical(left)===canonical(right);}
+export function same(left,right,platform=process.platform){
+  if(typeof left!=='string'||typeof right!=='string')return false;
+  const a=canonical(left),b=canonical(right);
+  return platform==='win32'?a.toLowerCase()===b.toLowerCase():a===b;
+}
 
 export async function apply(ctx,config={}) {
   if(hosts.has(ctx.connection)){await hosts.get(ctx.connection);return;}
