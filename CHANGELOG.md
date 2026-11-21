@@ -1,8 +1,10 @@
 # Changelog
 
-## 2.1.0 — release candidate
+## 2.1.0 — published
 
-Antigravity-style **Overview & Dual-Mode Graph Dashboard**, zero-dependency **Export GIF**, core **2.1.0 plan/screenshot schema & confined image endpoints**, **B1–B7 bug fixes**, and upgraded **host-separated `SKILL.md` playbooks** across both `hive-swarm@2.1.0` (`latest`) and `dsh-hive-swarm@2.1.0` (`next`).
+Published on npm as `hive-swarm@2.1.0` (`latest`, 26 files, SHA-512 `sha512-XlVGz1hvzq5x4Bnvwofq07KRXY5WDLHUGw3yQuolUS2AEXhvTU3CIsQx/w3ek5pybvDetetYuHvRwwfQDj/rvQ==`) and `dsh-hive-swarm@2.1.0` (`next`, 10 files, SHA-512 `sha512-ItJnHVuVbTbwNQ+T38g4TmPi0yn62ql0xqrWYltW4F6MwLc2p0RO+bWcmKkXW2Ew42HcpokM5izWnWTMbuyHYg==`), tagged `v2.1.0` ([PR #8](https://github.com/snowmiku601-cpu/hive-swarm/pull/8) `0956c27` & [PR #9](https://github.com/snowmiku601-cpu/hive-swarm/pull/9) `cb2c80f`).
+
+Antigravity-style **Overview & Dual-Mode Graph Dashboard**, zero-dependency **Export GIF**, core **2.1.0 plan/screenshot schema & confined image endpoints**, **B1–B7 bug fixes**, and upgraded **host-separated `SKILL.md` playbooks**.
 
 ### Antigravity Dashboard UI Parity (DSH & Codex)
 - **Compact Single-Row Header & Underlined Tabs:** Added streamlined single-row header with live dot status (`● Live` / `● Done` / `● Needs you`) and underlined tab indicators with live counts (`Overview`, `Board N`, `Members N`, `Graph`).
@@ -13,6 +15,7 @@ Antigravity-style **Overview & Dual-Mode Graph Dashboard**, zero-dependency **Ex
 - **Core Plan & Screenshot Endpoints (`engine.mjs`, `core.mjs`, `server.mjs`, `packages/dsh-hive-swarm/host.mjs`, `routes.mjs`):** Added `goalLine` (`<= 140` chars), per-member `taskLabel` (`<= 96` chars), `set_team_plan({ goalLine, tasks, threads })` supporting both map objects and OpenAI strict-mode `{ member, label }[]` arrays, `Screenshot: <path> | <caption>` projection into `team.screenshots`, and strictly `team.cwd`/`dataDirectory`-confined image serving (`GET /board/:id/screenshot/:seq/:idx` and `GET /api/hive-swarm/v1/screenshot`, `.png`/`.jpg`/`.jpeg`/`.webp` `<= 10 MiB`, symlink-escape rejection, `nosniff`, `same-origin`, `404` on invalid paths, and `img-src 'self' data: blob:` CSP).
 - **B1–B7 Bug Fixes:** Fixed callable `agent.model.current()` detection in DSH `sessionRoute()` (**B1**), Windows case-insensitive `realpathSync.native` comparisons across `native.mjs`/`host.mjs`/`worktrees.mjs` (**B2**), serialized per-repo `openWorktree`/`removeWorktree` mutex + transient `.git/worktrees/` lock retry (**B3**), `presentTeam().attention` & `teamPhase()` false-stall alignment between DSH and Codex (**B4**), lazy `listModels()` hydration for `this.modelProviders` in `codex.mjs` (**B5**), optional Cordis `ctx.get?.()` + synchronous `sessionTitle.rename` fallback in `native.mjs` (**B6**), and DSH Board `Author` dedup (`You (user)`) + Goal `user [done]` summary + tab counts (**B7**).
 - **SKILL.md Upgrades (`skills/swarm/SKILL.md`, `packages/dsh-hive-swarm/skills/hive-swarm/SKILL.md`):** Added Overview Plan discipline (`goalLine`, `taskLabel`, `threads`), `Screenshot:` convention for UI tasks, Strict Model Lock vs opt-in `fallbackModel`, and DSH/Windows runtime guardrails while keeping host tool names strictly separated.
+- **Upgrade & Installer Compatibility (`installer.mjs`):** Fixed prior-release integrity verification when upgrading Codex CLI/Desktop installations from earlier releases that shipped fewer core files ([PR #9](https://github.com/snowmiku601-cpu/hive-swarm/pull/9) `cb2c80f`).
 
 ## 2.0.0 — published
 

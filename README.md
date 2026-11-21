@@ -5,6 +5,7 @@
 
   <p>
     <a href="https://github.com/snowmiku601-cpu/hive-swarm/actions/workflows/ci.yml"><img src="https://github.com/snowmiku601-cpu/hive-swarm/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
+    <a href="https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.1.0"><img src="https://img.shields.io/badge/release-v2.1.0-f6bc55?style=flat-square" alt="GitHub Release v2.1.0" /></a>
     <a href="https://www.npmjs.com/package/hive-swarm"><img src="https://img.shields.io/badge/npm-hive--swarm%402.1.0-f6bc55?style=flat-square" alt="npm hive-swarm 2.1.0" /></a>
     <a href="https://www.npmjs.com/package/dsh-hive-swarm"><img src="https://img.shields.io/badge/DSH%20(next)-dsh--hive--swarm%402.1.0-9a7138?style=flat-square" alt="npm dsh-hive-swarm 2.1.0 next" /></a>
     <img src="https://img.shields.io/badge/runtime-Node.js%2022.19%20%7C%2024.2%2B-75baef?style=flat-square" alt="Node.js 22.19 or 24.2 and newer" />
@@ -118,43 +119,34 @@ Pass `--test` to run the test suite first (`./install.sh --test`).
 
 ## See it in action
 
-See what is running, which outcome threads are blocked or done, and where each result came from. The captures below use representative local demo data exported as lossless 2× PNGs. Click **Light PNG / Dark PNG** to view originals at full resolution.
+See what is running, which outcome threads are blocked or done, and where each result came from. The captures below use representative local demo data exported as 2× Retina PNGs and an interactive walkthrough. Click **Light PNG / Dark PNG** for full-resolution captures, or watch the **HD MP4 demo video** on [GitHub Releases (`v2.1.0`)](https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.1.0).
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./assets/overview-dark.png" />
-    <img src="./assets/overview-light.png" alt="Hive Swarm Overview with a concise goal, ranked alerts, worker progress, and post links" width="100%" />
-  </picture>
+  <a href="https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.1.0">
+    <img src="./assets/hive-swarm-demo.gif" alt="Hive Swarm 2.1.0 interactive walkthrough — Overview accordion, Screenshots lightbox, Board, Members, Journal, Hive Honeycomb, Mentions capsule ring, and Export GIF" width="100%" />
+  </a>
 </p>
 
-<p align="center"><a href="./assets/overview-light.png">Light PNG</a> · <a href="./assets/overview-dark.png">Dark PNG</a></p>
+<p align="center">
+  <sub>Animated 2.1.0 walkthrough (Overview → Screenshots lightbox → Board → Members → Journal → Hive Honeycomb → Mentions ring → Export GIF) · <a href="https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.1.0">Download 1280×800 H.264 MP4 on GitHub Releases</a></sub>
+</p>
 
-### Four views of the same swarm
+### Inside the 2.1.0 dashboard (Light & Dark)
 
 <table>
   <tr>
-    <td align="center" width="50%"><a href="./assets/overview-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/overview-dark.png" /><img src="./assets/overview-light.png" alt="Overview with goal progress and ranked alerts" width="100%" /></picture></a><br/><sub><strong>Overview</strong> · goal, outcome threads, progress, ranked alerts, and next actions<br/><a href="./assets/overview-light.png">Light PNG</a> · <a href="./assets/overview-dark.png">Dark PNG</a></sub></td>
-    <td align="center" width="50%"><a href="./assets/board-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/board-dark.png" /><img src="./assets/board-light.png" alt="Board with channel filters, messages and stall diagnostics" width="100%" /></picture></a><br/><sub><strong>Board</strong> · searchable Markdown feed, channels, mentions, and `#seq` jumps<br/><a href="./assets/board-light.png">Light PNG</a> · <a href="./assets/board-dark.png">Dark PNG</a></sub></td>
+    <td align="center" width="50%"><a href="./assets/overview-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/overview-dark.png" /><img src="./assets/overview-light.png" alt="Overview with collapsible tasks accordion, Threads progress bars, Screenshots strip and Coordinator card" width="100%" /></picture></a><br/><sub><strong>Overview</strong> · collapsible <code>X of Y tasks done</code>, outcome Threads, Screenshots &amp; Coordinator<br/><a href="./assets/overview-light.png">Light PNG</a> · <a href="./assets/overview-dark.png">Dark PNG</a></sub></td>
+    <td align="center" width="50%"><a href="./assets/graph-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/graph-dark.png" /><img src="./assets/graph-light.png" alt="Graph Hive Honeycomb mode showing Waiting, Needs you, Coordinator and Done hex clusters" width="100%" /></picture></a><br/><sub><strong>Graph · Hive Mode</strong> · multi-cluster honeycomb (<code>Working</code>, <code>Waiting</code>, <code>Done</code>) &amp; animated message links<br/><a href="./assets/graph-light.png">Light PNG</a> · <a href="./assets/graph-dark.png">Dark PNG</a></sub></td>
   </tr>
   <tr>
-    <td align="center" width="50%"><a href="./assets/members-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/members-dark.png" /><img src="./assets/members-light.png" alt="Members with a crowned coordinator, worker status and journal controls" width="100%" /></picture></a><br/><sub><strong>Members</strong> · live steps, Journals, model switching, recovery, and worktrees<br/><a href="./assets/members-light.png">Light PNG</a> · <a href="./assets/members-dark.png">Dark PNG</a></sub></td>
-    <td align="center" width="50%"><a href="./assets/graph-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/graph-dark.png" /><img src="./assets/graph-light.png" alt="Graph replay with elapsed time and directed mention counts" width="100%" /></picture></a><br/><sub><strong>Graph</strong> · replay message flow, timing, and spot silent handoffs<br/><a href="./assets/graph-light.png">Light PNG</a> · <a href="./assets/graph-dark.png">Dark PNG</a></sub></td>
+    <td align="center" width="50%"><a href="./assets/graph-mentions-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/graph-mentions-dark.png" /><img src="./assets/graph-mentions-light.png" alt="Graph Mentions mode showing capsule pills, Expand @all edge, Inspector edges and Export GIF" width="100%" /></picture></a><br/><sub><strong>Graph · Mentions Mode</strong> · outer-ring capsule pills, <code>@all</code> toggles, replay scrubber &amp; Export GIF<br/><a href="./assets/graph-mentions-light.png">Light PNG</a> · <a href="./assets/graph-mentions-dark.png">Dark PNG</a></sub></td>
+    <td align="center" width="50%"><a href="./assets/board-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/board-dark.png" /><img src="./assets/board-light.png" alt="Board with channel filters, searchable Markdown messages and live Hive summary" width="100%" /></picture></a><br/><sub><strong>Board</strong> · searchable Markdown feed, channels, mentions, <code>#seq</code> jumps &amp; Hive sidebar<br/><a href="./assets/board-light.png">Light PNG</a> · <a href="./assets/board-dark.png">Dark PNG</a></sub></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><a href="./assets/members-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/members-dark.png" /><img src="./assets/members-light.png" alt="Members with Coordinator and worker cards, execution mode badges, Journal and model switch controls" width="100%" /></picture></a><br/><sub><strong>Members</strong> · <code>Session</code>/<code>Attached</code>/<code>Subagent</code> cards, model switching, recovery &amp; worktrees<br/><a href="./assets/members-light.png">Light PNG</a> · <a href="./assets/members-dark.png">Dark PNG</a></sub></td>
+    <td align="center" width="50%"><a href="./assets/journal-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/journal-dark.png" /><img src="./assets/journal-light.png" alt="Worker Journal modal with turn-by-turn saved steps, Verified route pills and reports" width="100%" /></picture></a><br/><sub><strong>Worker Journal</strong> · inspect live steps, <code>Verified route:</code> proof &amp; saved turns without waking agents<br/><a href="./assets/journal-light.png">Light PNG</a> · <a href="./assets/journal-dark.png">Dark PNG</a></sub></td>
   </tr>
 </table>
-
-<details>
-<summary><strong>Look inside a worker journal</strong></summary>
-
-Follow saved turns and live activity without opening or interrupting the worker's chat.
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./assets/journal-dark.png" />
-    <img src="./assets/journal-light.png" alt="Journal modal with two saved worker turns, step labels and verified reports" width="100%" />
-  </picture>
-</p>
-<p align="center"><a href="./assets/journal-light.png">Light PNG</a> · <a href="./assets/journal-dark.png">Dark PNG</a></p>
-</details>
 
 ## How the hive moves work
 
@@ -230,7 +222,7 @@ $hive-swarm:swarm Split this feature into two isolated worktree builders (@api a
 - `scripts/` — verified core/DSH packagers (`pack-core.mjs`, `pack-dsh.mjs`) and DSH client builder (`build-dsh-client.mjs`)
 - `docs/releases/` — release qualification evidence and artifact manifests
 - `install.ps1`, `install.sh` — cross-platform source installers
-- `assets/` — banner, coordination diagram, icons, and lossless light/dark UI captures
+- `assets/` — banner, coordination diagram, icons, 2× light/dark UI captures, and animated `2.1.0` walkthrough GIF
 - `*.test.mjs`, `packages/dsh-hive-swarm/*.test.mjs` — full `node:test` test suite
 
 ## Development and tests
