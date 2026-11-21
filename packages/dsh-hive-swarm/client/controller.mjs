@@ -6,6 +6,14 @@ const errorOf = error => ({message:typeof error==='string'?error:error?.message?
   code:typeof error?.code==='string'?error.code:'connection'});
 const requestIdentity = () => globalThis.crypto.randomUUID();
 export const ownedSession = member => member?.session?.host===NATIVE_HOST?member.session.id:undefined;
+export function sessionTarget(team,member) {
+  const id=ownedSession(member);
+  if(!id)return null;
+  if(member?.executionMode==='subagent'&&typeof team?.parentSessionId==='string'&&team.parentSessionId.trim()) {
+    return {parentSessionId:team.parentSessionId.trim(),childSessionId:id,mode:'continuable'};
+  }
+  return id;
+}
 
 async function swarmRpc(connection,method,payload,signal) {
   if(typeof connection?.rpc?.call!=='function')throw Error('DSH Connection RPC is unavailable. Enable the Connection capability and reload Hive Swarm.');
@@ -188,11 +196,19 @@ export function createController({connection,teamId=null,sessionId=null,workspac
         emit({history:mergeHistory(events),historyLoading:false,hasMoreHistory:page.hasMore===true});
       } catch(error){if(error?.name!=='AbortError')emit({historyLoading:false,error:errorOf(error)});}
     },
-    async openSession(member) {
+    async openSession(member,{fallbackToJournal=true}={}) {
       const owned=state.team?.members.find(item=>item.name===member);
-      const id=ownedSession(owned);
-      if(!id||!openSession){emit({error:{message:'Native session navigation is unavailable. Enable the DSH workspace capability and retry.'}});return;}
-      try{await openSession(id);}catch(error){emit({error:errorOf(error)});}
+      const target=sessionTarget(state.team,owned);
+      if(!target){emit({error:{message:'This member has no owned session yet.'}});return 'none';}
+      if(typeof openSession==='function') {
+        try{await openSession(target);return 'session';}
+        catch{
+          if(!fallbackToJournal)return 'fallback';
+          await api.openJournal(member);return 'journal';
+        }
+      }
+      if(!fallbackToJournal)return 'fallback';
+      await api.openJournal(member);return 'journal';
     },
     setError:error=>emit({error:errorOf(error)}),
     dispose(){if(disposed)return;cancel();disposed=true;listeners.clear();},

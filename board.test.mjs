@@ -556,3 +556,50 @@ test('overview displays outcome threads ordered blocked -> active -> queued -> d
   await retryBtn.onclick({isTrusted:true});
   assert.deepEqual(mutations,[{member:'native',action:'retry'}]);
 });
+
+test('board renders executionMode badges, Verified route journal badges, and light/dark color-scheme metadata',async()=>{
+  assert.match(read('board.html'),/<meta name="color-scheme" content="light dark">/i);
+  const state={
+    id:'team',title:'Modes & Routes',cwd:'fixture',phase:'working',turns:2,turnLimit:8,
+    members:[
+      {name:'builder',status:'working',executionMode:'attached',threadId:'saved-builder'},
+      {name:'researcher',status:'waiting',executionMode:'subagent',subagentName:'researcher-1',threadId:'saved-researcher'},
+      {name:'legacy',status:'done',executionMode:'session',threadId:'saved-legacy'},
+    ],
+    events:[
+      {seq:1,kind:'brief',author:'coordinator',targets:['builder'],text:'Start build'},
+      {seq:2,kind:'message',author:'builder',targets:['researcher'],text:'Check #1'},
+    ],
+  };
+  const view=await boardView(state,{request:url=>{
+    if (url.endsWith('/member/builder/transcript')) {
+      return {member:'builder',threadId:'saved-builder',status:'working',live:null,turns:[
+        {id:'turn-1',status:'completed',steps:['Verified route: openai/gpt-5.4 · high','Edit file'],report:'Done.'},
+      ]};
+    }
+  }});
+  view.element('tab-members').onclick();
+  const badges=[...childrenOf(view.element('working-list')),...childrenOf(view.element('rest-list'))]
+    .filter(n=>n.className==='mode-badge');
+  assert.deepEqual(badges.map(b=>[b.dataset.mode,b.textContent]),[
+    ['attached','Attached'],
+    ['subagent','Subagent'],
+    ['session','Session'],
+  ]);
+  const journalBtn=childrenOf(view.element('working-list')).find(n=>n.tagName==='button'&&n.textContent==='View journal');
+  await journalBtn.onclick();
+  const routeItems=childrenOf(view.element('transcript-turns')).filter(n=>n.className==='transcript-route');
+  assert.equal(routeItems.length,1);
+  assert.match(routeItems[0].textContent,/Verified route: openai\/gpt-5\.4 · high/);
+  view.element('close-transcript').onclick();
+  // Graph focus dims unrelated nodes
+  view.element('tab-graph').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  const graphButtons=view.element('graph-nodes').children;
+  const builderBtn=graphButtons.find(n=>n.dataset.graphName==='builder');
+  builderBtn.onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  const updated=view.element('graph-nodes').children;
+  assert.equal(updated.find(n=>n.dataset.graphName==='builder').dataset.dimmed,'false');
+  assert.equal(updated.find(n=>n.dataset.graphName==='legacy').dataset.dimmed,'true');
+});

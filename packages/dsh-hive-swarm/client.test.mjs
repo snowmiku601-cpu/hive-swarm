@@ -603,3 +603,130 @@ test('native UI renders safe Markdown, clickable #seq jumps, outcome threads, pr
     assert.equal(modelCall.payload.args.resume,true);
   }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
 });
+
+test('native Members renders executionMode badges, passes SubagentAddress on Open session, falls back to Journal, and highlights Verified route',async()=>{
+  const {client,React,renderer}=await loadClient();
+  const multi={
+    ...team(),
+    parentSessionId:'parent-chat-1',
+    members:[
+      {name:'alpha',status:'working',brief:'Research UI',model:'xingchi/gpt-6.1-sol',effort:'max',writable:false,
+        executionMode:'subagent',subagentName:'alpha-1',session:{host:'deepseek-harness',id:'child-alpha'},threadId:'child-alpha'},
+      {name:'beta',status:'waiting',brief:'Verify patch',model:'xingchi/gpt-6.1-sol',effort:'medium',writable:false,
+        executionMode:'attached',session:{host:'deepseek-harness',id:'child-beta'},threadId:'child-beta'},
+      {name:'gamma',status:'done',brief:'Legacy worker',model:'xingchi/gpt-6.1-sol',effort:'low',writable:true,
+        executionMode:'session',session:{host:'deepseek-harness',id:'legacy-gamma'},threadId:'legacy-gamma'},
+    ],
+  };
+  let failOpen=false;
+  const f=fakeContext({
+    snapshot:({teamId})=>({teams:[multi],team:teamId?multi:null}),
+    command:({action,args})=>{
+      if(action==='read_journal')return {member:args.member,threadId:'child-alpha',turns:[
+        {turn:1,status:'done',steps:[{kind:'route',label:'Verified route: xingchi/gpt-6.1-sol · max'},{kind:'tool',label:'Read file'}],report:'[done] Route checked.'},
+      ]};
+      return multi;
+    },
+  });
+  const opened=[];
+  f.ctx.uiWorkspace.openSession=target=>{
+    if(failOpen)throw Error('Session view unavailable');
+    opened.push(target);
+  };
+  client.apply(f.ctx);
+  const entry=f.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let view;
+  try{
+    await renderer.act(async()=>{view=renderer.create(React.createElement(entry.component,entry.options.inject('parent-chat-1')));await tick();});
+    await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
+    await renderer.act(async()=>{view.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Members')).props.onClick();await tick();});
+    const badges=view.root.findAllByProps({className:'dsh-hive-mode'});
+    assert.deepEqual(badges.map(b=>[b.props['data-mode'],b.children.join('')]),[
+      ['subagent','Subagent'],
+      ['attached','Attached'],
+      ['session','Session'],
+    ]);
+    assert.equal(badges[0].props.title,'Subagent: alpha-1');
+    await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Open session for @alpha'}).props.onClick({currentTarget:null});await tick();});
+    await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Open session for @gamma'}).props.onClick({currentTarget:null});await tick();});
+    assert.deepEqual(opened.map(item=>typeof item==='object'&&item?{...item}:item),[
+      {parentSessionId:'parent-chat-1',childSessionId:'child-alpha',mode:'continuable'},
+      'legacy-gamma',
+    ]);
+    // Fallback to Journal when uiWorkspace.openSession throws
+    failOpen=true;
+    await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Open session for @alpha'}).props.onClick({currentTarget:null});await tick();});
+    const dialog=view.root.findByType('dialog');
+    assert.ok(dialog,'Expected fallback to open Journal dialog');
+    const routeBadges=dialog.findAllByProps({className:'dsh-hive-route-badge'});
+    assert.equal(routeBadges.length,1);
+    assert.ok(routeBadges[0].children.some(child=>typeof child==='string'&&child.includes('Verified route:')));
+    assert.equal(routeBadges[0].findByType('code').children.join(''),'xingchi/gpt-6.1-sol · max');
+  }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
+});
+
+test('native Graph clips every SVG edge strictly outside wrapped multi-line node cards and renders mention count pills',async()=>{
+  await import('../../hive-graph.js');
+  const Graph=globalThis.HiveGraph;
+  const {client,React,renderer}=await loadClient();
+  const sixNodeTeam={
+    ...team(),
+    members:[
+      {name:'design-research',status:'done',brief:'Design research',model:'sol',writable:false},
+      {name:'asset-research',status:'done',brief:'Asset research',model:'sol',writable:false},
+      {name:'builder',status:'working',brief:'Build app',model:'sol',writable:true},
+      {name:'qa',status:'waiting',brief:'QA app',model:'sol',writable:false},
+      {name:'user',status:'observer',brief:'Human',model:'sol',writable:false},
+    ],
+    events:[
+      {seq:1,kind:'brief',author:'coordinator',targets:['design-research'],text:'Research design'},
+      {seq:2,kind:'brief',author:'coordinator',targets:['asset-research'],text:'Research assets'},
+      {seq:3,kind:'message',author:'user',targets:['qa'],text:'@qa test'},
+      {seq:4,kind:'message',author:'qa',targets:['builder'],text:'@builder fix #3'},
+      {seq:5,kind:'message',author:'qa',targets:['builder'],text:'@builder second fix'},
+      {seq:6,kind:'message',author:'builder',targets:['qa'],text:'@qa retest'},
+      {seq:7,kind:'message',author:'builder',targets:['design-research'],text:'@design-research check'},
+      {seq:8,kind:'message',author:'design-research',targets:['builder'],text:'@builder looks good'},
+    ],
+  };
+  const f=fakeContext({snapshot:({teamId})=>({teams:[sixNodeTeam],team:teamId?sixNodeTeam:null})});
+  client.apply(f.ctx);
+  const entry=f.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let view;
+  try{
+    await renderer.act(async()=>{view=renderer.create(React.createElement(entry.component,entry.options.inject('parent')));await tick();});
+    await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
+    await renderer.act(async()=>{view.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Graph')).props.onClick();await tick();});
+    const svg=view.root.findByType('svg');
+    const [,,wStr,hStr]=svg.props.viewBox.split(' ');
+    const width=Number(wStr),height=Number(hStr);
+    const narrow=width<440,cardWidth=narrow?94:112;
+    const projection=Graph.project(sixNodeTeam.events,sixNodeTeam.members,8,{});
+    const points=Graph.layout(projection.nodes,width,height);
+    const edges=view.root.findAll(x=>x.type==='path'&&x.props['data-hive-edge']);
+    assert.equal(edges.length,7);
+    for(const path of edges){
+      const [from,to]=path.props['data-hive-edge'].split('>');
+      const m=/^M([-\d.]+) ([-\d.]+) Q([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)$/.exec(path.props.d);
+      assert.ok(m,'valid quadratic path for '+path.props['data-hive-edge']+': '+path.props.d);
+      const sx=Number(m[1]),sy=Number(m[2]),ex=Number(m[5]),ey=Number(m[6]);
+      const fromPt=points.get(from),toPt=points.get(to);
+      const fromBox=Graph.nodeBox(projection.nodes.find(n=>n.name===from),{variant:'card',cardWidth,narrow});
+      const toBox=Graph.nodeBox(projection.nodes.find(n=>n.name===to),{variant:'card',cardWidth,narrow});
+      const dStart=Graph.roundedRectSignedDistance(sx,sy,{cx:fromPt.x,cy:fromPt.y,halfW:fromBox.halfW,halfH:fromBox.halfH,radius:fromBox.radius});
+      const dEnd=Graph.roundedRectSignedDistance(ex,ey,{cx:toPt.x,cy:toPt.y,halfW:toBox.halfW,halfH:toBox.halfH,radius:toBox.radius});
+      assert.ok(dStart>=1.5,'SVG start outside source card for '+from+'->'+to+': '+dStart);
+      assert.ok(dEnd>=2.5,'SVG arrowhead tip outside target card for '+from+'->'+to+': '+dEnd);
+    }
+    // Single marker contract preserved
+    assert.equal(view.root.findAllByType('marker').length,1);
+    assert.equal(view.root.findByType('marker').props.markerUnits,'userSpaceOnUse');
+    // Multi-mention badge pill renders for qa->builder (2 mentions)
+    const pills=view.root.findAllByProps({className:'dsh-hive-edge-pill'});
+    assert.ok(pills.length>=1,'expected mention count pill(s) on SVG graph');
+    // Focus dimming on clicking a node
+    const qaBtn=view.root.findAllByProps({className:'dsh-hive-graph-node'}).find(b=>b.findByType('strong').children.join('')==='qa');
+    await renderer.act(async()=>{qaBtn.props.onClick();});
+    const assetBtn=view.root.findAllByProps({className:'dsh-hive-graph-node'}).find(b=>b.findByType('strong').children.join('')==='asset-research');
+    assert.equal(qaBtn.props['aria-pressed'],true);
+    assert.equal(assetBtn.props['data-dimmed'],'true');
+  }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
+});
