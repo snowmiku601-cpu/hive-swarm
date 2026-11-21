@@ -12,7 +12,25 @@
   <header class="masthead">
     <div class="mast-row">
       <div class="mast-left">
-        <div class="brand"><span id="brand-bee" class="bee-tile brand-tile"></span><strong>Swarm</strong></div>
+        <div class="brand-stack">
+          <div class="brand"><span id="brand-bee" class="bee-tile brand-tile"></span><strong>Swarm</strong><span id="app-version" class="version-tag" hidden></span></div>
+          <div id="update-wrap" class="update-wrap" hidden>
+            <button id="update-pill" class="update-pill" type="button" aria-expanded="false"></button>
+            <div id="update-popover" class="update-popover" role="region" aria-label="Update available" hidden>
+              <div class="update-popover-head">
+                <strong>Update available</strong>
+                <span id="update-diff" class="mono"></span>
+              </div>
+              <p class="quiet">Close Codex after active turns finish, then run:</p>
+              <code id="update-cmd" class="update-cmd"></code>
+              <div class="update-actions">
+                <button id="update-copy" class="link-button" type="button">Copy command</button>
+                <a id="update-link" href="#" target="_blank" rel="noopener noreferrer">Release notes</a>
+                <button id="update-dismiss" class="link-button" type="button">Dismiss</button>
+              </div>
+            </div>
+          </div>
+        </div>
         <label id="team-picker" class="team-picker" hidden><span class="sr-only">Recent swarms</span><select id="recent-teams"></select></label>
       </div>
       <div class="mast-actions">
@@ -125,15 +143,21 @@
     </section>
     <div class="board-grid">
       <div class="panel">
-        <div class="bar">
-          <label class="search"><span class="sr-only">Search posts</span><input id="search-posts" type="search" placeholder="Search posts"></label>
+        <div class="bar board-bar">
+          <label class="search board-search"><svg class="search-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 10.5L13.5 13.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg><span class="sr-only">Search posts</span><input id="search-posts" type="search" placeholder="Search"></label>
+          <button id="toggle-board-filters" class="filter-toggle" type="button" aria-label="Toggle board filters" aria-expanded="false"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2.5 3.5h11l-4.2 5v3.7l-2.6 1.3V8.5l-4.2-5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg></button>
+        </div>
+        <div id="board-filters" class="bar board-filters" hidden>
           <label class="sr-only" for="member-filter">Filter by member</label>
           <select id="member-filter"><option value="">All members</option></select>
           <label class="sr-only" for="channel-filter">Board channel</label>
           <select id="channel-filter"><option value="">All channels</option></select>
           <button id="follow" type="button" aria-pressed="true">Follow</button>
         </div>
-        <ol id="feed" class="feed" tabindex="0" aria-label="Posts in chronological order"></ol>
+        <div class="feed-wrap">
+          <ol id="feed" class="feed" tabindex="0" aria-label="Posts in chronological order"></ol>
+          <button id="board-latest" class="latest-pill" type="button" aria-label="Jump to latest posts" hidden>↓ Latest</button>
+        </div>
         <form id="compose" class="composer">
           <label class="sr-only" for="message">Message text</label>
           <textarea id="message" maxlength="6000" placeholder="Send a message or @mention a member" required></textarea>
@@ -152,7 +176,7 @@
     </div>
   </section>
   <section id="panel-members" role="tabpanel" aria-labelledby="tab-members" hidden>
-    <div class="bar member-bar"><label class="search"><span class="sr-only">Search members</span><input id="search-members" type="search" placeholder="Search by name, group, or model"></label></div>
+    <div class="bar member-bar"><label class="search board-search"><svg class="search-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 10.5L13.5 13.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg><span class="sr-only">Search members</span><input id="search-members" type="search" placeholder="Search members"></label></div>
     <div class="roster-groups">
       <section id="coordinator-group" class="panel roster-group" hidden><h2>Coordinator</h2><ul id="coordinator-list" class="member-list"></ul></section>
       <section id="working-group" class="panel roster-group" hidden><h2 id="working-title">Working</h2><ul id="working-list" class="member-list"></ul></section>

@@ -9,6 +9,17 @@ function isOwnedUserMessage(run,item) {
   return false;
 }
 
+export function formatInbox(inbox) {
+  if(!Array.isArray(inbox)||!inbox.length)return 'No new board messages.';
+  return inbox.map(entry=>{
+    const who=entry?.author==='system'?'System':'@'+(entry?.author??'member');
+    const channel=entry?.channel&&entry.channel!=='main'?' #'+entry.channel:'';
+    const addressed=entry?.addressed?' (addressed to you)':'';
+    const header=(entry?.seq!=null?'#'+entry.seq+' ':'')+who+channel+addressed+':';
+    return header+'\n'+String(entry?.text??'').trim();
+  }).join('\n\n');
+}
+
 /** Correlate only durable events belonging to one admitted prompt. Never infer completion from a receipt. */
 export function correlateRun(run,records) {
   const unique=new Map();
@@ -101,9 +112,17 @@ export class NativeRunner {
     if(effort&&!selected.efforts?.includes(effort))throw Error('Requested native model effort is unavailable.');
     const workspace=member.workspace?.cwd??team.cwd;
     const workerLabel='🐝 @'+member.name+(team.title?' · '+team.title:'');
-    const peers=(team.members??[]).filter(m=>m.name!==member.name&&m.status!=='retired')
+    const activeRoster=(team.members??[]).filter(m=>m.name!==member.name&&m.status!=='retired');
+    const peers=activeRoster
       .map(m=>'@'+m.name+(m.group?' in @'+m.group:'')+(m.channels?.length?' ['+m.channels.map(c=>'#'+c).join(', ')+']':'')+(m.workspace?.cwd?' at '+m.workspace.cwd:'')).join(', ');
-    const promptLines=[
+    const compactPeers=activeRoster.map(m=>'@'+m.name).join(', ');
+    const resuming=Boolean(member.threadId);
+    const promptLines=(resuming?[
+      'Resume Hive Swarm turn '+member.lastTurn+' as @'+member.name+' (teamId: '+team.id+').'+(compactPeers?' Active teammates: '+compactPeers+'.':''),
+      'All new board messages since your last turn are delivered directly below; do not call hive_swarm_read_board or hive_swarm_list_models unless you need older history or a model switch.',
+      'Finish by calling hive_swarm_set_turn_outcome for turn '+member.lastTurn+' with state ("done" or "waiting"), a concise message (start finished reports with [done] and cite prior posts with #seq), notify, and waitFor.',
+      'New board messages:\n'+formatInbox(member.inbox),
+    ]:[
       'You are Hive Swarm member @'+member.name+' in team '+team.id+'.'+(peers?' Active teammates: '+peers+'.':''),
       'Goal: '+team.task,
       'Your assignment: '+member.brief,
@@ -111,9 +130,10 @@ export class NativeRunner {
       'Work only in the assigned workspace and permissions. Do not create another scheduler or launch subagents.',
       'Coordinate directly with teammates using scoped hive_swarm tools (teamId: '+team.id+'). Tag @name directly for peer-to-peer handoffs instead of routing through @coordinator. Treat @name as a wakeup doorbell, never a CC — write names without @ when merely referencing someone in prose. Use @#channel for channel subscribers and @all only for team-wide rules.',
       'Reserve hive_swarm_post_message for mid-turn peer questions or handoffs; do not double-post your final report via hive_swarm_post_message right before calling hive_swarm_set_turn_outcome.',
+      'All new board messages for each turn are delivered directly below; do not call hive_swarm_read_board or hive_swarm_list_models unless you need older history or a model switch.',
       'Finish by calling hive_swarm_set_turn_outcome for turn '+member.lastTurn+' with state ("done" or "waiting"), a concise message (start finished reports with [done] and cite prior posts with #seq), notify (peer names who must act next), and waitFor (peer names you need a new report from). The outcome tool concludes this turn.',
-      'Incoming board messages: '+JSON.stringify(member.inbox??[]),
-    ].filter(Boolean).join('\n\n');
+      'New board messages:\n'+formatInbox(member.inbox),
+    ]).filter(Boolean).join('\n\n');
 
     let sessionId=member.threadId,executionMode=member.executionMode??'session',initialMessageId,startedSubagent=false;
     if(sessionId) {

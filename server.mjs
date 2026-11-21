@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { createUpdateChecker } from './core.mjs';
 import { TeamBoard, boardWaitTimeout, childEnvironment, configuredEffort, pendingWaitFor, readSafeScreenshot, stallIssues, teamPhase, visibleChannels } from './engine.mjs';
 import { openWorktree, removeWorktree, worktreeSource } from './worktrees.mjs';
 
@@ -317,12 +318,14 @@ async function readBody(req) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
 }
 
-export async function service({dataDirectory = root, listenPort = port, runner} = {}) {
+export async function service({dataDirectory = root, listenPort = port, runner, updateChecker} = {}) {
   const key = Buffer.from('Bearer ' + localKey(dataDirectory));
   const peerSecret = randomBytes(32);
   const tokenFor = (id, name) => createHmac('sha256',peerSecret).update(JSON.stringify([id,name])).digest('hex');
   const {CodexRunner} = await import('./codex.mjs');
   runner ??= new CodexRunner();
+  const updates = updateChecker ?? createUpdateChecker({packageName:'hive-swarm',currentVersion:version,tags:['latest']});
+  updates.peek?.({start:true});
   let board;
   let origin, host;
   async function changeModel(args,actor,res) {
@@ -375,6 +378,12 @@ export async function service({dataDirectory = root, listenPort = port, runner} 
       if (pathname === '/swarm/teams' && req.method === 'GET') {
         if (req.headers['sec-fetch-site'] !== 'same-origin') return send(res, 403, {error:'Open Swarm to list its teams.'});
         return send(res,200,recentTeams(board));
+      }
+      if (pathname === '/swarm/update' && req.method === 'GET') {
+        if (req.headers['sec-fetch-site'] !== 'same-origin') return send(res, 403, {error:'Open Swarm to check for updates.'});
+        const status = await updates.check();
+        if (!res.destroyed) return send(res, 200, status);
+        return;
       }
       if (pathname==='/swarm/models'&&req.method==='GET') {
         if (req.headers['sec-fetch-site']!=='same-origin') return send(res,403,{error:'Open Swarm to read available models.'});
@@ -553,7 +562,11 @@ export async function service({dataDirectory = root, listenPort = port, runner} 
           team=await removeCheckout(args.teamId,args.member,args.force);
           break;
         }
-        case 'open_board':
+        case 'open_board': {
+          const currentUpdate = updates.peek?.({start:true});
+          const payload = view(board.get(args.teamId),actor);
+          return send(res, 200, currentUpdate?.available ? {...payload, update:currentUpdate} : payload);
+        }
         case 'board_status': team = board.get(args.teamId); break;
         case 'post_message': team = board.post(args.teamId,args.text,args.channel); break;
         case 'set_team_title': team = board.setTeamTitle(args.teamId,args.title,actor); break;
@@ -603,6 +616,7 @@ export async function service({dataDirectory = root, listenPort = port, runner} 
       server.close(resolve);
       server.closeAllConnections();
       runner.close();
+      updates.dispose?.();
       board.close();
     });
   }

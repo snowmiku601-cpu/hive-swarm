@@ -56,7 +56,7 @@ function memStorage(seed={}) {
   };
 }
 
-async function boardView(initial,{path='/board/'+initial.id,request,live=false,darkMatches=false,localStore=memStorage(),sessionStore=memStorage(),hiveGif,hiveGraphExt}={}) {
+async function boardView(initial,{path='/board/'+initial.id,request,live=false,darkMatches=false,localStore=memStorage(),sessionStore=memStorage(),hiveGif,hiveGraphExt,version}={}) {
   const elements=new Map();
   const element=id=>{
     if (!elements.has(id)) elements.set(id,new ViewNode(id));
@@ -93,6 +93,7 @@ async function boardView(initial,{path='/board/'+initial.id,request,live=false,d
   let state=initial;
   const docElement=new ViewNode('html');
   const screen={
+    ...(version?{__HIVE_SWARM_VERSION__:version}:{}),
     window:frame,parent:frame,location:{pathname:path,origin:'http://127.0.0.1:17943',assign:url=>navigation.push(url)},
     document:{getElementById:element,documentElement:docElement,body:{append:(...nodes)=>{
       body.append(...nodes);
@@ -864,4 +865,83 @@ test('threads count retired members as done and Hive connectors skip self-loops 
   assert.ok(dist>=7.5&&dist<=9.5,'Expected ~8px lateral offset between concurrent done and message connectors, got '+dist);
   const dashedWires=ops.filter(item=>item.op==='setLineDash'&&item.args[0]?.length>0);
   assert.equal(dashedWires.length,0);
+});
+
+test('Antigravity Board filter toggle, post clamping, Latest pill, and clickable Member cards work cleanly',async()=>{
+  const longText=Array.from({length:9},(_,i)=>'Line '+(i+1)+' of Codex output evidence.').join('\n');
+  const state={
+    id:'team',title:'Board & Members Polish',cwd:'fixture',phase:'working',turns:2,turnLimit:8,
+    members:[
+      {name:'builder',status:'working',model:'gpt-5.4',effort:'high',threadId:'thread-builder-01',taskLabel:'Polish Board'},
+    ],
+    events:[
+      {seq:1,kind:'message',author:'builder',text:longText,targets:[],time:'2026-11-21T10:00:00Z'},
+    ],
+  };
+  const view=await boardView(state,{live:true});
+  // Filter drawer starts hidden, toggle reveals it
+  assert.equal(view.element('board-filters').hidden,true);
+  view.element('toggle-board-filters').onclick();
+  assert.equal(view.element('board-filters').hidden,false);
+  assert.equal(view.element('toggle-board-filters').attributes['aria-expanded'],'true');
+  // Long post is clamped until Show more clicked
+  const msg=childrenOf(view.element('feed')).find(n=>n.className==='message');
+  const more=childrenOf(view.element('feed')).find(n=>n.className==='expand-post-btn');
+  assert.equal(msg.dataset.clamped,'true');
+  assert.equal(more.textContent,'Show more');
+  more.onclick();
+  assert.equal(msg.dataset.clamped,'false');
+  assert.equal(more.textContent,'Show less');
+  // Unfollowing surfaces Latest pill, clicking Latest restores follow
+  view.element('follow').onclick();
+  assert.equal(view.element('board-latest').hidden,false);
+  view.element('board-latest').onclick();
+  assert.equal(view.element('board-latest').hidden,true);
+  assert.equal(view.element('follow').attributes['aria-pressed'],'true');
+  // Clickable member row opens transcript in standalone unless nested button owns click; overflow ⋯ toggles menu cleanly
+  view.element('tab-members').onclick();
+  const card=view.element('working-list').firstElementChild;
+  assert.equal(card.dataset.clickable,'true');
+  assert.equal(card.dataset.menuOpen,'false');
+  const menuBtn=childrenOf(card).find(n=>n.className==='member-menu-btn');
+  assert.ok(menuBtn,'Expected quiet overflow menu toggle button on Member row');
+  menuBtn.onclick({stopPropagation(){}});
+  assert.equal(card.dataset.menuOpen,'true');
+  assert.equal(menuBtn.attributes['aria-expanded'],'true');
+  assert.notEqual(view.element('member-transcript').open,true);
+  card.onclick({target:{closest:selector=>selector.includes('button')?{}:null}});
+  assert.notEqual(view.element('member-transcript').open,true);
+  await card.onclick({target:{closest:()=>null}});
+  assert.equal(view.element('member-transcript').open,true);
+});
+
+test('board header renders version badge and update reminder pill below it with dismiss persistence',async()=>{
+  const localStore=memStorage();
+  const state={
+    id:'team',title:'Version Check',cwd:'fixture',phase:'working',turns:1,turnLimit:8,
+    members:[{name:'builder',status:'working',model:'gpt-5.4'}],
+    events:[],
+  };
+  const view=await boardView(state,{
+    version:'2.1.0',
+    localStore,
+    request:url=>url==='/swarm/update'
+      ? {current:'2.1.0',latest:'2.2.0',available:true,url:'https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.2.0',checked:true}
+      : undefined,
+  });
+  assert.equal(view.element('app-version').hidden,false);
+  assert.equal(view.element('app-version').textContent,'v2.1.0');
+  assert.equal(view.element('update-wrap').hidden,false);
+  assert.equal(view.element('update-pill').textContent,'↑ v2.2.0 available');
+  assert.equal(view.element('update-popover').hidden,true);
+
+  view.element('update-pill').onclick({stopPropagation(){}});
+  assert.equal(view.element('update-popover').hidden,false);
+  assert.equal(view.element('update-diff').textContent,'v2.1.0 → v2.2.0');
+  assert.equal(view.element('update-cmd').textContent,'npx hive-swarm@latest update --host codex --after-close');
+  assert.equal(view.element('update-link').href,'https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.2.0');
+
+  view.element('update-dismiss').onclick();
+  assert.equal(view.element('update-wrap').hidden,true);
+  assert.equal(localStore.getItem('hive-swarm-dismissed-update'),'2.2.0');
 });

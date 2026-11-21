@@ -6,6 +6,7 @@ import {ownerActions,registerRoutes} from './routes.mjs';
 
 export const name='dsh-hive-swarm';
 export const inject=['connection','typertGateway','sessionController','sessions','agents','agentPresets','llm','sandboxPolicy','fs','shell','workspaceRegistry','tools','skills','profileContext','subagents'];
+const hostVersion=JSON.parse(readFileSync(new URL('./package.json',import.meta.url),'utf8')).version;
 const hosts=new WeakMap();
 const workerVisible=new Set(['list_models','board_status','board_history','read_board','post_message','set_turn_outcome','add_member','retire_member','set_member_model','manage_channel']);
 const coordinatorVisible=new Set([...workerVisible,'set_team_title','set_team_plan']);
@@ -110,14 +111,26 @@ export function resolveDataDirectory(ctx) {
 }
 
 /** Instantiate one scoped Host. Factories keep no-model native lifecycle tests independent of npm publishing. */
-export async function createHost(ctx,{dataDirectory=resolveDataDirectory(ctx),coreFactory,storeFactory,nativeFactory=createNativeAccess}={}) {
+export async function createHost(ctx,{dataDirectory=resolveDataDirectory(ctx),coreFactory,storeFactory,nativeFactory=createNativeAccess,updateChecker,updateFactory}={}) {
   if(!isAbsolute(dataDirectory))throw Error('Hive Swarm data directory must be absolute.');
   if(!coreFactory)coreFactory=(await import('hive-swarm/core')).createSwarmApplication;
   if(!storeFactory){const {RunStore}=await import('hive-swarm/run-store');storeFactory=file=>new RunStore(file);}
   mkdirSync(dataDirectory,{recursive:true});
-  const store=storeFactory(join(dataDirectory,'runs.sqlite'));let runner,application,releaseRoutes;const releases=[];let closing;
+  const store=storeFactory(join(dataDirectory,'runs.sqlite'));let runner,application,releaseRoutes,checker=updateChecker??null;const releases=[];let closing;
   const closeStore=result=>{if(result?.quiescent===false){void runner.close().then(()=>store.close()).catch(()=>{});}else store.close();};
   try {
+    if(!checker) {
+      let factory=updateFactory;
+      if(!factory) {
+        try{({createUpdateChecker:factory}=await import('hive-swarm/core'));}
+        catch{
+          try{({createUpdateChecker:factory}=await import('../../core.mjs'));}
+          catch{factory=null;}
+        }
+      }
+      if(typeof factory==='function')checker=factory({packageName:'dsh-hive-swarm',currentVersion:hostVersion,tags:['latest','next']});
+    }
+    checker?.peek?.({start:true});
     const native=nativeFactory(ctx,{ownsSession:id=>Boolean(store.findSession(id)),coordinationTools:[...coordinatorVisible].map(action=>'hive_swarm_'+action)});runner=new NativeRunner({native,store});
     const workspaceAllowed=(cwd,context={})=>{
       if(context.parentWorkspace&&!same(cwd,context.parentWorkspace))return false;
@@ -125,7 +138,7 @@ export async function createHost(ctx,{dataDirectory=resolveDataDirectory(ctx),co
     };
     application=coreFactory({dataDirectory,runner,host:'deepseek-harness',workspaceAllowed});
     await runner.reconcile(application.board);
-    releaseRoutes=registerRoutes({connection:ctx.connection,application});
+    releaseRoutes=registerRoutes({connection:ctx.connection,application,getMeta:()=>({version:hostVersion,...(checker?.peek?{update:checker.peek({start:true})}:{})})});
     if(typeof ctx.skills?.register!=='function')throw Error('Native DSH skills are required for /hive-swarm.');
     releases.push(ctx.skills.register({name:'hive-swarm',description:'Coordinate user-requested native worker teams with the Swarm panel.',
       source:'bundled',provider:name,invocation:{modelInvocable:true,userInvocable:true},
@@ -170,9 +183,9 @@ export async function createHost(ctx,{dataDirectory=resolveDataDirectory(ctx),co
       }}));
     }
     return {application,runner,store,
-      close(){return closing??=(async()=>{await releaseRoutes?.();for(const release of releases.reverse())await release();
+      close(){return closing??=(async()=>{checker?.dispose?.();await releaseRoutes?.();for(const release of releases.reverse())await release();
         const result=await application.close();closeStore(result);return result;})();}};
-  } catch(error){await releaseRoutes?.();for(const release of releases.reverse())await release();const result=await application?.close();if(!application)await runner?.close();closeStore(result);throw error;}
+  } catch(error){checker?.dispose?.();await releaseRoutes?.();for(const release of releases.reverse())await release();const result=await application?.close();if(!application)await runner?.close();closeStore(result);throw error;}
 }
 export function same(left,right,platform=process.platform){
   if(typeof left!=='string'||typeof right!=='string')return false;

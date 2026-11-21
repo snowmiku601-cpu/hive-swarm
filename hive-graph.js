@@ -118,7 +118,16 @@
     return result[0].toUpperCase() + result.slice(1);
   }
 
+  function shouldMergeUserToCoordinator(members) {
+    const list = members ?? [];
+    const hasDedicatedCoordinator = list.some(m => (m.role === 'coordinator' || m.name === 'coordinator') && !m.external);
+    const hasExplicitUserMember = list.some(m => m.name === 'user');
+    return !hasDedicatedCoordinator && !hasExplicitUserMember;
+  }
+
   function project(posts, members, cursor, { hideInactive = false, expandBroadcast = false } = {}) {
+    const mergeUser = shouldMergeUserToCoordinator(members);
+    const resolveActor = name => (mergeUser && name === 'user') ? 'coordinator' : name;
     const names = new Map([['coordinator', { name: 'coordinator', role: 'coordinator', status: 'waiting' }]]);
     for (const member of members) names.set(member.name, member);
     const seen = new Set();
@@ -131,8 +140,8 @@
     }
     for (const event of posts) {
       if (event.seq > cursor || !isPost(event)) continue;
-      const { author } = event;
-      const targets = [...new Set([...(event.targets ?? []), ...(event.coordinatorMention ? ['coordinator'] : [])])];
+      const author = resolveActor(event.author);
+      const targets = [...new Set([...(event.targets ?? []).map(resolveActor), ...(event.coordinatorMention ? ['coordinator'] : [])])];
       addName(author);
       const outgoing = counts.get(author) ?? { posts: 0, mentions: 0, broadcasts: 0, unmentioned: 0, lastSeq: 0 };
       outgoing.posts++;
@@ -143,7 +152,7 @@
         outgoing.broadcasts++;
         broadcasts++;
       }
-      if (!all && !event.coordinatorMention && !targets.some(to => to !== author)) outgoing.unmentioned++;
+      if (!all && !targets.some(to => to !== author)) outgoing.unmentioned++;
       for (const to of new Set(targets)) {
         if (to === author) continue;
         addName(to);
@@ -630,6 +639,8 @@
   }
 
   function projectHive(posts, members, cursor) {
+    const mergeUser = shouldMergeUserToCoordinator(members);
+    const resolveActor = name => (mergeUser && name === 'user') ? 'coordinator' : name;
     const effectiveCursor = (cursor === null || cursor === undefined) ? Infinity : Number(cursor);
     const validPosts = (posts ?? []).filter(event => isPost(event) && Number.isFinite(event.seq))
       .slice().sort((a, b) => a.seq - b.seq);
@@ -643,9 +654,10 @@
     const briefSeqByMember = new Map();
     const mentionSeqByMember = new Map();
     for (const event of activePosts) {
-      lastSeqByAuthor.set(event.author, event.seq);
-      lastPostByAuthor.set(event.author, event);
-      const targets = new Set([...(event.targets ?? []), ...(event.coordinatorMention ? ['coordinator'] : [])]);
+      const author = resolveActor(event.author);
+      lastSeqByAuthor.set(author, event.seq);
+      lastPostByAuthor.set(author, event);
+      const targets = new Set([...(event.targets ?? []).map(resolveActor), ...(event.coordinatorMention ? ['coordinator'] : [])]);
       for (const target of targets) {
         if (event.kind === 'brief') briefSeqByMember.set(target, event.seq);
         mentionSeqByMember.set(target, event.seq);
@@ -682,7 +694,7 @@
         const mentionSeq = mentionSeqByMember.get(worker.name) ?? 0;
         if (effectiveCursor <= 0) status = 'waiting';
         else if (lastP && /\[done\]/i.test(String(lastP.text ?? ''))) status = 'done';
-        else if (lastPost?.author === worker.name) status = 'working';
+        else if (resolveActor(lastPost?.author) === worker.name) status = 'working';
         else if (Math.max(briefSeq, mentionSeq) > (lastP?.seq ?? 0)) status = 'working';
         else status = 'waiting';
       }
@@ -723,7 +735,7 @@
 
     const coordinator = {
       name: 'coordinator',
-      status: atHead ? (coordSource.status ?? phase) : (lastPost?.author === 'coordinator' ? 'working' : phase),
+      status: atHead ? (coordSource.status ?? phase) : (resolveActor(lastPost?.author) === 'coordinator' ? 'working' : phase),
       role: 'coordinator',
       doneCount,
       totalWorkers,
@@ -746,11 +758,11 @@
     }
 
     if (lastPost && (effectiveCursor === Infinity || lastPost.seq === effectiveCursor || !atHead)) {
-      const fromCell = clusterByMember.get(lastPost.author);
+      const fromCell = clusterByMember.get(resolveActor(lastPost.author));
       if (fromCell) {
         const allFlag = lastPost.broadcast ?? /(?:^|[^a-z0-9_])@all(?![a-z0-9_-])/i.test(lastPost.text ?? '');
         const rawTargets = [
-          ...(lastPost.targets ?? []),
+          ...(lastPost.targets ?? []).map(resolveActor),
           ...(lastPost.coordinatorMention ? ['coordinator'] : []),
         ];
         if (allFlag) {
@@ -1584,7 +1596,7 @@
   }
 
   globalThis.HiveGraph = Object.freeze({
-    isPost, project, elapsedSpan, unmentionedNode, minimumHeight, layout,
+    isPost, shouldMergeUserToCoordinator, project, elapsedSpan, unmentionedNode, minimumHeight, layout,
     nodeBox, roundedRectSignedDistance, clipEdge, routeEdges, draw,
     smartTaskLabel, mentionsMinimumHeight, layoutMentions,
     projectHive, hiveMinimumHeight, layoutHive, renderGraphFrame,

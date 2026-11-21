@@ -41,7 +41,7 @@ const failure=error=>({ok:false,error:{code:'hive-swarm/invalid-request',message
 const json=(value,status=200)=>Response.json(value,{status,headers:{'cache-control':'no-store'}});
 
 /** All physical carriers use the owner-admitted exact Fetch registry, including native Connection RPC. */
-export function registerRoutes({connection,application}) {
+export function registerRoutes({connection,application,getMeta}) {
   if(typeof connection?.fetch?.register!=='function')throw Error('DSH Connection exact Fetch capability is required.');
   const lifetime=new AbortController();const disposers=[];let closed=false;
   async function dispatch(endpoint,payload,signal) {
@@ -66,7 +66,14 @@ export function registerRoutes({connection,application}) {
     const expected='hive-swarm/v1/'+(endpoint==='wait'?'events':endpoint);
     if(message.type!=='client-request'||message.method!==expected)throw Error('Invalid Connection RPC envelope or method.');
     short(message.rpcId,'RPC identity');let result;
-    try{result={ok:true,value:await dispatch(endpoint,message.payload,request.signal)};}catch(error){result=failure(error);}
+    try{
+      let value=await dispatch(endpoint,message.payload,request.signal);
+      if(endpoint==='snapshot'&&typeof getMeta==='function') {
+        const meta=getMeta();
+        if(meta&&object(meta))value={...value,...meta};
+      }
+      result={ok:true,value};
+    }catch(error){result=failure(error);}
     return json({type:'server-response',rpcId:message.rpcId,result});
   }
   try {

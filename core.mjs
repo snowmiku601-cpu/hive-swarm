@@ -8,6 +8,120 @@ const reads=new Set(['list_teams','board_status','board_history','read_board','l
 const workerActions=new Set(['board_status','board_history','read_board','list_models','post_to_board','set_turn_outcome','add_member','retire_member','set_member_model','manage_channel']);
 const coordinatorActions=new Set(['set_team_title','set_team_plan']);
 
+const SEMVER_RE=/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
+const CLEAN_TAG_RE=/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+const RELEASE_TAG_BASE='https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v';
+
+export function parseSemver(value) {
+  if(typeof value!=='string'||value.length>64)return null;
+  const match=SEMVER_RE.exec(value.trim());
+  if(!match)return null;
+  const major=Number(match[1]),minor=Number(match[2]),patch=Number(match[3]);
+  if(!Number.isSafeInteger(major)||!Number.isSafeInteger(minor)||!Number.isSafeInteger(patch))return null;
+  const pre=match[4]?match[4].split('.'):[];
+  if(pre.some(part=>part===''))return null;
+  return {major,minor,patch,pre};
+}
+
+function compareSemver(a,b) {
+  for(const key of ['major','minor','patch']) {
+    if(a[key]!==b[key])return a[key]>b[key]?1:-1;
+  }
+  if(!a.pre.length&&!b.pre.length)return 0;
+  if(!a.pre.length)return 1;
+  if(!b.pre.length)return -1;
+  const len=Math.max(a.pre.length,b.pre.length);
+  for(let i=0;i<len;i++) {
+    if(i>=a.pre.length)return -1;
+    if(i>=b.pre.length)return 1;
+    const left=a.pre[i],right=b.pre[i];
+    if(left===right)continue;
+    const leftNum=/^\d+$/.test(left),rightNum=/^\d+$/.test(right);
+    if(leftNum&&rightNum)return Number(left)>Number(right)?1:-1;
+    if(leftNum!==rightNum)return leftNum?-1:1;
+    return left>right?1:-1;
+  }
+  return 0;
+}
+
+export function isNewerVersion(current,candidate) {
+  const a=parseSemver(current),b=parseSemver(candidate);
+  if(!a||!b)return false;
+  return compareSemver(b,a)>0;
+}
+
+export function createUpdateChecker({
+  packageName,currentVersion,tags=['latest'],fetchImpl=globalThis.fetch,
+  ttlMs=6*60*60*1000,errorTtlMs=30*60*1000,timeoutMs=3500,enabled,now=Date.now,
+}={}) {
+  const disabledByEnv=process.env.HIVE_SWARM_DISABLE_UPDATE_CHECK==='1'||process.env.HIVE_SWARM_DISABLE_UPDATE_CHECK==='true';
+  const inTestRunner=Boolean(process.env.NODE_TEST_CONTEXT)||process.argv.includes('--test');
+  const isEnabled=enabled??(!disabledByEnv&&!inTestRunner);
+  const current=typeof currentVersion==='string'&&parseSemver(currentVersion)?currentVersion.trim():'0.0.0';
+  let latest=null,checked=!isEnabled||typeof fetchImpl!=='function',expiresAt=0,inflight=null,activeController=null,disposed=false;
+
+  const result=()=> {
+    const available=Boolean(latest&&isNewerVersion(current,latest));
+    return {current,latest,available,url:available?RELEASE_TAG_BASE+latest:null,checked};
+  };
+
+  async function check() {
+    if(disposed||!isEnabled||typeof fetchImpl!=='function') {checked=true;return result();}
+    if(now()<expiresAt&&checked)return result();
+    if(inflight)return inflight;
+    const controller=new AbortController();
+    activeController=controller;
+    const timer=setTimeout(()=>controller.abort(Error('Update check timed out.')),timeoutMs);
+    timer.unref?.();
+    inflight=(async()=>{
+      try {
+        const endpoint=`https://registry.npmjs.org/-/package/${encodeURIComponent(packageName)}/dist-tags`;
+        const response=await fetchImpl(endpoint,{
+          headers:{accept:'application/json','user-agent':`${packageName}/${current}`},
+          signal:controller.signal,
+        });
+        if(!response?.ok)throw Error(`HTTP ${response?.status??0}`);
+        const data=await response.json();
+        let best=null;
+        if(data&&typeof data==='object'&&!Array.isArray(data)) {
+          for(const tag of tags) {
+            const candidate=typeof data[tag]==='string'?data[tag].trim():'';
+            if(!candidate||candidate.length>40||!CLEAN_TAG_RE.test(candidate)||!parseSemver(candidate))continue;
+            if(!best||isNewerVersion(best,candidate))best=candidate;
+          }
+        }
+        latest=best;
+        checked=true;
+        expiresAt=now()+ttlMs;
+      } catch {
+        checked=true;
+        expiresAt=now()+errorTtlMs;
+      } finally {
+        clearTimeout(timer);
+        if(activeController===controller)activeController=null;
+        inflight=null;
+      }
+      return result();
+    })();
+    return inflight;
+  }
+
+  function peek({start=false}={}) {
+    if(start&&!disposed&&isEnabled&&typeof fetchImpl==='function'&&(!checked||now()>=expiresAt)&&!inflight) {
+      void check();
+    }
+    return result();
+  }
+
+  function dispose() {
+    disposed=true;
+    try{activeController?.abort(Error('Update checker disposed.'));}catch{}
+    activeController=null;
+  }
+
+  return {peek,check,dispose};
+}
+
 function signature(value) {
   if(value===null||typeof value==='string'||typeof value==='boolean')return JSON.stringify(value);
   if(typeof value==='number'&&Number.isFinite(value))return JSON.stringify(value);
