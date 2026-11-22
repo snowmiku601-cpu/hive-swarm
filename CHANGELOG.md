@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.1.2
+
+Verified across **349/349** tests (`npm test`), updating `hive-swarm@2.1.2` (`latest`) and `dsh-hive-swarm@2.1.2` (`next`).
+
+### Native-Compact Wake Prompts & Structured DSH Error Reporting
+- **Native-Compact Turn 2+ Wake Prompts (`packages/dsh-hive-swarm/runner.mjs`, `codex.mjs`):** Replace Turn 2+ boilerplate with a 1-line `[Hive turn N · @member]` wakeup header + plain-text inbox, omitting unchanged `Active teammates` / `Active members` via persisted `lastPeers`, and extending the `codex.mjs` `reportText` prompt-echo guard.
+- **Fix `([object Object])` Turn-End Error Reporting (`packages/dsh-hive-swarm/runner.mjs`):** Added `formatTurnEndReason` in `correlateRun` to extract nested `code`, `message`, and `reason.kind` cleanly so transport/malformed-tool errors and quota `429` limits remain diagnosable and auto-fallback continues to detect quota errors.
+
+### Silent Posts (`wake: false`), Owner-Only `cancel_turn`, & Recovery Polish
+- **Silent FYI / Acceptance Posts (`engine.mjs`, `core.mjs`, `packages/dsh-hive-swarm/{host.mjs,routes.mjs}`, `server.mjs`):** `post_message` and `post_to_board` now accept `wake: false`, recording `silent: true` on the board without enqueueing into member inboxes, waking idle workers, or triggering `[stall] Unaddressed post` alerts.
+- **Owner-Only `cancel_turn` & Overflow Menu Action (`engine.mjs`, `core.mjs`, `packages/dsh-hive-swarm/client/views.jsx`, `board.js`, `server.mjs`):** Exposed owner-only `cancel_turn` (with optional `clearInbox: true`) across Codex MCP/HTTP, DSH Host/Command RPC, and the Members `⋯` overflow menu (`Cancel turn`), properly clearing runner-written `recoveryRequired` on explicit cancel and surfacing `inboxCount` on members with queued messages.
+- **Completed-Member `Dismiss` Recovery (`engine.mjs`):** `resolve_recovery(action: "dismiss")` now restores `status: "done"` and drops stale `inFlight` entries when `completed > 0` instead of leaving completed members stuck in `failed`.
+
+### Goal-Mode `@lead` Coordination & Playbooks
+- **Goal-Mode `@lead` Support (`engine.mjs`):** Treat `@lead` / `notify: ["lead"]` as `coordinatorMention: true` when no explicit `lead` or `coordinator` member exists, waking `wait_for_board({ mentionsOnly: true })` without emitting false `[stall]` unaddressed alerts.
+- **Updated Playbooks (`skills/swarm/SKILL.md`, `packages/dsh-hive-swarm/skills/hive-swarm/SKILL.md`):** Added guidance on checking `board_status` / `inboxCount` before editing worker-owned files, passing `wake: false` on acceptance/FYI messages, using `cancel_turn`, and addressing `@coordinator` (not `@lead`).
+
 ## 2.1.1 — published
 
 Published on npm as `hive-swarm@2.1.1` (`latest`, 26 files) and `dsh-hive-swarm@2.1.1` (`next`, 10 files), tagged `v2.1.1`. Verified across **341/341** tests (`npm test`) and local Light/Dark 2× Retina captures.
