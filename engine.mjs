@@ -490,7 +490,7 @@ export function stallIssues(team) {
     }
   }
   for (const event of events.filter(event=>event.seq>boundary&&isMessage(event)&&!event.targets?.length&&
-    !event.broadcast&&!event.coordinatorMention).slice(-6).reverse()) {
+    !event.broadcast&&!event.coordinatorMention&&!event.silent).slice(-6).reverse()) {
     issues.push({kind:'unaddressed',member:event.author,seq:event.seq,
       text:'Unaddressed post #'+event.seq+' by @'+event.author+'. No member was @mentioned.'});
   }
@@ -895,7 +895,7 @@ export class TeamBoard {
     if (member.status === 'working') {
       throw Error('@' + name + ' is currently running. Wait for the active turn to finish before resolving recovery.');
     }
-    member.inbox = [...(member.inFlight ?? []), ...member.inbox].slice(-24);
+    if (action === 'retry') member.inbox = [...(member.inFlight ?? []), ...member.inbox].slice(-24);
     delete member.recoveryRequired;
     delete member.pendingRun;
     delete member.inFlight;
@@ -903,10 +903,13 @@ export class TeamBoard {
     delete member.declaredOutcome;
     delete member.inputRequired;
     delete team.monitorPhase;
-    member.status = action === 'retry' ? 'queued' : 'failed';
-    this.record(team, 'system', action === 'retry'
+    member.status = action === 'retry' ? 'queued' : (member.completed ?? 0) > 0 ? 'done' : 'failed';
+    const note = action === 'retry'
       ? 'Resolved unconfirmed outcome for @' + name + ' and queued a fresh retry.'
-      : 'Dismissed unconfirmed outcome for @' + name + '. Mention @' + name + ' when ready to continue.', [name]);
+      : member.status === 'done'
+        ? 'Dismissed unconfirmed outcome for @' + name + ' and restored completed state.'
+        : 'Dismissed unconfirmed outcome for @' + name + '. Mention @' + name + ' when ready to continue.';
+    this.record(team, 'system', note, [name]);
     this.save(team);
     this.schedule(id);
     return team;
@@ -1101,9 +1104,14 @@ export class TeamBoard {
     return event;
   }
 
-  deliver(team, author, body, names = [], channel = 'main') {
+  deliver(team, author, body, names = [], channel = 'main', {wake = true} = {}) {
     const addresses=addressesIn(body,names);
     if (addresses.has('#main')) throw Error('Use @all for everyone instead of @#main.');
+    if (wake === false) {
+      const event = this.record(team, author, body, [], 'message', channel);
+      event.silent = true;
+      return event;
+    }
     const addressedChannels=new Set(team.channels.filter(entry=>!entry.archived&&addresses.has('#'+entry.name))
       .map(entry=>entry.name));
     const targets = team.members.filter(member => activeMember(member) && member.name !== author &&
@@ -1111,7 +1119,11 @@ export class TeamBoard {
         member.channels.some(name=>addressedChannels.has(name))));
     const event = this.record(team, author, body, targets.map(member => member.name), 'message',channel);
     if (addresses.has('all')) event.broadcast = true;
-    if (addresses.has('coordinator')) event.coordinatorMention=true;
+    const hasCoordinatorMember = team.members.some(member => activeMember(member) && member.name === 'coordinator');
+    const hasLeadMember = team.members.some(member => activeMember(member) && member.name === 'lead');
+    if (addresses.has('coordinator') || (!hasLeadMember && !hasCoordinatorMember && addresses.has('lead'))) {
+      event.coordinatorMention=true;
+    }
     for (const target of targets) {
       const addressed = addresses.has(target.name);
       enqueue(target, event, addressed);
@@ -1128,18 +1140,18 @@ export class TeamBoard {
     member.status = 'queued';
   }
 
-  post(id, body, channel) {
+  post(id, body, channel, opts) {
     const team = this.get(id);
-    this.deliver(team, 'user', text(body, 'Message', 6000),[],postingChannel(team,null,channel));
+    this.deliver(team, 'user', text(body, 'Message', 6000),[],postingChannel(team,null,channel),opts);
     this.save(team);
     this.schedule(id);
     return team;
   }
 
-  postFrom(id, author, body, channel) {
+  postFrom(id, author, body, channel, opts) {
     const team = this.get(id);
     const member=this.peerMember(team,author);
-    const event = this.deliver(team, author, text(body, 'Message', 6000),[],postingChannel(team,member,channel));
+    const event = this.deliver(team, author, text(body, 'Message', 6000),[],postingChannel(team,member,channel),opts);
     this.save(team);
     this.schedule(id);
     return event;
@@ -1267,11 +1279,11 @@ export class TeamBoard {
       entry.status==='working' && entry.lastTurn===request.lastTurn)?.declaredOutcome;
     const controller = new AbortController();
     const key = id + ':' + member.name;
-    const run = {turn: request.lastTurn, controller};
+    const run = {turn: request.lastTurn, controller, explicitCancel: false, clearInbox: false};
     this.runningTurns.set(key, run);
     const cancelled = () => ({state:'failed',message:'Worker turn cancelled. Mention @' + member.name + ' only after checking the owned session.'});
     run.finished = Promise.resolve().then(() => this.runTurn({team, member: request, remember, declaredOutcome, onActivity, signal:controller.signal})).then(
-      result => this.settle(id, member.name, completions, controller.signal.aborted ? cancelled() : result, {turn:request.lastTurn}),
+      result => this.settle(id, member.name, completions, controller.signal.aborted ? cancelled() : result, {turn:request.lastTurn, explicitCancel:run.explicitCancel, clearInbox:run.clearInbox}),
       error => {
         const message = String(error?.message ?? error).slice(0, 6000);
         const quota = error?.blockedBy === 'quota' ||
@@ -1279,7 +1291,7 @@ export class TeamBoard {
         const recoveryRequired = error?.recoveryRequired === true;
         this.settle(id, member.name, completions, controller.signal.aborted
           ? cancelled()
-          : {state: quota ? 'quota' : 'failed', message, ...(recoveryRequired ? {recoveryRequired: true} : {})}, {turn:request.lastTurn});
+          : {state: quota ? 'quota' : 'failed', message, ...(recoveryRequired ? {recoveryRequired: true} : {})}, {turn:request.lastTurn, explicitCancel:run.explicitCancel, clearInbox:run.clearInbox});
       },
     ).finally(() => {if (this.runningTurns.get(key) === run) this.runningTurns.delete(key);});
     this.schedule(id);
@@ -1319,12 +1331,15 @@ export class TeamBoard {
     this.save(team);
   }
 
-  cancelTurn(id, name) {
+  async cancelTurn(id, name, {clearInbox = false} = {}) {
     const member = this.liveMember(this.get(id),name);
     const run = this.runningTurns.get(id + ':' + name);
     if (member.status !== 'working' || !run || run.turn !== member.lastTurn) throw Error('This worker turn is not running.');
+    run.explicitCancel = true;
+    run.clearInbox = clearInbox === true;
     run.controller.abort(Error('Worker turn cancelled.'));
-    return run.finished;
+    await run.finished;
+    return this.get(id);
   }
 
   async cancelRunning() {
@@ -1351,7 +1366,7 @@ export class TeamBoard {
     return {settled:this.settle(id,name,member.inFlightCompletions,result,{turn,requestId,recovery:true})};
   }
 
-  settle(id, name, completions, result, {turn,requestId,recovery = false} = {}) {
+  settle(id, name, completions, result, {turn,requestId,recovery = false,explicitCancel = false,clearInbox = false} = {}) {
     if (this.closed) return false;
     const team = this.get(id);
     const member = team.members.find(m => m.name === name);
@@ -1359,7 +1374,7 @@ export class TeamBoard {
     const preserveRecovery = (result?.state === 'failed' || result?.state === 'quota') && result?.recoveryRequired === true;
     if (!member || (turn != null && member.lastTurn !== turn) ||
         (expectedTurn != null && member.lastSettledTurn === expectedTurn) ||
-        (member.recoveryRequired && !recovery && !preserveRecovery)) return false;
+        (member.recoveryRequired && !recovery && !preserveRecovery && !explicitCancel)) return false;
     const live=this.activity.get(id);
     live?.delete(name);
     if (!live?.size) this.activity.delete(id);
@@ -1387,7 +1402,10 @@ export class TeamBoard {
       this.schedule(id);
       return true;
     }
-    if (failed) member.inbox = [...(member.inFlight ?? []), ...member.inbox].slice(-24);
+    if (failed) {
+      if (clearInbox) member.inbox = [];
+      else member.inbox = [...(member.inFlight ?? []), ...member.inbox].slice(-24);
+    }
     if (result.state === 'done') member.completed = (member.completed ?? 0) + 1;
     delete member.inFlight;
     delete member.declaredOutcome;

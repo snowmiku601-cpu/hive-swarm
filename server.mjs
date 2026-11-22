@@ -117,8 +117,8 @@ const tools = [
     inputSchema: shape({...teamId, member:string, model:string, effort:{type:['string','null']}, resume:boolean}, ['teamId','member','model']),
   },
   {
-    name: 'post_message', title: 'Post a team message', description: 'Post a message on the board. Use @name, @group or @all to address the members who need the message.',
-    inputSchema: shape({...teamId, text:string,channel:string}, ['teamId', 'text']),
+    name: 'post_message', title: 'Post a team message', description: 'Post a message on the board. Use @name, @group or @all to address the members who need the message, or wake: false for FYI/acceptance notes without waking members.',
+    inputSchema: shape({...teamId, text:string,channel:string,wake:boolean}, ['teamId', 'text']),
   },
   {
     name: 'pause_team', title: 'Pause a team', description: 'Pause dispatch of new turns. Members already working finish their current turn.',
@@ -127,6 +127,11 @@ const tools = [
   {
     name: 'resume_team', title: 'Resume a team', description: 'Resume queued turns. Increase the turn budget only when the user requests it.',
     inputSchema: shape({...teamId, extraTurns: integer}, ['teamId']),
+  },
+  {
+    name:'cancel_turn',title:'Cancel an active worker turn',
+    description:'Cancel a worker currently running a turn. Set clearInbox to also discard stale queued messages so it does not auto-resume.',
+    inputSchema:shape({...teamId,member:string,clearInbox:boolean},['teamId','member']),
   },
   {
     name: 'remove_worktree', title: 'Remove an owned worktree',
@@ -148,8 +153,8 @@ const peerTools = [
   },
   {
     name: 'post_to_board', title: 'Message team members',
-    description: 'Post as yourself while your turn is active. Use @name or @group to wake members who can act on your message. Reserve @all for messages everyone needs to act on.',
-    inputSchema: shape({text:string,channel:string}, ['text']),
+    description: 'Post as yourself while your turn is active. Use @name or @group to wake members who can act on your message, or wake: false for non-waking notes. Reserve @all for messages everyone needs to act on.',
+    inputSchema: shape({text:string,channel:string,wake:boolean}, ['text']),
   },
   {
     name: 'set_turn_outcome', title: 'Set outcome for this worker turn',
@@ -242,6 +247,7 @@ function present(team, origin, activity, actor) {
         ...(subagentName?{subagentName}:{}),
         ...(fallbackModel?{fallbackModel,...(fallbackEffort!==undefined?{fallbackEffort}:{})}:{}),
         ...(member.recoveryRequired?{recoveryRequired:true}:{}),
+        ...(member.inbox?.length?{inboxCount:member.inbox.length}:{}),
         pendingWaitFor:pendingWaitFor(team,member),
         model:member.model ?? member.activeModel ?? model, effort:member.effort ?? member.activeEffort ?? configuredEffort(team, member)};
     }),
@@ -350,7 +356,7 @@ export async function service({dataDirectory = root, listenPort = port, runner, 
       const isBoard = pathname.match(/^\/board\/([a-f0-9-]{36})$/);
       const screenshot = pathname.match(/^\/board\/([a-f0-9-]{36})\/screenshot\/(\d+)\/(\d+)$/);
       const transcript = pathname.match(/^\/board\/([a-f0-9-]{36})\/member\/([a-z][a-z0-9_-]{0,29})\/transcript$/);
-      const api = pathname.match(/^\/board\/([a-f0-9-]{36})\/(status|history|post|pause|resume|events|member-model|member-retire|worktree-remove|title|resolve-recovery)$/);
+      const api = pathname.match(/^\/board\/([a-f0-9-]{36})\/(status|history|post|pause|resume|cancel-turn|events|member-model|member-retire|worktree-remove|title|resolve-recovery)$/);
       if ((isBoard || pathname === '/swarm') && req.method === 'GET') {
         if (isBoard) board.get(isBoard[1]);
         res.writeHead(200, {
@@ -425,8 +431,9 @@ export async function service({dataDirectory = root, listenPort = port, runner, 
         const type=req.headers['content-type']?.split(';',1)[0].trim().toLowerCase();
         if (req.headers.origin!==origin||type!=='application/json') return send(res,403,{error:'Open this Swarm board to make changes.'});
         const data = await readBody(req);
-        if (api[2] === 'post') return send(res,200,view(board.post(api[1],data.text,data.channel)));
+        if (api[2] === 'post') return send(res,200,view(board.post(api[1],data.text,data.channel,{wake:data.wake!==false})));
         if (api[2] === 'pause') return send(res, 200, view(board.pause(api[1])));
+        if (api[2] === 'cancel-turn') return send(res, 200, view(await board.cancelTurn(api[1], data.member, {clearInbox: data.clearInbox === true})));
         if (api[2] === 'resume') {
           const {extraTurns} = data;
           if (extraTurns !== undefined && (extraTurns !== 8 || teamPhase(board.get(api[1])) !== 'budget')) {
@@ -506,7 +513,7 @@ export async function service({dataDirectory = root, listenPort = port, runner, 
       }
       if (name==='manage_channel') return send(res,200,board.manageChannel(args.teamId,args,actor));
       if (actor && name === 'read_board') return send(res,200,board.readPosts(args.teamId,{...args,actor}));
-      if (actor && name === 'post_to_board') return send(res,200,board.postFrom(args.teamId,actor,args.text,args.channel));
+      if (actor && name === 'post_to_board') return send(res,200,board.postFrom(args.teamId,actor,args.text,args.channel,{wake:args.wake!==false}));
       if (actor && name === 'set_turn_outcome') return send(res,200,board.declareOutcome(args.teamId,actor,args));
       let team;
       switch (name) {
@@ -568,7 +575,7 @@ export async function service({dataDirectory = root, listenPort = port, runner, 
           return send(res, 200, currentUpdate?.available ? {...payload, update:currentUpdate} : payload);
         }
         case 'board_status': team = board.get(args.teamId); break;
-        case 'post_message': team = board.post(args.teamId,args.text,args.channel); break;
+        case 'post_message': team = board.post(args.teamId,args.text,args.channel,{wake:args.wake!==false}); break;
         case 'set_team_title': team = board.setTeamTitle(args.teamId,args.title,actor); break;
         case 'set_team_plan': {
           const plan=Array.isArray(args)?args:{
@@ -579,6 +586,7 @@ export async function service({dataDirectory = root, listenPort = port, runner, 
           team = board.setTeamPlan(args.teamId,plan,actor);
           break;
         }
+        case 'cancel_turn': team = await board.cancelTurn(args.teamId,args.member,{clearInbox:args.clearInbox===true}); break;
         case 'resolve_recovery': team = board.resolveRecovery(args.teamId,args.member,{action:args.action}); break;
         case 'pause_team': team = board.pause(args.teamId); break;
         case 'resume_team': team = board.resume(args.teamId, args.extraTurns); break;
@@ -673,7 +681,7 @@ async function toolCall(payload, peer, cancellation) {
   const authorization = peer ? 'Bearer ' + peer.token : await (startup ??= ensureService().finally(()=>{startup=null;}));
   const timeout = payload.name === 'wait_for_board' ? (boardWaitTimeout(payload.arguments?.timeoutSec)+10)*1000
     : payload.name === 'remove_worktree' ? 135000
-    : ['start_team','list_models','add_member','set_member_model'].includes(payload.name) ? 50000 : 10000;
+    : ['start_team','list_models','add_member','set_member_model','cancel_turn'].includes(payload.name) ? 50000 : 10000;
   const deadline=AbortSignal.timeout(timeout);
   const response = await fetch(origin + (peer ? '/peer' : '/tool'), {
     method: 'POST', headers: {authorization, 'Content-Type': 'application/json'},

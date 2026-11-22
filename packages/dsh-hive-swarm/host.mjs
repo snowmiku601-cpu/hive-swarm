@@ -28,8 +28,8 @@ const fields={
   start_team:['cwd','task','title','goalLine','members','coordinator','model','effort','fallbackModel','fallbackEffort','threads','concurrency','turnLimit'],
   list_teams:[],list_models:[],board_status:['teamId'],board_history:['teamId','after','limit','channel'],
   read_board:['teamId','after','limit','channel','mentionsOnly'],open_swarm_panel:['teamId'],
-  post_message:['teamId','text','channel'],pause_team:['teamId'],resume_team:['teamId','extraTurns'],
-  resolve_recovery:['teamId','member','action'],
+  post_message:['teamId','text','channel','wake'],pause_team:['teamId'],resume_team:['teamId','extraTurns'],
+  cancel_turn:['teamId','member','clearInbox'],resolve_recovery:['teamId','member','action'],
   set_team_title:['teamId','title'],set_team_plan:['teamId','goalLine','tasks','threads'],manage_channel:['teamId','op','channel','member','topic'],
   add_member:['teamId','member','replaces','fork'],retire_member:['teamId','member'],
   set_member_model:['teamId','member','model','effort','resume'],remove_worktree:['teamId','member','force'],
@@ -39,7 +39,7 @@ const fields={
 const requiredFields={
   start_team:['cwd','task','members'],
   open_swarm_panel:['teamId'],pause_team:['teamId'],resume_team:['teamId'],wait_for_board:['teamId'],
-  resolve_recovery:['teamId','member'],remove_worktree:['teamId','member'],read_journal:['teamId','member'],
+  cancel_turn:['teamId','member'],resolve_recovery:['teamId','member'],remove_worktree:['teamId','member'],read_journal:['teamId','member'],
   post_message:['text'],set_team_title:['title'],manage_channel:['op'],
   add_member:['member'],retire_member:['member'],set_member_model:['member','model'],
   set_turn_outcome:['turn','state','message'],
@@ -48,10 +48,11 @@ const descriptions={
   start_team:'Start a native Hive Swarm only when the user asks. Use this chat as coordinator; assign disjoint file ownership, peer-to-peer handoffs, optional goalLine (<= 140 chars), member taskLabel (<= 96 chars), outcome threads, and fallbackModel.',
   list_models:'List available native models and reasoning efforts, plus host-verified currentSession workspace and active model route.',
   set_turn_outcome:'Submit this owned worker turn result (state, message, notify, waitFor) and conclude the turn. Do not duplicate the same report via hive_swarm_post_message first.',
-  post_message:'Post a message on the shared board. Tag @name, @group, @#channel, or @all only for members who must act.',
+  post_message:'Post a message on the shared board. Tag @name, @group, @#channel, or @all only for members who must act; pass wake: false for FYI or acceptance notes that must not queue/wake members.',
   read_board:'Read recent public posts on the board without waking members (limit 1–20).',
   board_history:'Page through saved board history (up to 200 posts per call).',
   board_status:'Read current team status, roster, channels, threads, and stall alerts.',
+  cancel_turn:'Cancel an active running worker turn immediately (pass clearInbox: true to also discard queued stale inbox messages).',
   resolve_recovery:'Resolve an unconfirmed native worker outcome after inspecting the owned session: action is "dismiss" or "retry".',
   set_team_plan:'Set or update optional team goalLine, member task labels (tasks: [{member, label}]), and outcome-grouped threads for the Swarm Overview.',
   set_member_model:'Switch a member model and reasoning effort (pass effort: null for model default, resume: true to wake an idle member).',
@@ -70,7 +71,7 @@ const baseParameter=(action,key)=>key==='limit'&&action==='read_board'?{type:'in
   key==='op'?{type:'string',enum:['create','list','subscribe','unsubscribe','archive']}:
   key==='action'?{type:'string',enum:['dismiss','retry']}:
   key==='effort'||key==='fallbackEffort'?{type:['string','null']}:
-  ['coordinator','resume','force','mentionsOnly'].includes(key)?{type:'boolean'}:
+  ['coordinator','resume','force','mentionsOnly','wake','clearInbox'].includes(key)?{type:'boolean'}:
   key==='members'?{type:'array',items:memberSchema}:
   key==='tasks'&&action==='set_team_plan'?{type:'array',items:taskUpdateSchema}:
   key==='threads'?{type:'array',items:threadSchema}:

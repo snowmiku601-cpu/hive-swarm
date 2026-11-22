@@ -670,12 +670,13 @@ test('B5: run() lazy-hydrates modelProviders via listModels() before falling bac
   assert.equal(calls.some(c=>c.method==='config/read'),false);
 });
 
-test('Turn 1 sends full onboarding prompt and plain-text inbox while Turn 2+ sends lean delta resume prompt',async t=>{
+test('Turn 1 sends full onboarding prompt and plain-text inbox while Turn 2+ sends native-compact wake prompt',async t=>{
   const runner=new CodexRunner({ephemeral:true});
   t.after(()=>runner.close());
   runner.start=async()=>{};
   const turns=[];
   let seq=0;
+  let nextMessage=null;
   runner.rpc=async (method,params)=>{
     if (method==='model/list') return {data:[{model:'gpt-5.4',modelProvider:'openai',supportedReasoningEfforts:[]}]};
     if (method==='thread/start') return {thread:{id:'thread-delta-1'},model:'gpt-5.4',modelProvider:'openai'};
@@ -684,8 +685,10 @@ test('Turn 1 sends full onboarding prompt and plain-text inbox while Turn 2+ sen
     assert.equal(method,'turn/start');
     turns.push(params.input[0].text);
     const id='turn-'+(++seq);
+    const msgText=nextMessage??JSON.stringify({state:'waiting',message:'ok',notify:[],waitFor:[]});
+    nextMessage=null;
     setImmediate(()=>{
-      runner.receive(JSON.stringify({method:'item/completed',params:{threadId:params.threadId,turnId:id,item:{type:'agentMessage',text:JSON.stringify({state:'waiting',message:'ok',notify:[],waitFor:[]})}}}));
+      runner.receive(JSON.stringify({method:'item/completed',params:{threadId:params.threadId,turnId:id,item:{type:'agentMessage',text:msgText}}}));
       runner.receive(JSON.stringify({method:'turn/completed',params:{threadId:params.threadId,turn:{id,status:'completed'}}}));
     });
     return {turn:{id}};
@@ -703,15 +706,30 @@ test('Turn 1 sends full onboarding prompt and plain-text inbox while Turn 2+ sen
   assert.match(turns[0],/Your assignment: Build delta prompt/);
   assert.match(turns[0],/#3 @qa #verify \(addressed to you\):\nCheck #2/);
   assert.doesNotMatch(turns[0],/"addressed":true/);
+  assert.equal(saved.lastPeers,'@qa');
 
+  // Turn 2 with unchanged roster: omits Active members and repeated rules
   await runner.run({
     team,
-    member:{...member,threadId:saved.threadId,inbox:[{seq:7,author:'qa',channel:'main',addressed:true,text:'Re-verify #6'}],lastTurn:2},
+    member:{...member,threadId:saved.threadId,lastPeers:saved.lastPeers,inbox:[{seq:7,author:'qa',channel:'main',addressed:true,text:'Re-verify #6'}],lastTurn:2},
     remember:patch=>{saved={...saved,...patch};},
   });
-  assert.match(turns[1],/^Resume Hive Swarm turn 2 as @builder\. Active members: @qa\./);
-  assert.match(turns[1],/do not call read_board or list_models/i);
-  assert.match(turns[1],/#7 @qa \(addressed to you\):\nRe-verify #6/);
-  assert.doesNotMatch(turns[1],/User goal:/);
-  assert.doesNotMatch(turns[1],/Your assignment:/);
+  assert.match(turns[1],/^\[Hive turn 2 · @builder\] End with working-status JSON \(or set_turn_outcome turn=2\)\.\n\n#7 @qa \(addressed to you\):\nRe-verify #6$/);
+  assert.doesNotMatch(turns[1],/Active members:/);
+  assert.doesNotMatch(turns[1],/do not call/i);
+  assert.doesNotMatch(turns[1],/User goal:|Your assignment:/);
+
+  // Turn 3 after roster expansion: includes Active members once and updates lastPeers
+  team.members.push({name:'verifier',status:'waiting'});
+  nextMessage='[Hive turn 3 · @builder] Active members: @qa, @verifier.';
+  await assert.rejects(
+    runner.run({
+      team,
+      member:{...member,threadId:saved.threadId,lastPeers:saved.lastPeers,inbox:[{seq:9,author:'qa',channel:'main',addressed:true,text:'Check verifier'}],lastTurn:3},
+      remember:patch=>{saved={...saved,...patch};},
+    }),
+    /working-status JSON/i,
+  );
+  assert.match(turns[2],/^\[Hive turn 3 · @builder\] Active members: @qa, @verifier\. End with working-status JSON/);
+  assert.equal(saved.lastPeers,'@qa, @verifier');
 });

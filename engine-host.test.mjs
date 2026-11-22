@@ -192,3 +192,31 @@ test('optional outcome threads persist on start and update via setTeamPlan',()=>
     assert.throws(()=>board.setTeamPlan(team.id,[{id:'Bad Id!',title:'X',goal:'Y',members:['builder']}]),/thread/i);
   }finally{board.close();}
 });
+
+test('explicit cancelTurn clears runner-written recoveryRequired and supports clearInbox vs preserving queued inbox',async()=>{
+  let signal,release;
+  const board=new TeamBoard(':memory:',({member,remember,signal:sig})=>{
+    signal=sig;
+    return new Promise((resolve,reject)=>{
+      release=reject;
+      sig.addEventListener('abort',()=>{
+        remember({pendingRun:{requestId:'c-1',turn:member.lastTurn},status:'failed',recoveryRequired:true});
+        const err=Error('Native outcome unconfirmed: aborted.');
+        err.recoveryRequired=true;
+        reject(err);
+      },{once:true});
+    });
+  },{host:'deepseek-harness',recovery:'preserve'});
+  try{
+    const team=board.create(input());
+    await waitUntil(()=>Boolean(release));
+    board.post(team.id,'@builder Queued stale follow-up');
+    assert.equal(board.get(team.id).members[0].inbox.length,1);
+    const settled=await board.cancelTurn(team.id,'builder',{clearInbox:true});
+    assert.equal(signal.aborted,true);
+    assert.equal(settled.members[0].status,'failed');
+    assert.equal(settled.members[0].recoveryRequired,undefined);
+    assert.equal(settled.members[0].pendingRun,undefined);
+    assert.equal(settled.members[0].inbox.length,0);
+  }finally{board.close();}
+});

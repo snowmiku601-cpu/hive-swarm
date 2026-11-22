@@ -1,6 +1,6 @@
 {
   "name": "hive-swarm",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "Local multi-agent coordination, dependent tasks, and a shared Swarm board.",
   "type": "module",
   "license": "MIT",
