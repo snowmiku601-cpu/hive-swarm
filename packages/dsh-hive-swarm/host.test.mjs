@@ -385,3 +385,34 @@ test('B2 & 2.1.0 strict schema: drive-letter case match, goalLine, taskLabel, an
   assert.equal(Object.hasOwn(cleared,'goalLine'),false);
   assert.equal(Object.hasOwn(cleared.members[0],'taskLabel'),false);
 });
+
+test('2.1.2 host registers owner-only hive_swarm_cancel_turn and nullable wake:false on post_message',async t=>{
+  const f=await fixture(t);
+  const exec={signal:new AbortController().signal,agent:{id:'parent',current:true,session:{header:{cwd:f.root}}}};
+  const created=await f.tools.get('hive_swarm_start_team').tool.execute(args(f.root),exec);
+  await delay(10);
+
+  const workerAgent={id:'worker-session',current:true};
+  const ownerAgent={id:'parent-session',current:true};
+  const cancelEntry=f.tools.get('hive_swarm_cancel_turn');
+  assert.ok(cancelEntry,'hive_swarm_cancel_turn must be registered');
+  assert.equal(cancelEntry.options.when({agent:ownerAgent}),true);
+  assert.equal(cancelEntry.options.when({agent:workerAgent}),false);
+  assert.deepEqual(cancelEntry.tool.parameters.properties.clearInbox,{type:['boolean','null']});
+  assert.deepEqual(f.tools.get('hive_swarm_post_message').tool.parameters.properties.wake,{type:['boolean','null']});
+
+  // Silent post_message (wake: false) does not enqueue inbox while builder is working
+  const afterSilent=await f.tools.get('hive_swarm_post_message').tool.execute({
+    teamId:created.id,text:'@builder FYI note',channel:null,wake:false,
+  },exec);
+  assert.equal(afterSilent.events.at(-1).silent,true);
+  assert.equal(afterSilent.members[0].inboxCount,undefined);
+
+  // Explicit cancel_turn aborts native worker, clears recoveryRequired & optional queued inbox
+  await f.tools.get('hive_swarm_post_message').tool.execute({teamId:created.id,text:'@builder Stale queued',channel:null,wake:null},exec);
+  const cancelled=await cancelEntry.tool.execute({teamId:created.id,member:'builder',clearInbox:true},exec);
+  assert.equal(f.calls.includes('cancel'),true);
+  assert.equal(cancelled.members[0].status,'failed');
+  assert.equal(cancelled.members[0].recoveryRequired,false);
+  assert.equal(cancelled.members[0].inboxCount,undefined);
+});

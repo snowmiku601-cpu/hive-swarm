@@ -20,6 +20,29 @@ export function formatInbox(inbox) {
   }).join('\n\n');
 }
 
+export function formatTurnEndReason(reason) {
+  if(reason==null)return 'incomplete';
+  if(typeof reason==='string')return reason.trim()||'incomplete';
+  if(typeof reason!=='object')return String(reason).trim()||'incomplete';
+  const rawCode=reason.code??reason.error?.code??reason.reason?.code;
+  const code=typeof rawCode==='string'?rawCode.trim():typeof rawCode==='number'?String(rawCode):'';
+  const msg=[reason.message,reason.error,reason.error?.message,reason.reason,reason.reason?.message]
+    .find(v=>typeof v==='string'&&v.trim())??'';
+  const kind=typeof reason.kind==='string'?reason.kind.trim():'';
+  const subKind=typeof reason.reason?.kind==='string'?reason.reason.kind.trim():'';
+  const parts=[];
+  if(code)parts.push(code);
+  if(msg.trim())parts.push(msg.trim());
+  if(!parts.length) {
+    const k=kind&&subKind?kind+': '+subKind:(subKind||kind);
+    if(k)parts.push(k);
+  }
+  if(!parts.length) {
+    try{const json=JSON.stringify(reason);if(json&&json!=='{}')parts.push(json);}catch{}
+  }
+  return (parts.join(': ').replace(/\s+/g,' ').trim()||'incomplete').slice(0,400);
+}
+
 /** Correlate only durable events belonging to one admitted prompt. Never infer completion from a receipt. */
 export function correlateRun(run,records) {
   const unique=new Map();
@@ -59,7 +82,7 @@ export function correlateRun(run,records) {
     }
     if(type==='turn/end'&&claimSeq&&data.turn===claimedTurn) {
       if(data.reason?.kind!=='completed') {
-        const detail=data.reason?.message||data.reason?.error||data.reason?.kind||'incomplete';
+        const detail=formatTurnEndReason(data.reason);
         throw Error('Native turn did not complete ('+detail+'); outcome unconfirmed.');
       }
       turnEndSeq=event.seq;
@@ -116,12 +139,13 @@ export class NativeRunner {
     const peers=activeRoster
       .map(m=>'@'+m.name+(m.group?' in @'+m.group:'')+(m.channels?.length?' ['+m.channels.map(c=>'#'+c).join(', ')+']':'')+(m.workspace?.cwd?' at '+m.workspace.cwd:'')).join(', ');
     const compactPeers=activeRoster.map(m=>'@'+m.name).join(', ');
+    const rosterChanged=Boolean(compactPeers&&member.lastPeers!==compactPeers);
     const resuming=Boolean(member.threadId);
     const promptLines=(resuming?[
-      'Resume Hive Swarm turn '+member.lastTurn+' as @'+member.name+' (teamId: '+team.id+').'+(compactPeers?' Active teammates: '+compactPeers+'.':''),
-      'All new board messages since your last turn are delivered directly below; do not call hive_swarm_read_board or hive_swarm_list_models unless you need older history or a model switch.',
-      'Finish by calling hive_swarm_set_turn_outcome for turn '+member.lastTurn+' with state ("done" or "waiting"), a concise message (start finished reports with [done] and cite prior posts with #seq), notify, and waitFor.',
-      'New board messages:\n'+formatInbox(member.inbox),
+      '[Hive turn '+member.lastTurn+' · @'+member.name+']'+
+        (rosterChanged?' Active teammates: '+compactPeers+'.':'')+
+        ' Finish with hive_swarm_set_turn_outcome(turn='+member.lastTurn+').',
+      formatInbox(member.inbox),
     ]:[
       'You are Hive Swarm member @'+member.name+' in team '+team.id+'.'+(peers?' Active teammates: '+peers+'.':''),
       'Goal: '+team.task,
@@ -180,22 +204,23 @@ export class NativeRunner {
     let admitted=false,inputRequired=false,finish;const entry={run,controller,done:new Promise(resolve=>{finish=resolve})};
     const cancellation=()=>{void this.cancelEntry(entry).catch(()=>{});};
     try {
+      const peersPatch=member.lastPeers!==compactPeers?{lastPeers:compactPeers}:{};
       if(startedSubagent) {
         signal?.throwIfAborted();
-        remember({pendingRun:{requestId:run.requestId,turn:run.turn,...(initialMessageId?{messageId:initialMessageId}:{})}});
+        remember({pendingRun:{requestId:run.requestId,turn:run.turn,...(initialMessageId?{messageId:initialMessageId}:{})},...peersPatch});
         this.active.set(sessionId,entry);signal?.addEventListener('abort',cancellation,{once:true});
         admitted=true;
       } else if(executionMode==='subagent'&&typeof this.native.prepareSubagentTurn==='function') {
         await this.native.prepareSubagentTurn(sessionId,{parentSessionId:team.parentSessionId,cwd:workspace,writable:member.writable===true,model:selected,effort},signal);
         signal?.throwIfAborted();
-        remember({pendingRun:{requestId:run.requestId,turn:run.turn}});
+        remember({pendingRun:{requestId:run.requestId,turn:run.turn},...peersPatch});
         this.active.set(sessionId,entry);signal?.addEventListener('abort',cancellation,{once:true});
         admitted=true;
         await this.native.promptSubagentTurn({sessionId,requestId:run.requestId,parentSessionId:team.parentSessionId,cwd:workspace,writable:member.writable===true,model:selected,effort,prompt:promptLines},signal);
       } else {
         await this.native.prepare(sessionId,{cwd:workspace,writable:member.writable===true,model:selected,effort},signal);
         signal?.throwIfAborted();
-        remember({pendingRun:{requestId:run.requestId,turn:run.turn}});
+        remember({pendingRun:{requestId:run.requestId,turn:run.turn},...peersPatch});
         this.active.set(sessionId,entry);signal?.addEventListener('abort',cancellation,{once:true});
         admitted=true;
         await this.native.prompt({sessionId,requestId:run.requestId,mode:'queue',content:[{type:'text',text:promptLines}]},signal);

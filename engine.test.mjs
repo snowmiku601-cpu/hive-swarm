@@ -1390,3 +1390,70 @@ test('Screenshot parsing and readSafeScreenshot strictly enforce roots, extensio
   assert.equal(engine.readSafeScreenshot(board,dataDir,'missing-team',seq,0),null);
   assert.equal(engine.readSafeScreenshot(board,dataDir,created.id,1,0),null);
 });
+
+test('2.1.2 silent wake:false posts, Goal-mode @lead coordination, and dismiss recovery for completed members',async t=>{
+  let builderRuns=0,leadRuns=0;
+  const board=new TeamBoard(':memory:',async ({member})=>{
+    if (member.name==='builder') {
+      builderRuns++;
+      return {state:'done',message:'@lead Report ready for review.',notify:['lead'],waitFor:[]};
+    }
+    if (member.name==='lead') {
+      leadRuns++;
+      return {state:'done',message:'[done] Lead handled.',notify:[],waitFor:[]};
+    }
+    return {state:'done',message:'[done] @lead ok',notify:['lead'],waitFor:[]};
+  });
+  t.after(()=>board.close());
+
+  // 1. Goal-mode @lead sets coordinatorMention without [stall] unaddressed noise, and silent post does not wake
+  const waitPromise=new Promise(resolve=>{
+    const created=board.create({cwd:process.cwd(),task:'Goal-mode lead + silent post',members:[
+      {name:'builder',brief:'Build and notify lead'},
+      {name:'qa',brief:'Wait',waitFor:['builder']},
+    ]});
+    // Wait until builder settles & qa runs, OR wait for board mentionsOnly
+    const sub=board.waitForBoard(created.id,{since:0,mentionsOnly:true,timeoutSec:5});
+    resolve({id:created.id,sub});
+  });
+  const {id,sub}=await waitPromise;
+  const waited=await sub;
+  const reportPost=waited.posts.find(p=>p.author==='builder');
+  assert.ok(reportPost,'@lead post must wake mentionsOnly waitForBoard');
+  assert.equal(reportPost.coordinatorMention,true);
+  assert.equal(builderRuns,1);
+  // Let qa finish cleanly too
+  for (let i=0;i<50&&board.get(id).members[1].status!=='done';i++) await delay(10);
+
+  // Silent FYI acceptance post mentioning @builder must NOT enqueue or wake builder, and must NOT cause [stall] unaddressed
+  const silentState=board.post(id,'@builder Docs ACCEPTED, cảm ơn, không cần mở turn mới.','main',{wake:false});
+  const silentPost=silentState.events.at(-1);
+  assert.equal(silentPost.silent,true);
+  assert.deepEqual(silentPost.targets,[]);
+  assert.equal(silentState.members[0].inbox.length,0);
+  assert.equal(silentState.members[0].status,'done');
+  assert.equal(builderRuns,1);
+  assert.equal(engine.stallIssues(silentState).some(i=>i.kind==='unaddressed'),false);
+
+  // Explicit worker named 'lead' still receives @lead directly without coordinatorMention
+  const teamWithLead=board.create({cwd:process.cwd(),task:'Explicit lead worker',members:[
+    {name:'lead',brief:'Act as lead worker',waitFor:['builder']},
+    {name:'builder',brief:'Notify explicit lead'},
+  ]});
+  for (let i=0;i<50&&leadRuns<1;i++) await delay(10);
+  const explicitPost=board.get(teamWithLead.id).events.find(e=>e.author==='builder');
+  assert.ok(explicitPost.targets.includes('lead'));
+  assert.equal(explicitPost.coordinatorMention,undefined);
+
+  // resolveRecovery(dismiss) restores completed member (completed > 0) to done and drops stale inFlight
+  const recTeam=board.get(id);
+  recTeam.members[0].status='failed';
+  recTeam.members[0].recoveryRequired=true;
+  recTeam.members[0].pendingRun={turn:99,requestId:'stale-turn'};
+  recTeam.members[0].inFlight=[{seq:999,author:'user',text:'stale inFlight'}];
+  board.save(recTeam);
+  const dismissed=board.resolveRecovery(id,'builder',{action:'dismiss'});
+  assert.equal(dismissed.members[0].status,'done');
+  assert.equal(dismissed.members[0].recoveryRequired,undefined);
+  assert.equal(dismissed.members[0].inbox.length,0);
+});

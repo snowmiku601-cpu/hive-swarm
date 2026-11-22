@@ -1351,6 +1351,11 @@
         dismiss.setAttribute('aria-label','Dismiss unconfirmed run for '+author(member.name));
         actions.append(retry,dismiss);
       }
+      if (member.status==='working') {
+        const cancel=trustedButton('Cancel turn',button=>memberAction(button,'cancel_turn',{member:member.name}),false,'link-button danger');
+        cancel.setAttribute('aria-label','Cancel turn for '+author(member.name));
+        actions.append(cancel);
+      }
       if (active) {
         const retire=node('div','retire-choice');
         const draw=()=>{
@@ -2082,7 +2087,7 @@
   async function call(tool,values={}) {
     if (!standalone) return unpack(await rpc('tools/call',{name:tool,arguments:{teamId,...values}}));
     const routes={board_status:'status',board_history:'history',post_message:'post',
-      pause_team:'pause',resume_team:'resume',set_member_model:'member-model',retire_member:'member-retire',
+      pause_team:'pause',resume_team:'resume',cancel_turn:'cancel-turn',set_member_model:'member-model',retire_member:'member-retire',
       remove_worktree:'worktree-remove',set_team_title:'title',resolve_recovery:'resolve-recovery'};
     const reading=tool==='board_status'||tool==='board_history';
     const query=tool==='board_history'?'?'+new URLSearchParams(values):'';

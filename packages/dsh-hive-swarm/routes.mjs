@@ -1,6 +1,6 @@
 const maximum=128*1024;
 export const ownerActions=new Set(['start_team','list_teams','list_models','board_status','board_history','read_board',
-  'open_swarm_panel','post_message','pause_team','resume_team','resolve_recovery','set_team_title','set_team_plan',
+  'open_swarm_panel','post_message','pause_team','resume_team','cancel_turn','resolve_recovery','set_team_title','set_team_plan',
   'manage_channel','add_member','retire_member','set_member_model','remove_worktree','read_journal','wait_for_board']);
 const object=value=>value&&typeof value==='object'&&!Array.isArray(value);
 function exact(value,keys) {

@@ -174,6 +174,7 @@ export function presentTeam(team,{activity={},actor,host=team.host??'codex'}={})
         ...(executionMode?{executionMode}:{}),
         ...(member.subagentName?{subagentName:member.subagentName}:{}),
         session:member.threadId?{host,id:member.threadId}:null,waitFor:member.waitFor,pendingWaitFor:pendingWaitFor(team,member),
+        ...(member.inbox?.length?{inboxCount:member.inbox.length}:{}),
         worktree:member.worktree,workspace:member.workspace,channels:member.channels,lastTurn:member.lastTurn,
         retireAfterTurn:member.retireAfterTurn,recoveryRequired:member.recoveryRequired===true,
         ...(member.fallbackModel?{fallbackModel:member.fallbackModel,...(member.fallbackEffort!==undefined?{fallbackEffort:member.fallbackEffort}:{})}:{}),
@@ -265,13 +266,14 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
         const result=await board.waitForBoard(id,args,context.signal);
         return {...result,status:view(result.status,actor?.member)};
       }
-      case 'post_message':return view(board.post(id,args.text,args.channel));
-      case 'post_to_board':if(!actor)throw Error('An active worker identity is required.');return board.postFrom(id,actor.member,args.text,args.channel);
+      case 'post_message':return view(board.post(id,args.text,args.channel,{wake:args.wake!==false}));
+      case 'post_to_board':if(!actor)throw Error('An active worker identity is required.');return board.postFrom(id,actor.member,args.text,args.channel,{wake:args.wake!==false});
       case 'set_turn_outcome':
         if(!actor||args.turn!==actor.turn)throw Error('The outcome must match the active worker turn.');
         return board.declareOutcome(id,actor.member,args);
       case 'pause_team':return view(board.pause(id));
       case 'resume_team':return view(board.resume(id,args.extraTurns));
+      case 'cancel_turn':return view(await board.cancelTurn(id,args.member,{clearInbox:args.clearInbox===true}));
       case 'resolve_recovery':return view(board.resolveRecovery(id,args.member,{action:args.action}));
       case 'retire_member':return view(board.retireMember(id,args.member,{actor:actor?.member}));
       case 'set_team_title':return view(board.setTeamTitle(id,args.title,actor?.member));

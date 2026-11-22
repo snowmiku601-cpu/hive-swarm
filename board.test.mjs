@@ -945,3 +945,27 @@ test('board header renders version badge and update reminder pill below it with 
   assert.equal(view.element('update-wrap').hidden,true);
   assert.equal(localStore.getItem('hive-swarm-dismissed-update'),'2.2.0');
 });
+
+test('standalone Members overflow shows Cancel turn only for working workers and posts cancel-turn',async()=>{
+  const state={
+    id:'team',title:'Cancel Check',cwd:'fixture',phase:'working',turns:2,turnLimit:8,
+    members:[{name:'builder',status:'working'},{name:'qa',status:'done'}],
+    events:[],
+  };
+  const posts=[];
+  const view=await boardView(state,{
+    request:(url,options)=>{
+      if (url.endsWith('/cancel-turn')) {
+        posts.push([url,JSON.parse(options.body)]);
+        return {...state,phase:'stalled',members:[{name:'builder',status:'failed'},{name:'qa',status:'done'}]};
+      }
+    },
+  });
+  view.element('tab-members').onclick();
+  const workingBtns=childrenOf(view.element('working-list')).filter(n=>n.tagName==='button'&&n.textContent==='Cancel turn');
+  const restBtns=childrenOf(view.element('member-list')).filter(n=>n.tagName==='button'&&n.textContent==='Cancel turn');
+  assert.equal(workingBtns.length,1);
+  assert.equal(restBtns.length,0);
+  await workingBtns[0].onclick({isTrusted:true});
+  assert.deepEqual(posts,[['/board/team/cancel-turn',{member:'builder'}]]);
+});

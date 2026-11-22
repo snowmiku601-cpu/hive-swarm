@@ -391,3 +391,43 @@ test('parseSemver, isNewerVersion, and createUpdateChecker compare tags, cache r
   checker.dispose();
   offlineChecker.dispose();
 });
+
+test('2.1.2 cancel_turn is owner-only, exposes inboxCount while working, and post_message supports wake:false',async t=>{
+  let releaseWorker,workerSignal;
+  const dir=mkdtempSync(join(tmpdir(),'hive-core-212-'));
+  const app=createSwarmApplication({
+    dataDirectory:dir,host:'deepseek-harness',
+    runner:{
+      listModels:async()=>[{id:'fixture/model',label:'Fixture',efforts:['low'],defaultEffort:'low'}],
+      run:({signal})=>{
+        workerSignal=signal;
+        return new Promise((_res,rej)=>{releaseWorker=()=>rej(Error('aborted'));signal.addEventListener('abort',releaseWorker,{once:true});});
+      },
+    },
+    workspaceAllowed:async()=>true,
+  });
+  t.after(async()=>{await app.close();rmSync(dir,{recursive:true,force:true});});
+
+  const created=await app.command('start_team',{cwd:process.cwd(),task:'Cancel & silent test',members:[{name:'builder',brief:'Work'}]});
+  await delay(10);
+  assert.equal(Object.hasOwn(created.members[0],'inboxCount'),false);
+
+  const afterQueued=await app.command('post_message',{teamId:created.id,text:'@builder Queued msg'});
+  assert.equal(afterQueued.members[0].inboxCount,1);
+
+  await assert.rejects(
+    app.command('cancel_turn',{teamId:created.id,member:'builder'},{actor:{teamId:created.id,member:'builder',turn:1}}),
+    /not available|running turn/i,
+  );
+
+  const cancelled=await app.command('cancel_turn',{teamId:created.id,member:'builder',clearInbox:true});
+  assert.equal(workerSignal.aborted,true);
+  assert.equal(cancelled.members[0].status,'failed');
+  assert.equal(Object.hasOwn(cancelled.members[0],'inboxCount'),false);
+
+  // Silent post_message (wake:false) never re-queues or sets inboxCount
+  const afterSilent=await app.command('post_message',{teamId:created.id,text:'@builder FYI only',wake:false});
+  assert.equal(afterSilent.events.at(-1).silent,true);
+  assert.equal(Object.hasOwn(afterSilent.members[0],'inboxCount'),false);
+  assert.equal(afterSilent.members[0].status,'failed');
+});

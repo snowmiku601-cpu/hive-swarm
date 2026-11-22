@@ -2,12 +2,12 @@
 
 Native worker sessions and a bee-marked **Swarm** Start card, right tab, and full panel for **DSH 0.2.2-rc.5**. The package pins the matching `hive-swarm` core. React and native SDK services are supplied by the Host.
 
-This is the **experimental `2.1.1` release** for DSH `0.2.2-rc.5` (lean Turn 2+ delta resume prompts, Antigravity-style Overview, uncluttered Board & clickable Members rows, Dual-Mode `Hive`/`Mentions` Graph with Goal-mode coordinator consolidation and zero-dependency **Export GIF**, dashboard version badge with cached npm update alerts, confined `Screenshot:` timeline + lightbox, `goalLine`/`taskLabel` plan schema, B1–B7 bug fixes, native hidden child subagents via `ctx.subagents.startActivation` + `ctx.agents.resume`, and synchronous fail-closed sandbox & tool-restriction locks). The core/build/native test suite passes on Windows, macOS, and Linux; live DSH Desktop qualification is Windows-specific.
+This is the **experimental `2.1.2` release** for DSH `0.2.2-rc.5` (native-compact Turn 2+ wake prompts, structured turn-end error reporting, silent `wake: false` posts, owner-only `cancel_turn` + Members overflow action, completed-member `Dismiss` recovery, Goal-mode `@lead` routing, Antigravity-style Overview, uncluttered Board & clickable Members rows, Dual-Mode `Hive`/`Mentions` Graph with zero-dependency **Export GIF**, dashboard version badge with cached npm update alerts, confined `Screenshot:` timeline + lightbox, `goalLine`/`taskLabel` plan schema, B1–B7 bug fixes, native hidden child subagents via `ctx.subagents.startActivation` + `ctx.agents.resume`, and synchronous fail-closed sandbox & tool-restriction locks). The core/build/native test suite passes on Windows, macOS, and Linux; live DSH Desktop qualification is Windows-specific.
 
 Close Desktop and let DSH manage its profile:
 
 ```sh
-dsh plugin --profile desktop add dsh-hive-swarm@2.1.1
+dsh plugin --profile desktop add dsh-hive-swarm@2.1.2
 ```
 
 Use the native `/hive-swarm` skill for requested teams (pass `fork: "coordinator"` when a worker should inherit the active parent chat). Opening Swarm or reading a Journal does not start a model. Select an exact team in its workspace; the four views are **Overview** (task summary accordion with `goalLine`/`taskLabel`/bee pills, outcome `threads` progress bars, confined `Screenshots` strip + lightbox, `Needs you` alerts, Coordinator honeycomb tile), **Board** (safe Markdown, `#seq` jumps, channels, deduplicated Author filter, live activity), **Members** (`Subagent`/`Session` badges, model controls, recovery, worktree cleanup, `SubagentAddress` **Open session** with **Journal** fallback), and **Graph** (**`Hive`** honeycomb clusters + **`Mentions`** capsule ring + **Export GIF** replay). Worker Journals render host-verified `✓ Verified route:` pills, and native tool results can open their Host-verified team directly.

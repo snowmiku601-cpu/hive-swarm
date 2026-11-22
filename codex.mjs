@@ -167,7 +167,7 @@ function reportText(text) {
   const value=text.trim();
   const structured=/[{,]\s*"(?:state|message|notify|waitFor)"\s*:/.test(value);
   const report=findOutcome(value)?.message ?? (structured ? extractReportMessage(value) : value);
-  if (!report || /You are member @[a-z0-9_-]+ in (?:Team Board|Hive Swarm)\b|Resume Hive Swarm turn \d+ as @[a-z0-9_-]+/i.test(report)) return '';
+  if (!report || /You are member @[a-z0-9_-]+ in (?:Team Board|Hive Swarm)\b|Resume Hive Swarm turn \d+ as @[a-z0-9_-]+|\[Hive turn \d+ · @[a-z0-9_-]+\]/i.test(report)) return '';
   return report.trim().slice(0,6000);
 }
 
@@ -586,12 +586,12 @@ export class CodexRunner {
   async runTurn(id,{team,member,remember,declaredOutcome,onActivity,model,effort,cwd,inheriting,resuming=false}) {
     const activeRoster = team.members.filter(m => m.name !== member.name && m.status !== 'retired');
     const compactPeers = activeRoster.map(m => '@' + m.name).join(', ');
+    const rosterChanged = Boolean(compactPeers && member.lastPeers !== compactPeers);
     const brief = (resuming ? [
-      'Resume Hive Swarm turn ' + member.lastTurn + ' as @' + member.name + '.' +
-        (compactPeers ? ' Active members: ' + compactPeers + '.' : ''),
-      'All new board messages since your last turn are delivered directly below; do not call read_board or list_models unless you need older history or a model switch.',
-      'End with the required JSON (or hive_swarm_peer.set_turn_outcome for board turn ' + member.lastTurn + '). Start finished reports with [done] and cite earlier posts by #seq.',
-      'New board messages:\n' + formatInbox(member.inbox),
+      '[Hive turn ' + member.lastTurn + ' · @' + member.name + ']' +
+        (rosterChanged ? ' Active members: ' + compactPeers + '.' : '') +
+        ' End with working-status JSON (or set_turn_outcome turn=' + member.lastTurn + ').',
+      formatInbox(member.inbox),
     ] : [
       'You are member @' + member.name + ' in Hive Swarm. Other members: ' +
         activeRoster.map(m => '@' + m.name + (m.group ? ' in @' + m.group : '') +
@@ -635,9 +635,10 @@ export class CodexRunner {
       turn.id = accepted.turn.id;
       for (const event of turn.earlyEvents) deliverTurnEvent(turn, event);
       turn.earlyEvents.length = 0;
-      if (model || effort) remember({
+      if (model || effort || member.lastPeers !== compactPeers) remember?.({
         ...(model ? {activeModel: model} : {}),
         ...(effort ? {activeEffort: effort} : {}),
+        ...(member.lastPeers !== compactPeers ? {lastPeers: compactPeers} : {}),
       });
       const result = await completed;
       if (result.status !== 'completed') throw turnError(result);

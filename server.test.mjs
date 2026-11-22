@@ -855,3 +855,47 @@ test('GET /swarm/update enforces same-origin and open_board surfaces update info
   const openPayload=await invoke('open_board',{teamId:team.id});
   assert.deepEqual(openPayload.update,mockUpdate);
 });
+
+test('2.1.2 Codex server exposes cancel_turn (owner-only + HTTP POST), wake:false on post_message, and inboxCount',async t=>{
+  const scratch=realpathSync(tmpdir());
+  const dataDirectory=mkdtempSync(join(scratch,'hive-srv-212-'));
+  let releaseRun,capturedSignal;
+  const server=await service({
+    dataDirectory,listenPort:0,
+    runner:{
+      listModels:async()=>models,
+      run:({signal})=>{
+        capturedSignal=signal;
+        return new Promise((_resolve,reject)=>{
+          releaseRun=reject;
+          signal.addEventListener('abort',()=>reject(Error('aborted')),{once:true});
+        });
+      },
+      close(){},
+    },
+  });
+  t.after(async()=>{await server.close();rmSync(dataDirectory,{recursive:true,force:true});});
+
+  const key=readFileSync(join(dataDirectory,'service.key'),'utf8');
+  const invoke=async (name,args={})=>{
+    const response=await fetch(server.origin+'/tool',{method:'POST',headers:{authorization:'Bearer '+key,'content-type':'application/json'},
+      body:JSON.stringify({name,arguments:args})});
+    const body=await response.json();
+    if (!response.ok) throw Error(body.error);
+    return body;
+  };
+  const started=await invoke('start_team',{cwd:process.cwd(),task:'Codex cancel & silent',members});
+  for (let i=0;i<50&&!capturedSignal;i++) await delay(10);
+
+  const withInbox=await invoke('post_message',{teamId:started.id,text:'@builder Queue item'});
+  assert.equal(withInbox.members[0].inboxCount,1);
+
+  const cancelled=await invoke('cancel_turn',{teamId:started.id,member:'builder',clearInbox:true});
+  assert.equal(capturedSignal.aborted,true);
+  assert.equal(cancelled.members[0].status,'failed');
+  assert.equal(cancelled.members[0].inboxCount,undefined);
+
+  const afterSilent=await invoke('post_message',{teamId:started.id,text:'@builder FYI acceptance',wake:false});
+  assert.equal(afterSilent.events.at(-1).silent,true);
+  assert.equal(afterSilent.members[0].status,'failed');
+});

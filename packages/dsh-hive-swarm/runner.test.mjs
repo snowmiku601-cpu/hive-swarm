@@ -325,7 +325,7 @@ test('runner falls back to create/forkParent with clean title when subagent is u
   assert.equal(blockedMember.recoveryRequired,undefined);
 });
 
-test('Turn 1 sends full onboarding prompt while Turn 2+ sends lean delta resume prompt and plain-text inbox',async t=>{
+test('Turn 1 sends full onboarding prompt while Turn 2+ sends native-compact wake prompt and omits unchanged roster',async t=>{
   const {NativeRunner}=await import('./runner.mjs');
   const {RunStore}=await import('../../run-store.mjs');
   const store=new RunStore();t.after(()=>store.close());
@@ -358,9 +358,10 @@ test('Turn 1 sends full onboarding prompt while Turn 2+ sends lean delta resume 
   assert.match(prompts[0],/Your assignment: Own Delta Resume Prompt only\./);
   assert.match(prompts[0],/#12 @qa #implementation \(addressed to you\):\nFix edge #12 cleanly/);
   assert.doesNotMatch(prompts[0],/"addressed":true/);
+  assert.equal(member.lastPeers,'@qa');
   a1.abort();await assert.rejects(r1);
 
-  // Simulate Turn 2 on saved session
+  // Turn 2 on saved session with unchanged roster: omit Active teammates and repeated boilerplate
   member.threadId='sess-delta';
   member.pendingRun=undefined;
   member.lastTurn=2;
@@ -369,11 +370,48 @@ test('Turn 1 sends full onboarding prompt while Turn 2+ sends lean delta resume 
   const a2=new AbortController();
   const r2=runner.run({team,member,remember:p=>Object.assign(member,p),signal:a2.signal});
   await until(()=>prompts.length===2&&releaseWait);
-  assert.match(prompts[1],/^Resume Hive Swarm turn 2 as @builder \(teamId: team-delta\)\./);
-  assert.match(prompts[1],/Active teammates: @qa\./);
-  assert.match(prompts[1],/do not call hive_swarm_read_board or hive_swarm_list_models/i);
-  assert.match(prompts[1],/#15 @qa \(addressed to you\):\nRetest #14/);
-  assert.doesNotMatch(prompts[1],/Goal:/);
-  assert.doesNotMatch(prompts[1],/Your assignment:/);
+  assert.match(prompts[1],/^\[Hive turn 2 · @builder\] Finish with hive_swarm_set_turn_outcome\(turn=2\)\.\n\n#15 @qa \(addressed to you\):\nRetest #14$/);
+  assert.doesNotMatch(prompts[1],/Active teammates:/);
+  assert.doesNotMatch(prompts[1],/do not call/i);
+  assert.doesNotMatch(prompts[1],/Goal:|Your assignment:/);
   a2.abort();await assert.rejects(r2);
+
+  // Turn 3 after roster changes: include Active teammates once and update lastPeers
+  team.members.push({name:'verifier',status:'waiting',channels:[]});
+  member.pendingRun=undefined;
+  member.lastTurn=3;
+  member.inbox=[{seq:18,author:'user',channel:'main',addressed:true,text:'Check verifier note'}];
+  releaseWait=undefined;
+  const a3=new AbortController();
+  const r3=runner.run({team,member,remember:p=>Object.assign(member,p),signal:a3.signal});
+  await until(()=>prompts.length===3&&releaseWait);
+  assert.match(prompts[2],/^\[Hive turn 3 · @builder\] Active teammates: @qa, @verifier\. Finish with hive_swarm_set_turn_outcome\(turn=3\)\./);
+  assert.equal(member.lastPeers,'@qa, @verifier');
+  a3.abort();await assert.rejects(r3);
+});
+
+test('correlateRun formats nested turn/end error and abort objects without [object Object]',async()=>{
+  const {correlateRun,formatTurnEndReason}=await import('./runner.mjs');
+  const base=[
+    {seq:1,type:'agent/inbox/spliced',data:{target:'next-turn',start:0,inserted:[{source:{kind:'user',rpcId:'req-obj'}}]}},
+    {seq:2,type:'turn/start',data:{turn:1}},
+    {seq:3,type:'agent/inbox/spliced',data:{target:'next-turn',start:0,removedCount:1,inserted:[]}},
+  ];
+  assert.throws(
+    ()=>correlateRun({requestId:'req-obj'},[...base,{seq:4,type:'turn/end',data:{turn:1,reason:{kind:'error',error:{message:'Connection error.',code:'TRANSPORT'}}}}]),
+    err=>{assert.doesNotMatch(err.message,/\[object Object\]/);assert.match(err.message,/TRANSPORT: Connection error\./);return true;},
+  );
+  assert.throws(
+    ()=>correlateRun({requestId:'req-obj'},[...base,{seq:4,type:'turn/end',data:{turn:1,reason:{kind:'error',error:{message:'Tool call "write": Unterminated string in JSON',code:'MALFORMED_RESPONSE'}}}}]),
+    /MALFORMED_RESPONSE: Tool call "write": Unterminated string in JSON/,
+  );
+  assert.throws(
+    ()=>correlateRun({requestId:'req-obj'},[...base,{seq:4,type:'turn/end',data:{turn:1,reason:{kind:'aborted',reason:{kind:'disposed'}}}}]),
+    /aborted: disposed/,
+  );
+  assert.throws(
+    ()=>correlateRun({requestId:'req-obj'},[...base,{seq:4,type:'turn/end',data:{turn:1,reason:{kind:'error',error:{message:'Rate limit 429',code:'RATE_LIMITED'}}}}]),
+    /RATE_LIMITED: Rate limit 429/,
+  );
+  assert.equal(formatTurnEndReason(null),'incomplete');
 });

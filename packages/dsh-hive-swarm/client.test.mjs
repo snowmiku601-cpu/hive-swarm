@@ -1121,3 +1121,38 @@ test('DSH SwarmView renders version badge and update reminder pill below it with
   }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
   function eArgs(){return entry.options.inject('parent-update');}
 });
+
+test('DSH Members overflow menu exposes Cancel turn only for working members and dispatches cancel_turn without row nav',async()=>{
+  const {client,React,renderer}=await loadClient();
+  const calls=[],sessions=[];
+  const tState={
+    ...team(),
+    members:[
+      {name:'alpha',status:'working',brief:'Running',writable:true,threadId:'t-alpha',executionMode:'subagent',model:'p/m'},
+      {name:'beta',status:'done',brief:'Finished',writable:false,threadId:'t-beta',executionMode:'subagent',model:'p/m'},
+    ],
+  };
+  const f=fakeContext({
+    snapshot:({teamId})=>({teams:[tState],team:teamId?tState:null}),
+    command:async({action,args})=>{calls.push({action,args});return tState;},
+    openSession:id=>sessions.push(id),
+  });
+  client.apply(f.ctx);
+  const entry=f.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let view;
+  try{
+    await renderer.act(async()=>{view=renderer.create(React.createElement(entry.component,entry.options.inject('p-cancel')));await tick();});
+    await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
+    await renderer.act(async()=>{view.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Members')).props.onClick();await tick();});
+
+    const cancelAlpha=view.root.findAllByProps({'aria-label':'Cancel turn for @alpha'});
+    assert.equal(cancelAlpha.length,1);
+    assert.equal(view.root.findAllByProps({'aria-label':'Cancel turn for @beta'}).length,0);
+
+    await renderer.act(async()=>{
+      cancelAlpha[0].props.onClick({stopPropagation(){},currentTarget:null});
+      await tick();
+    });
+    assert.deepEqual(JSON.parse(JSON.stringify(calls)),[{action:'cancel_turn',args:{teamId:'one',member:'alpha'}}]);
+    assert.equal(sessions.length,0,'Clicking Cancel turn must not navigate to member session');
+  }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
+});
