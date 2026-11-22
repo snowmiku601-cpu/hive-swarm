@@ -499,3 +499,300 @@ test('Goal mode (no dedicated coordinator) merges user posts/targets into coordi
   assert.equal(dedicatedProj.nodes.some(n => n.name === 'user'), true);
   assert.equal(dedicatedProj.links.find(l => l.from === 'user' && l.to === 'builder').count, 1);
 });
+
+test('projectHive 3-tier grouping (threads, group/channels, status fallback), rich metrics, mid-replay Waiting on, and intra-hex messages', () => {
+  const { projectHive } = globalThis.HiveGraph;
+  const members = [
+    { name: 'coordinator', role: 'coordinator', status: 'waiting' },
+    { name: 'core-1', group: 'core', status: 'done' },
+    { name: 'core-2', group: 'core', status: 'done' },
+    { name: 'ui-dev', status: 'working', waitFor: ['core-1'] },
+    { name: 'auditor', status: 'failed', recoveryRequired: true },
+    { name: 'helper-a', status: 'done' },
+    { name: 'helper-b', status: 'waiting', waitFor: ['ui-dev'] },
+  ];
+  const threads = [
+    { id: 'core-eng', title: 'Core Engine, Bug Fixes & Worktrees', goal: 'Ship core', members: ['core'] },
+    { id: 'dash-ui', title: 'Antigravity Dashboard UI', goal: 'Update UI', members: ['ui-dev', 'core-1'] },
+    { id: 'audit-qa', title: 'Audit, Verification & Coverage', goal: 'Audit', members: ['auditor'] },
+    { id: 'empty-dup', title: 'Empty after dedup', goal: 'Should drop', members: ['core-1'] },
+  ];
+  const posts = [
+    { seq: 1, kind: 'brief', author: 'coordinator', targets: ['core-1', 'core-2'], text: 'Start core' },
+    { seq: 2, kind: 'message', author: 'core-1', targets: ['core-2'], text: 'Sharing core interface' },
+    { seq: 3, kind: 'message', author: 'core-1', targets: ['coordinator'], text: '[done] Core 1 done' },
+    { seq: 4, kind: 'message', author: 'core-2', targets: ['coordinator'], text: '[done] Core 2 done' },
+    { seq: 5, kind: 'message', author: 'ui-dev', targets: ['coordinator'], text: 'Building UI' },
+  ];
+
+  // Tier 1 at head: exclusive 1 bee = 1 hex (core-1 stays in core-eng), unassigned go to Other
+  const headModel = projectHive(posts, members, null, { threads });
+  assert.deepEqual(headModel.clusters.map(c => c.id), ['core-eng', 'dash-ui', 'audit-qa', 'other']);
+  const coreCluster = headModel.clusters[0];
+  assert.equal(coreCluster.mode, 'group');
+  assert.equal(coreCluster.fullTitle, 'Core Engine, Bug Fixes & Worktrees');
+  assert.equal(coreCluster.goal, 'Ship core');
+  assert.equal(coreCluster.count, 2);
+  assert.equal(coreCluster.totalCount, 2);
+  assert.equal(coreCluster.doneCount, 2);
+  assert.equal(coreCluster.workingCount, 0);
+  assert.equal(coreCluster.needsCount, 0);
+  assert.equal(coreCluster.subtitle, '2/2');
+  assert.equal(coreCluster.tone, 'done');
+
+  const dashCluster = headModel.clusters[1];
+  assert.equal(dashCluster.members.length, 1);
+  assert.equal(dashCluster.subtitle, '0/1');
+  assert.equal(dashCluster.tone, 'working');
+
+  const auditCluster = headModel.clusters[2];
+  assert.equal(auditCluster.needsCount, 1);
+  assert.equal(auditCluster.tone, 'needs');
+  assert.equal(auditCluster.subtitle, '0/1');
+
+  const otherCluster = headModel.clusters[3];
+  assert.equal(otherCluster.id, 'other');
+  assert.equal(otherCluster.label, 'Other');
+  assert.equal(otherCluster.fullTitle, 'Other');
+  assert.equal(otherCluster.goal, '');
+  assert.equal(otherCluster.subtitle, '1/2');
+  assert.equal(otherCluster.tone, 'waiting');
+
+  assert.equal(headModel.coordinator.subtitle, '3 of 6 done');
+  assert.ok(headModel.connectors.some(c => c.from === 'core-eng' && c.to === 'coordinator' && c.kind === 'done' && c.label === 'Tasks done'));
+  assert.ok(!headModel.connectors.some(c => c.from === 'dash-ui' && c.kind === 'done'));
+
+  // Mid-replay at seq=2 (!atHead): core-1 hasn't posted [done] yet -> ui-dev waits on core-1, AND core-1->core-2 intra-hex message emits!
+  const mid2 = projectHive(posts, members, 2, { threads });
+  assert.ok(mid2.connectors.some(c => c.kind === 'message' && c.from === 'core-eng' && c.to === 'core-eng'),
+    'intra-hex message emits self-loop connector');
+  assert.ok(mid2.connectors.some(c => c.kind === 'waiting' && c.from === 'dash-ui' && c.to === 'core-eng'),
+    'mid-replay Waiting on connector emitted while core-1 has not posted [done]');
+  assert.ok(mid2.connectors.some(c => c.kind === 'waiting' && c.from === 'other' && c.to === 'dash-ui'),
+    'helper-b waiting on ui-dev emits Waiting on connector mid-replay');
+
+  // Mid-replay at seq=3 (!atHead): core-1 HAS posted [done] -> ui-dev no longer waits on core-1, while helper-b still waits on ui-dev
+  const mid3 = projectHive(posts, members, 3, { threads });
+  assert.ok(!mid3.connectors.some(c => c.kind === 'waiting' && c.from === 'dash-ui' && c.to === 'core-eng'),
+    'Waiting on clears mid-replay once dependency posts [done]');
+  assert.ok(mid3.connectors.some(c => c.kind === 'waiting' && c.from === 'other' && c.to === 'dash-ui'));
+
+  // Tier 2 (no threads, uses member.group and non-main member.channels with topic lookup + Title-Case fallback)
+  const tier2Members = [
+    { name: 'coordinator', role: 'coordinator', status: 'waiting' },
+    { name: 's1', group: 'api-core', status: 'done', channels: ['main'] },
+    { name: 's2', status: 'working', channels: ['main', 'dash-ui'] },
+    { name: 's3', status: 'done', channels: ['main'] },
+  ];
+  const channels = [{ name: 'main', archived: false }, { name: 'dash-ui', archived: false, topic: 'Dashboard & Replay' }];
+  const tier2 = projectHive([], tier2Members, 0, { channels });
+  assert.equal(tier2.clusters.length, 3);
+  assert.equal(tier2.clusters[0].label, 'Api Core');
+  assert.equal(tier2.clusters[0].subtitle, '1/1');
+  assert.equal(tier2.clusters[0].tone, 'done');
+  assert.equal(tier2.clusters[1].label, 'Dashboard & Replay');
+  assert.equal(tier2.clusters[1].tone, 'working');
+  assert.equal(tier2.clusters[2].id, 'other');
+  assert.equal(tier2.clusters[2].subtitle, '1/1');
+
+  // Tier 3 (only main channel, no group, no threads -> status buckets)
+  const tier3 = projectHive([], [
+    { name: 'coordinator', role: 'coordinator', status: 'waiting' },
+    { name: 'w1', channels: ['main'], status: 'working' },
+  ], 0, { channels });
+  assert.equal(tier3.clusters[0].mode, 'status');
+  assert.equal(tier3.clusters[0].id, 'working');
+  assert.equal(tier3.clusters[0].subtitle, '1');
+});
+
+test('wrapHexTitle, Ring-2 layoutHive, hiveMinimumHeight, and zero title/subtitle/bee overlap', () => {
+  const { wrapHexTitle, projectHive, layoutHive, hiveMinimumHeight } = globalThis.HiveGraph;
+  assert.equal(typeof wrapHexTitle, 'function');
+
+  const short = wrapHexTitle('Other', 14, 2);
+  assert.deepEqual(short, { lines: ['Other'], truncated: false });
+
+  const twoLine = wrapHexTitle('Core Engine, Bug Fixes & Worktrees', 15, 2);
+  assert.equal(twoLine.lines.length, 2);
+  assert.equal(twoLine.truncated, true);
+  assert.equal(twoLine.lines[0], 'Core Engine,');
+  assert.ok(twoLine.lines[1].endsWith('...'));
+  assert.ok(twoLine.lines.every(line => line.length <= 15));
+
+  // Ring-2 layout up to 9 and 12 clusters (zero overlaps, inside stage, zero label/bee collision)
+  for (const clusterTotal of [7, 8, 9, 12, 16]) {
+    for (const width of [380, 680, 920]) {
+      const threads = Array.from({ length: clusterTotal - 1 }, (_, i) => ({
+        id: 't-' + i,
+        title: `Specialized Workgroup ${i + 1} With Long Outcome Title`,
+        goal: 'Goal ' + i,
+        members: ['w-' + i],
+      }));
+      const members = [
+        { name: 'coordinator', role: 'coordinator', status: 'done' },
+        ...Array.from({ length: clusterTotal - 1 }, (_, i) => ({ name: 'w-' + i, status: i % 3 === 0 ? 'done' : 'working' })),
+        { name: 'extra-other', status: 'done' },
+      ];
+      const model = projectHive([], members, 0, { threads });
+      assert.equal(model.clusters.length, clusterTotal);
+      const minH = hiveMinimumHeight(clusterTotal, width);
+      assert.ok(minH > 490, `hiveMinimumHeight grows for ${clusterTotal} clusters at width=${width}: ${minH}`);
+      const lay = layoutHive(model, width, minH);
+      const cells = [lay.coordinator, ...lay.clusters];
+      const minCenterDist = Math.sqrt(3) * lay.radius * 0.99;
+      for (let i = 0; i < cells.length; i++) {
+        const c = cells[i];
+        assert.ok(Array.isArray(c.titleLines) && c.titleLines.length >= 1 && c.titleLines.length <= 2);
+        assert.ok(Number.isFinite(c.titleY) && Number.isFinite(c.subtitleY));
+        assert.ok(c.beeBox && Number.isFinite(c.beeBox.top) && Number.isFinite(c.beeBox.bottom));
+        for (const v of c.vertices) {
+          assert.ok(v.x >= 0 && v.x <= width && v.y >= 0 && v.y <= minH,
+            `vertex inside stage for clusterTotal=${clusterTotal}, w=${width}: (${v.x}, ${v.y})`);
+        }
+        for (let j = i + 1; j < cells.length; j++) {
+          const d = Math.hypot(cells[i].x - cells[j].x, cells[i].y - cells[j].y);
+          assert.ok(d >= minCenterDist, `cells ${cells[i].id} & ${cells[j].id} do not overlap (${d} < ${minCenterDist})`);
+        }
+      }
+      for (const cl of lay.clusters) {
+        const lastTitleY = cl.titleY + (cl.titleLines.length - 1) * cl.titleLineHeight;
+        assert.ok(cl.subtitleY > lastTitleY + 6, 'subtitle sits cleanly below wrapped title');
+        for (const slot of cl.slots) {
+          const beeTop = slot.y - 12 * slot.beeScale;
+          assert.ok(beeTop >= cl.subtitleY + 5,
+            `bee sprite top (${beeTop}) clears subtitle (${cl.subtitleY}) at clusterTotal=${clusterTotal}, w=${width}`);
+        }
+      }
+    }
+  }
+});
+
+test('routeHiveConnector, hexRayExit, themePalette, and toneStyle produce curved outer chords, self-loops, and canonical colors', () => {
+  const { projectHive, layoutHive, hiveMinimumHeight, routeHiveConnector, hexRayExit, themePalette, toneStyle } = globalThis.HiveGraph;
+  assert.equal(typeof routeHiveConnector, 'function');
+  assert.equal(typeof hexRayExit, 'function');
+  assert.equal(typeof themePalette, 'function');
+  assert.equal(typeof toneStyle, 'function');
+
+  // Canonical palette check (light & dark): green done, blue working, amber waiting, red needs, purple pulse
+  for (const theme of ['light', 'dark']) {
+    const pal = themePalette(theme);
+    const done = toneStyle('done', pal);
+    const working = toneStyle('working', pal);
+    const waiting = toneStyle('waiting', pal);
+    const needs = toneStyle('needs', pal);
+    assert.notEqual(working.stroke, waiting.stroke);
+    assert.notEqual(working.stroke, needs.stroke);
+    assert.notEqual(waiting.stroke, needs.stroke);
+    assert.notEqual(done.stroke, working.stroke);
+    assert.match(pal.pulse, /^#/);
+  }
+
+  // 4-cluster layout around center Coordinator: diagonal outer-to-outer chord MUST curve around Coordinator
+  const threads = [
+    { id: 'nw', title: 'North West', members: ['a'] },
+    { id: 'ne', title: 'North East', members: ['b'] },
+    { id: 'sw', title: 'South West', members: ['c'] },
+    { id: 'se', title: 'South East', members: ['d'] },
+  ];
+  const members = [
+    { name: 'coordinator', role: 'coordinator', status: 'done' },
+    { name: 'a', status: 'done' },
+    { name: 'b', status: 'done' },
+    { name: 'c', status: 'waiting', waitFor: ['b'] },
+    { name: 'd', status: 'done' },
+  ];
+  const posts = [
+    { seq: 1, kind: 'message', author: 'a', targets: ['d'], text: '@d coordinate' },
+  ];
+  const model = projectHive(posts, members, 1, { threads });
+  const lay = layoutHive(model, 680, 490);
+  const coord = lay.coordinator;
+
+  // Outer diagonal chord (nw -> se) curves via Q and avoids Coordinator hex
+  const diagRoute = routeHiveConnector({ from: 'nw', to: 'se', kind: 'message' }, lay);
+  assert.equal(diagRoute.isSelfLoop, false);
+  assert.match(diagRoute.path, /^M[\d.-]+ [\d.-]+ Q[\d.-]+ [\d.-]+ [\d.-]+ [\d.-]+$/);
+  assert.ok(diagRoute.arrow && Number.isFinite(diagRoute.arrow.angle));
+  const qMatch = /^M([\d.-]+) ([\d.-]+) Q([\d.-]+) ([\d.-]+) ([\d.-]+) ([\d.-]+)$/.exec(diagRoute.path);
+  const p0 = { x: Number(qMatch[1]), y: Number(qMatch[2]) };
+  const ctrl = { x: Number(qMatch[3]), y: Number(qMatch[4]) };
+  const p1 = { x: Number(qMatch[5]), y: Number(qMatch[6]) };
+  for (let i = 0; i <= 16; i++) {
+    const t = i / 16, u = 1 - t;
+    const x = u * u * p0.x + 2 * u * t * ctrl.x + t * t * p1.x;
+    const y = u * u * p0.y + 2 * u * t * ctrl.y + t * t * p1.y;
+    const dCoord = Math.hypot(x - coord.x, y - coord.y);
+    assert.ok(dCoord > coord.radius * 0.88, `curved chord point stays outside coordinator (${dCoord} vs ${coord.radius * 0.88})`);
+  }
+
+  // Center <-> outer straight routing
+  const centerRoute = routeHiveConnector({ from: 'nw', to: 'coordinator', kind: 'done' }, lay);
+  assert.equal(centerRoute.isSelfLoop, false);
+  assert.match(centerRoute.path, /^M[\d.-]+ [\d.-]+ L[\d.-]+ [\d.-]+$/);
+
+  // Self-loop routing
+  const selfRoute = routeHiveConnector({ from: 'nw', to: 'nw', kind: 'message' }, lay);
+  assert.equal(selfRoute.isSelfLoop, true);
+  assert.ok(selfRoute.path.startsWith('M') && selfRoute.arrow && Number.isFinite(selfRoute.arrow.angle));
+  assert.ok(Math.hypot(selfRoute.mid.x - lay.cellsById.get('nw').x, selfRoute.mid.y - lay.cellsById.get('nw').y) > lay.radius * 0.85);
+
+  // Ring-2 hex behind a Ring-1 hex connecting to Coordinator curves around the Ring-1 blocker
+  const ring2Threads = Array.from({ length: 12 }, (_, i) => ({
+    id: 'g-' + i,
+    title: 'Group ' + i,
+    members: ['m-' + i],
+  }));
+  const ring2Members = [
+    { name: 'coordinator', role: 'coordinator', status: 'done' },
+    ...Array.from({ length: 12 }, (_, i) => ({ name: 'm-' + i, status: 'done' })),
+  ];
+  const ring2Model = projectHive([], ring2Members, 0, { threads: ring2Threads });
+  const ring2Lay = layoutHive(ring2Model, 760, hiveMinimumHeight(12, 760));
+  for (const cl of ring2Lay.clusters) {
+    const r = routeHiveConnector({ from: cl.id, to: 'coordinator', kind: 'done' }, ring2Lay);
+    assert.ok(r && r.path.startsWith('M'), `connector from ${cl.id} to coordinator routes cleanly`);
+    if (r.control) {
+      for (let i = 1; i < 16; i++) {
+        const t = i / 16, u = 1 - t;
+        const x = u * u * r.start.x + 2 * u * t * r.control.x + t * t * r.end.x;
+        const y = u * u * r.start.y + 2 * u * t * r.control.y + t * t * r.end.y;
+        for (const other of ring2Lay.clusters) {
+          if (other === cl) continue;
+          assert.ok(Math.hypot(x - other.x, y - other.y) > ring2Lay.radius * 0.82,
+            `Ring-2 curve ${cl.id}->coordinator clears intermediate hex ${other.id}`);
+        }
+      }
+    }
+  }
+});
+
+test('renderGraphFrame renders specialized threads, wrapped titles, and mid-replay Waiting on arrows', () => {
+  const { renderGraphFrame } = globalThis.HiveGraph;
+  const threads = [
+    { id: 'core', title: 'Core Engine, Bug Fixes & Worktrees', members: ['a', 'b'] },
+    { id: 'ui', title: 'Antigravity Dashboard UI', members: ['c'] },
+  ];
+  const members = [
+    { name: 'coordinator', role: 'coordinator', status: 'waiting' },
+    { name: 'a', status: 'done' },
+    { name: 'b', status: 'done' },
+    { name: 'c', status: 'waiting', waitFor: ['a'] },
+  ];
+  const posts = [
+    { seq: 1, kind: 'message', author: 'a', targets: ['b'], text: 'Intra-hex ping' },
+    { seq: 2, kind: 'message', author: 'a', targets: ['coordinator'], text: '[done] Core a ready' },
+  ];
+  const texts = [];
+  const dashCalls = [];
+  const ctx = new Proxy({
+    fillStyle: '', strokeStyle: '', lineWidth: 1, globalAlpha: 1, font: '', textAlign: '', textBaseline: '',
+    setLineDash: (arr) => dashCalls.push(arr),
+    fillText: (text) => texts.push(text),
+  }, { get: (t, k) => t[k] ?? (() => {}) });
+  renderGraphFrame(ctx, { mode: 'hive', theme: 'light', posts, members, threads, cursor: 1, width: 680, height: 480, bees: globalThis.HiveBee });
+  assert.ok(texts.includes('0/2'), 'renders done/total subtitle at cursor=1');
+  assert.ok(texts.includes('0/1'), 'renders 0/1 subtitle for UI group');
+  assert.ok(texts.includes('0 of 3 done'), 'renders coordinator X of Y done');
+  assert.ok(dashCalls.some(arr => Array.isArray(arr) && arr.length > 0), 'renders mid-replay dashed Waiting on connector');
+});

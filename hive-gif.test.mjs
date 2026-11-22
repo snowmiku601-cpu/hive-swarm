@@ -333,3 +333,58 @@ test('scripts/build-dsh-client.mjs registers hive:gif alias in both API and CLI 
   assert.match(source, /hive:\(graph\|bees\|gif\|icon\)/, 'esbuild plugin resolves hive:gif');
   assert.match(source, /HiveGif/, 'exports globalThis.HiveGif for DSH client');
 });
+
+test('exportGraphReplayGif and buildReplayFrames forward threads/channels and render specialized honeycomb replays', () => {
+  const { exportGraphReplayGif, buildReplayFrames } = globalThis.HiveGif;
+  assert.equal(typeof buildReplayFrames, 'function');
+
+  const threads = [
+    { id: 'core', title: 'Core Engine & Bug Fixes', members: ['alpha', 'alpha-2'] },
+    { id: 'ui', title: 'Dashboard UI Polish', members: ['beta'] },
+  ];
+  const channels = [{ name: 'main', archived: false }];
+  const members = [
+    { name: 'coordinator', role: 'coordinator', status: 'waiting' },
+    { name: 'alpha', status: 'done' },
+    { name: 'alpha-2', status: 'done' },
+    { name: 'beta', status: 'done', waitFor: ['alpha'] },
+  ];
+  const posts = [
+    { seq: 1, kind: 'message', author: 'alpha', targets: ['alpha-2'], text: 'Intra-hex sync', time: '2026-11-21T00:00:00Z' },
+    { seq: 2, kind: 'message', author: 'alpha', targets: ['coordinator'], text: '[done] Alpha done', time: '2026-11-21T00:01:00Z' },
+    { seq: 3, kind: 'message', author: 'beta', targets: ['coordinator'], text: '[done] Beta done', time: '2026-11-21T00:02:00Z' },
+  ];
+
+  const seenCursors = [];
+  const spyGraph = {
+    ...globalThis.HiveGraph,
+    renderGraphFrame(ctx, opts) {
+      seenCursors.push({ cursor: opts.cursor, threads: opts.threads, channels: opts.channels });
+      return globalThis.HiveGraph.renderGraphFrame(ctx, opts);
+    },
+  };
+
+  const out = exportGraphReplayGif({
+    mode: 'hive',
+    posts,
+    members,
+    threads,
+    channels,
+    phase: 'done',
+    width: 480,
+    height: 460,
+    graph: spyGraph,
+    bees: globalThis.HiveBee,
+  });
+  assert.equal(out.frameCount, 4);
+  assert.equal(seenCursors.length, 4);
+  assert.ok(seenCursors.every(c => c.threads === threads && c.channels === channels),
+    'threads and channels forwarded on every replay frame');
+  const decoded = decodeGif89a(out.bytes);
+  assert.equal(decoded.header, 'GIF89a');
+  assert.equal(decoded.sawTrailer, true);
+  assert.equal(decoded.frames.length, 4);
+  // Mid-replay frames (cursor=0, cursor=1) should differ visually from cursor=2 because Waiting on arrow disappears
+  const same01 = decoded.frames[1].indices.every((v, idx) => v === decoded.frames[2].indices[idx]);
+  assert.equal(same01, false, 'mid-replay frame at seq=1 differs from seq=2');
+});

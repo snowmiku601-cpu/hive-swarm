@@ -638,7 +638,73 @@
     return routed.map(({ link, edge, bidirectional }) => ({ link, edge, bidirectional }));
   }
 
-  function projectHive(posts, members, cursor) {
+  function humanizeSlug(slug) {
+    const parts = String(slug ?? '').trim().split(/[-_\s]+/).filter(Boolean);
+    if (!parts.length) return 'Other';
+    return parts.map(part => part[0].toUpperCase() + part.slice(1)).join(' ');
+  }
+
+  function channelTopic(channels, name) {
+    if (!channels || !name) return '';
+    let entry;
+    if (Array.isArray(channels)) entry = channels.find(c => c && c.name === name);
+    else if (typeof channels.get === 'function') entry = channels.get(name);
+    else if (typeof channels === 'object') entry = channels[name];
+    const topic = typeof entry === 'string' ? entry : entry?.topic;
+    return typeof topic === 'string' ? topic.trim() : '';
+  }
+
+  function normMemberKey(value) {
+    return String(value ?? '').trim().replace(/^@/, '').toLowerCase();
+  }
+
+  function workerBucketStatus(status, recoveryRequired) {
+    if (recoveryRequired || status === 'failed' || status === 'quota') return 'needs';
+    if (status === 'working') return 'working';
+    if (status === 'done' || status === 'retired') return 'done';
+    return 'waiting';
+  }
+
+  function buildGroupCluster({ id, title, goal = '', items, usedIds }) {
+    let finalId = id === 'coordinator' ? 'group-coordinator' : id;
+    while (usedIds.has(finalId)) finalId += '-2';
+    usedIds.add(finalId);
+    let doneCount = 0;
+    let workingCount = 0;
+    let needsCount = 0;
+    for (const item of items) {
+      if (item.bucketStatus === 'done') doneCount++;
+      else if (item.bucketStatus === 'working') workingCount++;
+      else if (item.bucketStatus === 'needs') needsCount++;
+    }
+    const totalCount = items.length;
+    const tone = needsCount > 0 ? 'needs'
+      : workingCount > 0 ? 'working'
+        : (totalCount > 0 && doneCount === totalCount) ? 'done'
+          : 'waiting';
+    return {
+      id: finalId,
+      label: title,
+      fullTitle: title,
+      goal,
+      mode: 'group',
+      count: totalCount,
+      totalCount,
+      doneCount,
+      workingCount,
+      needsCount,
+      subtitle: `${doneCount}/${totalCount}`,
+      tone,
+      members: items.map(item => item.entry),
+    };
+  }
+
+  /**
+   * Project board posts and roster into Hive clusters, coordinator summary, and connectors.
+   * Supports 3-tier grouping: explicit threads -> worker group/non-main channel -> status buckets.
+   */
+  function projectHive(posts, members, cursor, options = {}) {
+    const { threads = null, channels = null } = options ?? {};
     const mergeUser = shouldMergeUserToCoordinator(members);
     const resolveActor = name => (mergeUser && name === 'user') ? 'coordinator' : name;
     const effectiveCursor = (cursor === null || cursor === undefined) ? Infinity : Number(cursor);
@@ -653,10 +719,12 @@
     const lastSeqByAuthor = new Map();
     const briefSeqByMember = new Map();
     const mentionSeqByMember = new Map();
+    const doneAuthors = new Set();
     for (const event of activePosts) {
       const author = resolveActor(event.author);
       lastSeqByAuthor.set(author, event.seq);
       lastPostByAuthor.set(author, event);
+      if (/\[done\]/i.test(String(event.text ?? ''))) doneAuthors.add(author);
       const targets = new Set([...(event.targets ?? []).map(resolveActor), ...(event.coordinatorMention ? ['coordinator'] : [])]);
       for (const target of targets) {
         if (event.kind === 'brief') briefSeqByMember.set(target, event.seq);
@@ -669,16 +737,7 @@
       { name: 'coordinator', role: 'coordinator', status: 'waiting' };
     const workers = roster.filter(m => m.role !== 'coordinator' && m.name !== 'coordinator');
 
-    const bucketDefs = [
-      { id: 'working', label: 'Working', tone: 'working' },
-      { id: 'waiting', label: 'Waiting', tone: 'waiting' },
-      { id: 'needs', label: 'Needs you', tone: 'needs' },
-      { id: 'done', label: 'Done', tone: 'done' },
-    ];
-    const buckets = new Map(bucketDefs.map(def => [def.id, { ...def, count: 0, members: [] }]));
-    const clusterByMember = new Map([['coordinator', 'coordinator']]);
-
-    for (const worker of workers) {
+    const workerRecords = workers.map(worker => {
       const latestSeq = lastSeqByAuthor.get(worker.name) ?? 0;
       let status;
       let recoveryRequired = false;
@@ -692,44 +751,169 @@
         const lastP = lastPostByAuthor.get(worker.name);
         const briefSeq = briefSeqByMember.get(worker.name) ?? 0;
         const mentionSeq = mentionSeqByMember.get(worker.name) ?? 0;
+        const postedDone = Boolean(lastP && /\[done\]/i.test(String(lastP.text ?? '')));
+        const rawWait = worker.waitFor ?? worker.pendingWaitFor ?? [];
+        pendingWaitFor = postedDone
+          ? []
+          : rawWait.filter(dep => !doneAuthors.has(resolveActor(dep)));
+
         if (effectiveCursor <= 0) status = 'waiting';
-        else if (lastP && /\[done\]/i.test(String(lastP.text ?? ''))) status = 'done';
+        else if (postedDone) status = 'done';
         else if (resolveActor(lastPost?.author) === worker.name) status = 'working';
+        else if (pendingWaitFor.length > 0) status = 'waiting';
         else if (Math.max(briefSeq, mentionSeq) > (lastP?.seq ?? 0)) status = 'working';
         else status = 'waiting';
       }
 
-      let bucketId;
-      if (recoveryRequired || status === 'failed' || status === 'quota') bucketId = 'needs';
-      else if (status === 'working') bucketId = 'working';
-      else if (status === 'done' || status === 'retired') bucketId = 'done';
-      else bucketId = 'waiting';
-
-      const muted = bucketId === 'done';
+      const bucketStatus = workerBucketStatus(status, recoveryRequired);
       const entry = {
         name: worker.name,
         status,
         role: worker.role ?? 'worker',
         tint: worker.tint,
-        muted,
+        muted: bucketStatus === 'done',
         latestSeq,
         pendingWaitFor,
+        ...(worker.taskLabel ? { taskLabel: worker.taskLabel } : {}),
       };
-      const bucket = buckets.get(bucketId);
-      bucket.members.push(entry);
-      bucket.count = bucket.members.length;
-      clusterByMember.set(worker.name, bucketId);
+      return { worker, entry, bucketStatus };
+    });
+
+    const clusters = [];
+    const hasThreads = Array.isArray(threads) && threads.length > 0;
+    const hasGroupOrChannel = !hasThreads && workerRecords.some(({ worker }) =>
+      Boolean(String(worker.group ?? '').trim()) ||
+      (Array.isArray(worker.channels) && worker.channels.some(ch => ch && ch !== 'main'))
+    );
+
+    if (hasThreads) {
+      const assigned = new Set();
+      const usedIds = new Set(['coordinator']);
+      for (let i = 0; i < threads.length; i++) {
+        const thread = threads[i];
+        if (!thread || typeof thread !== 'object') continue;
+        const refs = new Set((thread.members ?? []).map(normMemberKey).filter(Boolean));
+        const tIdNorm = normMemberKey(thread.id);
+        const tTitleNorm = normMemberKey(thread.title);
+        const matched = workerRecords.filter(({ worker }) => {
+          if (assigned.has(worker.name)) return false;
+          const wName = normMemberKey(worker.name);
+          const wGroup = normMemberKey(worker.group);
+          const wThread = normMemberKey(worker.thread);
+          return refs.has(wName) ||
+            (wGroup && refs.has(wGroup)) ||
+            (wThread && (wThread === tIdNorm || wThread === tTitleNorm));
+        });
+        if (!matched.length) continue;
+        for (const rec of matched) assigned.add(rec.worker.name);
+        const title = String(thread.title ?? thread.id ?? 'Work group').trim() || 'Work group';
+        clusters.push(buildGroupCluster({
+          id: String(thread.id || `thread-${i + 1}`),
+          title,
+          goal: String(thread.goal ?? '').trim(),
+          items: matched,
+          usedIds,
+        }));
+      }
+      const unassigned = workerRecords.filter(({ worker }) => !assigned.has(worker.name));
+      if (unassigned.length) {
+        clusters.push(buildGroupCluster({
+          id: usedIds.has('other') ? 'other-unassigned' : 'other',
+          title: 'Other',
+          goal: '',
+          items: unassigned,
+          usedIds,
+        }));
+      }
+    } else if (hasGroupOrChannel) {
+      const grouped = new Map();
+      const unassigned = [];
+      for (const rec of workerRecords) {
+        const groupSlug = String(rec.worker.group ?? '').trim();
+        const primaryChannel = (rec.worker.channels ?? []).find(ch => ch && ch !== 'main');
+        if (groupSlug) {
+          const key = 'group:' + groupSlug;
+          let bucket = grouped.get(key);
+          if (!bucket) {
+            bucket = { id: groupSlug, title: humanizeSlug(groupSlug), items: [] };
+            grouped.set(key, bucket);
+          }
+          bucket.items.push(rec);
+        } else if (primaryChannel) {
+          const key = 'channel:' + primaryChannel;
+          let bucket = grouped.get(key);
+          if (!bucket) {
+            const title = channelTopic(channels, primaryChannel) || humanizeSlug(primaryChannel);
+            bucket = { id: primaryChannel, title, items: [] };
+            grouped.set(key, bucket);
+          }
+          bucket.items.push(rec);
+        } else {
+          unassigned.push(rec);
+        }
+      }
+      const usedIds = new Set(['coordinator']);
+      for (const bucket of grouped.values()) {
+        clusters.push(buildGroupCluster({ id: bucket.id, title: bucket.title, goal: '', items: bucket.items, usedIds }));
+      }
+      if (unassigned.length) {
+        clusters.push(buildGroupCluster({
+          id: usedIds.has('other') ? 'other-unassigned' : 'other',
+          title: 'Other',
+          goal: '',
+          items: unassigned,
+          usedIds,
+        }));
+      }
+    } else {
+      const bucketDefs = [
+        { id: 'working', label: 'Working', tone: 'working' },
+        { id: 'waiting', label: 'Waiting', tone: 'waiting' },
+        { id: 'needs', label: 'Needs you', tone: 'needs' },
+        { id: 'done', label: 'Done', tone: 'done' },
+      ];
+      const buckets = new Map(bucketDefs.map(def => [def.id, []]));
+      for (const rec of workerRecords) buckets.get(rec.bucketStatus).push(rec);
+      for (const def of bucketDefs) {
+        const items = buckets.get(def.id);
+        if (!items.length) continue;
+        const count = items.length;
+        clusters.push({
+          id: def.id,
+          label: def.label,
+          fullTitle: def.label,
+          goal: '',
+          mode: 'status',
+          count,
+          totalCount: count,
+          doneCount: def.id === 'done' ? count : 0,
+          workingCount: def.id === 'working' ? count : 0,
+          needsCount: def.id === 'needs' ? count : 0,
+          subtitle: String(count),
+          tone: def.tone,
+          members: items.map(item => item.entry),
+        });
+      }
     }
 
-    const clusters = bucketDefs
-      .map(def => buckets.get(def.id))
-      .filter(cluster => cluster.count > 0);
+    const clusterByMember = new Map([['coordinator', 'coordinator']]);
+    for (const cluster of clusters) {
+      for (const member of cluster.members) clusterByMember.set(member.name, cluster.id);
+    }
 
     const totalWorkers = workers.length;
-    const doneCount = buckets.get('done').count;
+    let doneCount = 0;
+    let workingCount = 0;
+    let needsCount = 0;
+    for (const rec of workerRecords) {
+      if (rec.bucketStatus === 'done') doneCount++;
+      else if (rec.bucketStatus === 'working') workingCount++;
+      else if (rec.bucketStatus === 'needs') needsCount++;
+    }
+
     let phase;
-    if (buckets.get('needs').count > 0) phase = 'stalled';
-    else if (buckets.get('working').count > 0 || (atHead && coordSource.status === 'working')) phase = 'working';
+    if (needsCount > 0) phase = 'stalled';
+    else if (workingCount > 0 || (atHead && coordSource.status === 'working')) phase = 'working';
     else if (totalWorkers > 0 && doneCount === totalWorkers) phase = 'done';
     else phase = 'waiting';
 
@@ -739,6 +923,7 @@
       role: 'coordinator',
       doneCount,
       totalWorkers,
+      subtitle: `${doneCount} of ${totalWorkers} done`,
       phase,
       latestSeq: lastSeqByAuthor.get('coordinator') ?? 0,
       tint: coordSource.tint,
@@ -753,12 +938,18 @@
       connectors.push(conn);
     };
 
-    if (buckets.get('done').count > 0) {
-      addConnector({ from: 'done', to: 'coordinator', kind: 'done', label: 'Tasks done' });
+    for (const cluster of clusters) {
+      const completed = cluster.mode === 'group'
+        ? (cluster.totalCount > 0 && cluster.doneCount === cluster.totalCount)
+        : (cluster.id === 'done' && cluster.count > 0);
+      if (completed) {
+        addConnector({ from: cluster.id, to: 'coordinator', kind: 'done', label: 'Tasks done' });
+      }
     }
 
     if (lastPost && (effectiveCursor === Infinity || lastPost.seq === effectiveCursor || !atHead)) {
-      const fromCell = clusterByMember.get(resolveActor(lastPost.author));
+      const authorActor = resolveActor(lastPost.author);
+      const fromCell = clusterByMember.get(authorActor);
       if (fromCell) {
         const allFlag = lastPost.broadcast ?? /(?:^|[^a-z0-9_])@all(?![a-z0-9_-])/i.test(lastPost.text ?? '');
         const rawTargets = [
@@ -776,8 +967,9 @@
           }
         } else {
           for (const target of rawTargets) {
+            if (target === authorActor) continue;
             const toCell = clusterByMember.get(target);
-            if (toCell && toCell !== fromCell) {
+            if (toCell) {
               addConnector({ from: fromCell, to: toCell, kind: 'message', label: 'Message just sent', seq: lastPost.seq });
             }
           }
@@ -788,7 +980,7 @@
     for (const cluster of clusters) {
       for (const member of cluster.members) {
         for (const blocker of member.pendingWaitFor ?? []) {
-          const toCell = clusterByMember.get(blocker);
+          const toCell = clusterByMember.get(resolveActor(blocker));
           if (toCell) {
             addConnector({ from: cluster.id, to: toCell, kind: 'waiting', label: 'Waiting on' });
           }
@@ -836,30 +1028,98 @@
     return rows;
   }
 
-  function computeClusterSlots(cx, cy, radius, members) {
+  /**
+   * Wrap and optionally ellipsis-truncate a hex work-group title to fit within maxLines.
+   */
+  function wrapHexTitle(title, maxCharsPerLine = 14, maxLines = 2) {
+    const clean = String(title ?? '').replace(/\s+/g, ' ').trim();
+    const limit = Math.max(4, Math.floor(Number(maxCharsPerLine) || 14));
+    const lineCap = Math.max(1, Math.floor(Number(maxLines) || 2));
+    if (!clean) return { lines: [], truncated: false };
+    if (clean.length <= limit) return { lines: [clean], truncated: false };
+
+    const words = clean.split(' ');
+    const lines = [];
+    let idx = 0;
+
+    while (idx < words.length && lines.length < lineCap - 1) {
+      const word = words[idx];
+      if (word.length > limit) {
+        lines.push(word.slice(0, limit));
+        words[idx] = word.slice(limit);
+        continue;
+      }
+      let line = word;
+      idx++;
+      while (idx < words.length && line.length + 1 + words[idx].length <= limit) {
+        line += ' ' + words[idx];
+        idx++;
+      }
+      lines.push(line);
+    }
+
+    if (idx >= words.length) return { lines, truncated: false };
+
+    const remaining = words.slice(idx).join(' ');
+    if (remaining.length <= limit) {
+      lines.push(remaining);
+      return { lines, truncated: false };
+    }
+
+    const budget = Math.max(1, limit - 3);
+    let last = '';
+    for (let i = idx; i < words.length; i++) {
+      const cand = last ? last + ' ' + words[i] : words[i];
+      if (cand.length <= budget) last = cand;
+      else break;
+    }
+    if (!last) {
+      last = words[idx].slice(0, budget);
+    } else {
+      const trimmed = last.replace(/[&,;:/-]+$/, '').trim();
+      if (trimmed) last = trimmed;
+    }
+    lines.push(limit <= 3 ? '.'.repeat(limit) : last + '...');
+    return { lines, truncated: true };
+  }
+
+  function computeClusterSlots(cx, cy, radius, members, bounds = null) {
     const count = members.length;
     if (!count) return [];
     const halfH = (SQRT3 / 2) * radius;
     const rows = hiveSlotRows(count);
     const rowCount = rows.length;
-    const topBand = -halfH * 0.14;
-    const bottomBand = halfH * 0.50;
-    const bandCenter = rowCount === 1 ? halfH * 0.10 : (topBand + bottomBand) / 2;
-    const bandSpan = bottomBand - topBand;
-    const beeScale = count > 6
-      ? Math.max(0.7, Math.min(0.98, radius / 106))
-      : Math.max(0.82, Math.min(1.08, radius / 98));
+    const topY = bounds?.topY ?? (cy - halfH * 0.34);
+    const bottomY = bounds?.bottomY ?? (cy + halfH * 0.72);
+    const availBeeH = Math.max(22, bottomY - topY);
+
+    let beeScale = count > 6
+      ? Math.max(0.64, Math.min(0.98, radius / 106))
+      : Math.max(0.72, Math.min(1.08, radius / 98));
+    if (rowCount >= 2 && availBeeH < rowCount * 29) {
+      beeScale = Math.max(0.52, Math.min(beeScale, availBeeH / (rowCount * 30)));
+    }
+
+    const slotTopPad = 12.5 * beeScale + 2;
+    const slotBotPad = Math.max(10, 11 * beeScale + 4);
+    const minRowY = topY + slotTopPad;
+    const maxRowY = Math.max(minRowY, bottomY - slotBotPad);
 
     const slots = [];
     let idx = 0;
     for (let r = 0; r < rowCount; r++) {
       const cols = rows[r];
-      const ry = rowCount === 1
-        ? cy + bandCenter
-        : cy + topBand + (r / (rowCount - 1)) * bandSpan;
+      let ry;
+      if (rowCount === 1) {
+        ry = Math.min((minRowY + maxRowY) / 2, Math.max(minRowY, cy + halfH * 0.14));
+      } else {
+        const span = Math.min(maxRowY - minRowY, (rowCount - 1) * 40);
+        const startY = minRowY + Math.max(0, ((maxRowY - minRowY) - span) * 0.3);
+        ry = startY + (r / (rowCount - 1)) * span;
+      }
       const dy = ry - cy;
-      // Exact horizontal half-span inside flat-top hexagon covering bee top (-15) and label bottom (+18).
-      const usableHalfW = Math.max(18, radius - Math.max(Math.abs(dy - 15), Math.abs(dy + 18)) / SQRT3 - 8);
+      // Exact horizontal half-span inside flat-top hexagon covering bee top and label bottom.
+      const usableHalfW = Math.max(16, radius - Math.max(Math.abs(dy - 14 * beeScale), Math.abs(dy + 16)) / SQRT3 - 8);
       const maxSpacing = count > 6 ? 42 : 52;
       const stepX = cols === 1 ? 0 : Math.min(maxSpacing, (usableHalfW * 2 - 4) / cols);
       const slotWidth = cols === 1 ? Math.min(88, usableHalfW * 1.85) : Math.max(30, stepX - 2);
@@ -877,10 +1137,136 @@
     return slots;
   }
 
-  function hiveMinimumHeight(clusterCount, width) {
+  function hiveMinimumHeight(clusterCount, width = 680) {
     if (clusterCount <= 1) return width < 420 ? 380 : 440;
     if (clusterCount === 2) return width < 420 ? 440 : 430;
-    return 490;
+    if (clusterCount <= 6) return 490;
+    if (clusterCount <= 10) return width < 500 ? 640 : 540;
+    if (clusterCount <= 12) return width < 500 ? 740 : 580;
+    return width < 500 ? 820 : 680;
+  }
+
+  function outerHexAxialSlots(count, width) {
+    const ring1 = [[-1, 0], [1, -1], [-1, 1], [1, 0], [0, -1], [0, 1]];
+    const lateralRing2 = [[-2, 0], [2, -2], [-2, 1], [2, -1], [-2, 2], [2, 0]];
+    const verticalRing2 = [[-1, -1], [1, -2], [-1, 2], [1, 1], [0, -2], [0, 2]];
+    const axial = width < 500
+      ? [...ring1, ...verticalRing2, ...lateralRing2]
+      : [...ring1, ...lateralRing2, ...verticalRing2];
+    for (let ring = 3; axial.length < count; ring++) {
+      for (let q = -ring; q <= ring && axial.length < count; q++) {
+        for (let r = -ring; r <= ring && axial.length < count; r++) {
+          if (Math.max(Math.abs(q), Math.abs(r), Math.abs(q + r)) === ring) {
+            axial.push([q, r]);
+          }
+        }
+      }
+    }
+    return axial.slice(0, count).map(([q, r]) => ({ ux: q * (SQRT3 / 2), uy: r + q * 0.5 }));
+  }
+
+  function buildClusterLayoutCell(cl, cx, cy, radius) {
+    const halfH = (SQRT3 / 2) * radius;
+    const titleFontSize = radius < 65 ? 10.5 : 11.5;
+    const subtitleFontSize = radius < 65 ? 10 : 11;
+    const titleLineHeight = radius < 65 ? 11.5 : 13;
+    const maxTitleChars = Math.max(8, Math.floor((1.36 * radius - 14) / (titleFontSize * 0.56)));
+    const rawTitle = cl.fullTitle ?? cl.label ?? '';
+    const wrapped = wrapHexTitle(rawTitle, maxTitleChars, 2);
+    const titleLines = wrapped.lines.length ? wrapped.lines : [String(cl.label ?? '')];
+    const headerTopPad = Math.max(7, halfH * 0.12);
+    const titleY = cy - halfH + headerTopPad + titleLineHeight * 0.5;
+    const lastTitleY = titleY + (titleLines.length - 1) * titleLineHeight;
+    const subtitleGap = radius < 65 ? 11.5 : 13;
+    const subtitleY = lastTitleY + subtitleGap;
+    const subtitleBottom = subtitleY + subtitleFontSize * 0.55;
+    const beeBoxTop = subtitleBottom + 4;
+    const beeBoxBottom = cy + halfH - 5;
+    const beeBoxHalfW = Math.max(16, radius - Math.max(Math.abs(beeBoxTop - cy), Math.abs(beeBoxBottom - cy)) / SQRT3 - 6);
+    const beeBox = {
+      x: cx - beeBoxHalfW,
+      y: beeBoxTop,
+      width: beeBoxHalfW * 2,
+      height: Math.max(0, beeBoxBottom - beeBoxTop),
+      top: beeBoxTop,
+      bottom: beeBoxBottom,
+      cx,
+      cy: (beeBoxTop + beeBoxBottom) / 2,
+    };
+    const slots = computeClusterSlots(cx, cy, radius, cl.members ?? [], { topY: beeBoxTop, bottomY: beeBoxBottom });
+    return {
+      id: cl.id,
+      label: cl.label,
+      fullTitle: rawTitle,
+      goal: cl.goal ?? '',
+      mode: cl.mode ?? 'status',
+      tone: cl.tone,
+      count: cl.count,
+      totalCount: cl.totalCount ?? cl.count,
+      doneCount: cl.doneCount ?? 0,
+      workingCount: cl.workingCount ?? 0,
+      needsCount: cl.needsCount ?? 0,
+      subtitle: cl.subtitle ?? String(cl.count ?? 0),
+      x: cx,
+      y: cy,
+      radius,
+      vertices: hexVertices(cx, cy, radius),
+      titleLines,
+      titleTruncated: wrapped.truncated,
+      titleY,
+      titleLineHeight,
+      titleFontSize,
+      subtitleY,
+      subtitleFontSize,
+      maxTitleChars,
+      beeBox,
+      slots,
+    };
+  }
+
+  function buildCoordLayoutCell(coordModel, cx, cy, radius) {
+    const halfH = (SQRT3 / 2) * radius;
+    const coordScale = Math.max(1.1, Math.min(2.1, radius / 48));
+    const beeW = 20 * coordScale;
+    const beeH = 18 * coordScale;
+    const coordBeeY = cy - halfH * 0.22;
+    const titleFontSize = radius < 65 ? 11 : 12;
+    const subtitleFontSize = radius < 65 ? 10 : 11;
+    const titleLineHeight = radius < 65 ? 12 : 13.5;
+    const titleY = cy + halfH * 0.35;
+    const subtitleY = cy + halfH * 0.58;
+    const subtitle = coordModel?.subtitle ?? `${coordModel?.doneCount ?? 0} of ${coordModel?.totalWorkers ?? 0} done`;
+    const beeBox = {
+      x: cx - beeW / 2,
+      y: coordBeeY - beeH * 0.78,
+      width: beeW,
+      height: beeH,
+      top: coordBeeY - beeH * 0.78,
+      bottom: coordBeeY + beeH * 0.22,
+      cx,
+      cy: coordBeeY,
+    };
+    const member = coordModel ?? { name: 'coordinator', role: 'coordinator', status: 'waiting' };
+    return {
+      id: 'coordinator',
+      label: 'Coordinator',
+      fullTitle: 'Coordinator',
+      subtitle,
+      x: cx,
+      y: cy,
+      radius,
+      vertices: hexVertices(cx, cy, radius),
+      titleLines: ['Coordinator'],
+      titleTruncated: false,
+      titleY,
+      titleLineHeight,
+      titleFontSize,
+      subtitleY,
+      subtitleFontSize,
+      beeBox,
+      slots: [{ member, x: cx, y: coordBeeY, slotWidth: radius * 1.1, beeScale: coordScale }],
+      model: coordModel,
+    };
   }
 
   function layoutHive(hiveModel, width = 680, height = 460) {
@@ -892,111 +1278,75 @@
     const availH = Math.max(220, height - topPad - legendH);
 
     let radius;
-    const specs = [];
+    const placed = [];
 
     if (clusters.length === 0) {
-      radius = Math.max(48, Math.min(availW / 2.2, availH / (SQRT3 * 1.15), 114));
-      specs.push({ id: 'coordinator', ux: 0, uy: 0, isCoord: true });
+      radius = Math.max(40, Math.min(availW / 2.2, availH / (SQRT3 * 1.15), 114));
+      placed.push({ isCoord: true, x: width / 2, y: topPad + availH / 2 });
     } else if (clusters.length === 1) {
       const gap = Math.max(12, Math.min(20, availH * 0.036));
-      radius = Math.max(46, Math.min(availW / 2.15, (availH - gap) / (2 * SQRT3), 112));
+      radius = Math.max(40, Math.min(availW / 2.15, (availH - gap) / (2 * SQRT3), 112));
       const D = SQRT3 * radius + gap;
       const centerX = width / 2;
       const centerY = topPad + availH / 2;
-      const cellsById = new Map();
-      const topCenter = { x: centerX, y: centerY - D / 2 };
-      const botCenter = { x: centerX, y: centerY + D / 2 };
-
-      const c0 = clusters[0];
-      const clusterCell = {
-        id: c0.id,
-        label: c0.label,
-        tone: c0.tone,
-        count: c0.count,
-        x: topCenter.x,
-        y: topCenter.y,
-        radius,
-        vertices: hexVertices(topCenter.x, topCenter.y, radius),
-        slots: computeClusterSlots(topCenter.x, topCenter.y, radius, c0.members ?? []),
-      };
-      const coordCell = {
-        id: 'coordinator',
-        x: botCenter.x,
-        y: botCenter.y,
-        radius,
-        vertices: hexVertices(botCenter.x, botCenter.y, radius),
-        model: hiveModel.coordinator,
-      };
-      cellsById.set(clusterCell.id, clusterCell);
-      cellsById.set('coordinator', coordCell);
-      return { width, height, radius, coordinator: coordCell, clusters: [clusterCell], cellsById };
-    } else if (clusters.length === 2) {
-      specs.push({ id: 'coordinator', ux: 0, uy: 0.35, isCoord: true });
-      if (availW >= availH * 0.85) {
-        specs.push({ id: clusters[0].id, cluster: clusters[0], ux: -SQRT3 / 2, uy: -0.15 });
-        specs.push({ id: clusters[1].id, cluster: clusters[1], ux: SQRT3 / 2, uy: -0.15 });
-      } else {
-        specs.push({ id: clusters[0].id, cluster: clusters[0], ux: 0, uy: -0.65 });
-        specs.push({ id: clusters[1].id, cluster: clusters[1], ux: 0, uy: 1.35 });
-      }
-    } else if (clusters.length === 3) {
-      specs.push({ id: 'coordinator', ux: 0, uy: 0, isCoord: true });
-      specs.push({ id: clusters[0].id, cluster: clusters[0], ux: 0, uy: -1 });
-      specs.push({ id: clusters[1].id, cluster: clusters[1], ux: -SQRT3 / 2, uy: 0.5 });
-      specs.push({ id: clusters[2].id, cluster: clusters[2], ux: SQRT3 / 2, uy: 0.5 });
+      placed.push({ cluster: clusters[0], x: centerX, y: centerY - D / 2 });
+      placed.push({ isCoord: true, x: centerX, y: centerY + D / 2 });
     } else {
-      specs.push({ id: 'coordinator', ux: 0, uy: 0, isCoord: true });
-      specs.push({ id: clusters[0].id, cluster: clusters[0], ux: -SQRT3 / 2, uy: -0.5 });
-      specs.push({ id: clusters[1].id, cluster: clusters[1], ux: SQRT3 / 2, uy: -0.5 });
-      specs.push({ id: clusters[2].id, cluster: clusters[2], ux: -SQRT3 / 2, uy: 0.5 });
-      specs.push({ id: clusters[3].id, cluster: clusters[3], ux: SQRT3 / 2, uy: 0.5 });
-      for (let i = 4; i < clusters.length; i++) {
-        specs.push({ id: clusters[i].id, cluster: clusters[i], ux: 0, uy: i === 4 ? -1 : 1 });
+      const specs = [];
+      if (clusters.length === 2) {
+        specs.push({ isCoord: true, ux: 0, uy: 0.35 });
+        if (availW >= availH * 0.85) {
+          specs.push({ cluster: clusters[0], ux: -SQRT3 / 2, uy: -0.15 });
+          specs.push({ cluster: clusters[1], ux: SQRT3 / 2, uy: -0.15 });
+        } else {
+          specs.push({ cluster: clusters[0], ux: 0, uy: -0.65 });
+          specs.push({ cluster: clusters[1], ux: 0, uy: 1.35 });
+        }
+      } else if (clusters.length === 3) {
+        specs.push({ isCoord: true, ux: 0, uy: 0 });
+        specs.push({ cluster: clusters[0], ux: 0, uy: -1 });
+        specs.push({ cluster: clusters[1], ux: -SQRT3 / 2, uy: 0.5 });
+        specs.push({ cluster: clusters[2], ux: SQRT3 / 2, uy: 0.5 });
+      } else {
+        specs.push({ isCoord: true, ux: 0, uy: 0 });
+        const axialCoords = outerHexAxialSlots(clusters.length, width);
+        for (let i = 0; i < clusters.length; i++) {
+          specs.push({ cluster: clusters[i], ux: axialCoords[i].ux, uy: axialCoords[i].uy });
+        }
+      }
+
+      const minUX = Math.min(...specs.map(s => s.ux));
+      const maxUX = Math.max(...specs.map(s => s.ux));
+      const minUY = Math.min(...specs.map(s => s.uy));
+      const maxUY = Math.max(...specs.map(s => s.uy));
+      const spanUX = maxUX - minUX;
+      const spanUY = maxUY - minUY;
+      const gap = Math.max(10, Math.min(18, availH * 0.03));
+
+      const maxRWidth = (availW - spanUX * gap) / (spanUX * SQRT3 + 2);
+      const maxRHeight = (availH - spanUY * gap) / (spanUY * SQRT3 + SQRT3);
+      radius = Math.max(24, Math.min(maxRWidth, maxRHeight, 108));
+
+      const D = SQRT3 * radius + gap;
+      const midUX = (minUX + maxUX) / 2;
+      const midUY = (minUY + maxUY) / 2;
+      const originX = width / 2 - midUX * D;
+      const originY = topPad + availH / 2 - midUY * D;
+      for (const spec of specs) {
+        placed.push({ ...spec, x: originX + spec.ux * D, y: originY + spec.uy * D });
       }
     }
-
-    const minUX = Math.min(...specs.map(s => s.ux));
-    const maxUX = Math.max(...specs.map(s => s.ux));
-    const minUY = Math.min(...specs.map(s => s.uy));
-    const maxUY = Math.max(...specs.map(s => s.uy));
-    const spanUX = maxUX - minUX;
-    const spanUY = maxUY - minUY;
-    const gap = Math.max(10, Math.min(18, availH * 0.03));
-
-    const maxRWidth = (availW - spanUX * gap) / (spanUX * SQRT3 + 2);
-    const maxRHeight = (availH - spanUY * gap) / (spanUY * SQRT3 + SQRT3);
-    radius = Math.max(40, Math.min(maxRWidth, maxRHeight, 108));
-
-    const D = SQRT3 * radius + gap;
-    const midUX = (minUX + maxUX) / 2;
-    const midUY = (minUY + maxUY) / 2;
-    const originX = width / 2 - midUX * D;
-    const originY = topPad + availH / 2 - midUY * D;
 
     const cellsById = new Map();
     let coordCell = null;
     const clusterCells = [];
 
-    for (const spec of specs) {
-      const cx = originX + spec.ux * D;
-      const cy = originY + spec.uy * D;
-      const vertices = hexVertices(cx, cy, radius);
-      if (spec.isCoord) {
-        coordCell = { id: 'coordinator', x: cx, y: cy, radius, vertices, model: hiveModel?.coordinator };
+    for (const item of placed) {
+      if (item.isCoord) {
+        coordCell = buildCoordLayoutCell(hiveModel?.coordinator, item.x, item.y, radius);
         cellsById.set('coordinator', coordCell);
       } else {
-        const cl = spec.cluster;
-        const cell = {
-          id: cl.id,
-          label: cl.label,
-          tone: cl.tone,
-          count: cl.count,
-          x: cx,
-          y: cy,
-          radius,
-          vertices,
-          slots: computeClusterSlots(cx, cy, radius, cl.members ?? []),
-        };
+        const cell = buildClusterLayoutCell(item.cluster, item.x, item.y, radius);
         clusterCells.push(cell);
         cellsById.set(cell.id, cell);
       }
@@ -1018,6 +1368,249 @@
     const d2 = Math.abs(0.8660254037844386 * ux + 0.5 * uy);
     const d3 = Math.abs(0.8660254037844386 * ux - 0.5 * uy);
     return apothem / Math.max(d1, d2, d3, 1e-6);
+  }
+
+  function hexSignedDistance(px, py, cell) {
+    const apothem = (SQRT3 / 2) * cell.radius;
+    const dx = Math.abs(px - cell.x);
+    const dy = Math.abs(py - cell.y);
+    return Math.max(dy, 0.8660254037844386 * dx + 0.5 * dy) - apothem;
+  }
+
+  function rayExitFromPoint(cell, ox, oy, ux, uy) {
+    if (Math.abs(ox - cell.x) < 1e-4 && Math.abs(oy - cell.y) < 1e-4) {
+      return hexRayExit(cell, ux, uy);
+    }
+    const apothem = (SQRT3 / 2) * cell.radius;
+    const rx = ox - cell.x;
+    const ry = oy - cell.y;
+    const axes = [
+      [0, 1],
+      [0.8660254037844386, 0.5],
+      [0.8660254037844386, -0.5],
+    ];
+    let tEnter = -Infinity;
+    let tExit = Infinity;
+    for (const [ax, ay] of axes) {
+      const p0 = rx * ax + ry * ay;
+      const dv = ux * ax + uy * ay;
+      if (Math.abs(dv) < 1e-6) {
+        if (Math.abs(p0) > apothem) return hexRayExit(cell, ux, uy);
+        continue;
+      }
+      const t1 = (-apothem - p0) / dv;
+      const t2 = (apothem - p0) / dv;
+      tEnter = Math.max(tEnter, Math.min(t1, t2));
+      tExit = Math.min(tExit, Math.max(t1, t2));
+    }
+    return tExit > 0 && tEnter <= tExit ? tExit : hexRayExit(cell, ux, uy);
+  }
+
+  function lookupLayoutCell(layout, id) {
+    if (!layout || !id) return null;
+    const fromMap = layout.cellsById?.get?.(id) ?? layout.cellsById?.[id];
+    if (fromMap) return fromMap;
+    if (id === 'coordinator') return layout.coordinator ?? null;
+    return layout.clusters?.find(c => c.id === id) ?? null;
+  }
+
+  function routeSelfLoopConnector(cell, kind, layout) {
+    const fmt = n => n.toFixed(1);
+    let angle = kind === 'waiting' ? Math.PI / 6 : -Math.PI / 6;
+    if (cell.x + cell.radius * 1.38 > (layout?.width ?? Infinity)) angle = Math.PI - angle;
+    if (cell.y - cell.radius * 1.15 < 0 && Math.sin(angle) < 0) angle = -angle;
+
+    const nx = Math.cos(angle);
+    const ny = Math.sin(angle);
+    const tx = -ny;
+    const ty = nx;
+    const edgeDist = hexRayExit(cell, nx, ny) + 2;
+    const anchor = { x: cell.x + nx * edgeDist, y: cell.y + ny * edgeDist };
+    const span = Math.max(10, Math.min(16, cell.radius * 0.22));
+    const depth = Math.max(24, Math.min(34, cell.radius * 0.45));
+    const spread = span * 0.9;
+
+    const start = { x: anchor.x - tx * (span * 0.45), y: anchor.y - ty * (span * 0.45) };
+    const end = { x: anchor.x + tx * (span * 0.45), y: anchor.y + ty * (span * 0.45) };
+    const c1 = { x: start.x + nx * depth - tx * spread, y: start.y + ny * depth - ty * spread };
+    const c2 = { x: end.x + nx * depth + tx * spread, y: end.y + ny * depth + ty * spread };
+    const mid = {
+      x: 0.125 * (start.x + end.x) + 0.375 * (c1.x + c2.x),
+      y: 0.125 * (start.y + end.y) + 0.375 * (c1.y + c2.y),
+    };
+    const endAngle = Math.atan2(end.y - c2.y, end.x - c2.x);
+    return {
+      path: `M${fmt(start.x)} ${fmt(start.y)} C${fmt(c1.x)} ${fmt(c1.y)} ${fmt(c2.x)} ${fmt(c2.y)} ${fmt(end.x)} ${fmt(end.y)}`,
+      start,
+      end,
+      mid,
+      control: c1,
+      control2: c2,
+      arrow: { x: end.x, y: end.y, angle: endAngle },
+      isSelfLoop: true,
+      curved: true,
+    };
+  }
+
+  function selectCurveControl(fromCell, toCell, coord, others, lateral, width, height) {
+    const dx = toCell.x - fromCell.x;
+    const dy = toCell.y - fromCell.y;
+    const dist = Math.hypot(dx, dy);
+    const nx = -dy / dist;
+    const ny = dx / dist;
+    const midChord = { x: (fromCell.x + toCell.x) / 2, y: (fromCell.y + toCell.y) / 2 };
+
+    let prefSign = 1;
+    if (coord && fromCell !== coord && toCell !== coord && Math.hypot(midChord.x - coord.x, midChord.y - coord.y) > 4) {
+      prefSign = ((midChord.x - coord.x) * nx + (midChord.y - coord.y) * ny) >= 0 ? 1 : -1;
+    }
+
+    const coordRadius = coord?.radius ?? fromCell.radius;
+    const isCenterLink = fromCell === coord || toCell === coord;
+    const baseBend = isCenterLink
+      ? Math.max(coordRadius * 1.45, dist * 0.48)
+      : Math.max(coordRadius * 2.15, dist * 0.56);
+    const mags = [baseBend, baseBend * 1.25, baseBend * 1.55, baseBend * 0.85, baseBend * 2.0];
+    const p0 = { x: fromCell.x, y: fromCell.y };
+    const p1 = { x: toCell.x, y: toCell.y };
+    const stageW = width ?? Infinity;
+    const stageH = height ?? Infinity;
+
+    let bestCtrl = null;
+    let bestScore = -Infinity;
+
+    for (const mag of mags) {
+      for (const sign of [prefSign, -prefSign]) {
+        const offset = sign * mag + lateral * 0.7;
+        const cand = { x: midChord.x + nx * offset, y: midChord.y + ny * offset };
+        let minCoord = Infinity;
+        let minOther = Infinity;
+        let outOfBounds = 0;
+        for (let step = 1; step <= 19; step++) {
+          const pt = bezierPoint(p0, cand, p1, step / 20);
+          if (hexSignedDistance(pt.x, pt.y, fromCell) <= 1 || hexSignedDistance(pt.x, pt.y, toCell) <= 1) continue;
+          if (coord && !isCenterLink) minCoord = Math.min(minCoord, hexSignedDistance(pt.x, pt.y, coord));
+          for (const obs of others) minOther = Math.min(minOther, hexSignedDistance(pt.x, pt.y, obs));
+          if (pt.x < 6 || pt.x > stageW - 6 || pt.y < 6 || pt.y > stageH - 36) outOfBounds++;
+        }
+        if (minCoord >= 10 && minOther >= 2 && outOfBounds === 0) return cand;
+        const score = (minCoord >= 8 ? minOther : minCoord - 1000) - outOfBounds * 40 - (sign !== prefSign ? 2 : 0);
+        if (score > bestScore) {
+          bestScore = score;
+          bestCtrl = cand;
+        }
+      }
+    }
+    return bestCtrl;
+  }
+
+  /**
+   * Route a Hive connector between cells, curving outer-to-outer chords around the
+   * center Coordinator (and intermediate hexes) and computing intra-hex self-loop arcs.
+   */
+  function routeHiveConnector(connector, layout) {
+    const fromCell = lookupLayoutCell(layout, connector?.from);
+    const toCell = lookupLayoutCell(layout, connector?.to);
+    if (!fromCell || !toCell) return null;
+    if (fromCell === toCell) return routeSelfLoopConnector(fromCell, connector.kind, layout);
+
+    const fmt = n => n.toFixed(1);
+    const dx = toCell.x - fromCell.x;
+    const dy = toCell.y - fromCell.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1) return null;
+
+    const ux = dx / dist;
+    const uy = dy / dist;
+    const nx = -uy;
+    const ny = ux;
+    const lateral = connector.kind === 'message' ? 8 : connector.kind === 'waiting' ? -8 : 0;
+    const pad = lateral ? 4 : 2;
+
+    const coord = layout?.coordinator ?? null;
+    const allCells = [coord, ...(layout?.clusters ?? [])].filter(Boolean);
+    const others = allCells.filter(c => c !== fromCell && c !== toCell);
+
+    // Check if the straight shifted segment slices through or grazes the Coordinator or another hex.
+    let needsCurve = false;
+    if (others.length) {
+      const sA = { x: fromCell.x + nx * lateral, y: fromCell.y + ny * lateral };
+      const sB = { x: toCell.x + nx * lateral, y: toCell.y + ny * lateral };
+      for (let step = 1; step < 12 && !needsCurve; step++) {
+        const t = step / 12;
+        const px = sA.x + (sB.x - sA.x) * t;
+        const py = sA.y + (sB.y - sA.y) * t;
+        if (coord && fromCell !== coord && toCell !== coord && hexSignedDistance(px, py, coord) < 10) needsCurve = true;
+        else if (others.some(obs => hexSignedDistance(px, py, obs) < 4)) needsCurve = true;
+      }
+    }
+
+    if (!needsCurve) {
+      const oxA = fromCell.x + nx * lateral;
+      const oyA = fromCell.y + ny * lateral;
+      const oxB = toCell.x + nx * lateral;
+      const oyB = toCell.y + ny * lateral;
+      const exitA = rayExitFromPoint(fromCell, oxA, oyA, ux, uy) + pad;
+      const exitB = rayExitFromPoint(toCell, oxB, oyB, -ux, -uy) + pad;
+      const start = { x: oxA + ux * exitA, y: oyA + uy * exitA };
+      const end = { x: oxB - ux * exitB, y: oyB - uy * exitB };
+      if (Math.hypot(end.x - start.x, end.y - start.y) < 1) return null;
+      const mid = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
+      const angle = Math.atan2(end.y - start.y, end.x - start.x);
+      return {
+        path: `M${fmt(start.x)} ${fmt(start.y)} L${fmt(end.x)} ${fmt(end.y)}`,
+        start,
+        end,
+        mid,
+        control: null,
+        control2: null,
+        arrow: { x: end.x, y: end.y, angle },
+        isSelfLoop: false,
+        curved: false,
+      };
+    }
+
+    const p0 = { x: fromCell.x, y: fromCell.y };
+    const p1 = { x: toCell.x, y: toCell.y };
+    const chosenCtrl = selectCurveControl(fromCell, toCell, coord, others, lateral, layout?.width, layout?.height);
+
+    // Clip quadratic Bezier cleanly at hex borders using binary search + Blossom control.
+    let lo = 0;
+    let hi = 0.45;
+    for (let it = 0; it < 20; it++) {
+      const m = (lo + hi) / 2;
+      if (hexSignedDistance(bezierPoint(p0, chosenCtrl, p1, m).x, bezierPoint(p0, chosenCtrl, p1, m).y, fromCell) <= pad) lo = m;
+      else hi = m;
+    }
+    const tStart = hi;
+
+    lo = 0.55;
+    hi = 1;
+    for (let it = 0; it < 20; it++) {
+      const m = (lo + hi) / 2;
+      if (hexSignedDistance(bezierPoint(p0, chosenCtrl, p1, m).x, bezierPoint(p0, chosenCtrl, p1, m).y, toCell) <= pad) hi = m;
+      else lo = m;
+    }
+    const tEnd = lo;
+    if (tEnd <= tStart + 1e-4) return null;
+
+    const start = bezierPoint(p0, chosenCtrl, p1, tStart);
+    const end = bezierPoint(p0, chosenCtrl, p1, tEnd);
+    const control = blossomControl(p0, chosenCtrl, p1, tStart, tEnd);
+    const mid = bezierPoint(start, control, end, 0.5);
+    const endAngle = Math.atan2(end.y - control.y, end.x - control.x);
+
+    return {
+      path: `M${fmt(start.x)} ${fmt(start.y)} Q${fmt(control.x)} ${fmt(control.y)} ${fmt(end.x)} ${fmt(end.y)}`,
+      start,
+      end,
+      mid,
+      control,
+      control2: null,
+      arrow: { x: end.x, y: end.y, angle: endAngle },
+      isSelfLoop: false,
+      curved: true,
+    };
   }
 
   function drawGrid(ctx, width, height, color) {
@@ -1142,13 +1735,16 @@
         border: '#43392b',
         edge: '#8c785c',
         pulse: '#c297ff',
+        messageStroke: '#c297ff',
         accent: '#f0b84b',
         doneFill: '#18281c',
-        doneStroke: '#6ac47e',
-        workingFill: '#2a2213',
-        workingStroke: '#f0b84b',
-        waitingFill: '#192133',
-        waitingStroke: '#7da3f0',
+        doneStroke: '#5ec26a',
+        doneConnector: '#5ec26a',
+        workingFill: '#172336',
+        workingStroke: '#63a4ff',
+        waitingFill: '#292113',
+        waitingStroke: '#e8ad44',
+        waitingConnector: '#e8ad44',
         needsFill: '#2d1919',
         needsStroke: '#ef766e',
       };
@@ -1161,27 +1757,30 @@
       border: '#d0d7de',
       edge: '#b4bcc6',
       pulse: '#8250df',
+      messageStroke: '#8250df',
       accent: '#bf8700',
-      doneFill: '#eef6ee',
-      doneStroke: '#55943c',
-      workingFill: '#fdf6e7',
-      workingStroke: '#d18d22',
-      waitingFill: '#eef3fc',
-      waitingStroke: '#4d78cc',
+      doneFill: '#edf7ed',
+      doneStroke: '#4d9938',
+      doneConnector: '#4d9938',
+      workingFill: '#edf4fc',
+      workingStroke: '#2268b8',
+      waitingFill: '#fdf6e7',
+      waitingStroke: '#d18d22',
+      waitingConnector: '#d18d22',
       needsFill: '#fdf0ef',
       needsStroke: '#cf483f',
     };
   }
 
-  function toneStyle(tone, palette) {
+  function toneStyle(tone, palette = themePalette('light')) {
     if (tone === 'done') return { fill: palette.doneFill, stroke: palette.doneStroke };
-    if (tone === 'working') return { fill: palette.workingFill, stroke: palette.workingStroke };
-    if (tone === 'needs' || tone === 'stalled') return { fill: palette.needsFill, stroke: palette.needsStroke };
+    if (tone === 'working' || tone === 'active') return { fill: palette.workingFill, stroke: palette.workingStroke };
+    if (tone === 'needs' || tone === 'stalled' || tone === 'blocked') return { fill: palette.needsFill, stroke: palette.needsStroke };
     return { fill: palette.waitingFill, stroke: palette.waitingStroke };
   }
 
   function statusDotColor(status, palette) {
-    if (status === 'working') return palette.doneStroke;
+    if (status === 'working') return palette.workingStroke;
     if (status === 'failed' || status === 'quota') return palette.needsStroke;
     if (status === 'waiting' || status === 'queued') return palette.waitingStroke;
     return palette.muted;
@@ -1231,9 +1830,14 @@
     ctx.closePath();
   }
 
-  function renderHiveFrame(ctx, opts, palette, beesLib) {
-    const { posts = [], members = [], cursor = null, phase, width = 680, height = 460, focus = null } = opts;
-    const hiveModel = projectHive(posts, members, cursor);
+  function renderHiveFrame(ctx, opts = {}, paletteArg, beesArg) {
+    const {
+      posts = [], members = [], cursor = null, threads = null, channels = null,
+      phase, width = 680, height = 460, focus = null, theme = 'light',
+    } = opts;
+    const palette = paletteArg ?? themePalette(theme === 'dark' ? 'dark' : 'light');
+    const beesLib = resolveBees(beesArg ?? opts.bees);
+    const hiveModel = projectHive(posts, members, cursor, { threads, channels });
     if (phase && (cursor === null || cursor === undefined)) {
       if (phase === 'done' && hiveModel.coordinator.totalWorkers > 0 && hiveModel.coordinator.doneCount === hiveModel.coordinator.totalWorkers) {
         hiveModel.coordinator.phase = 'done';
@@ -1243,56 +1847,43 @@
     }
     const hiveLayout = layoutHive(hiveModel, width, height);
 
-    // Draw connectors between hex borders.
+    // Draw connectors between hex borders using shared curved/self-loop routing.
     for (const conn of hiveModel.connectors) {
-      const fromCell = hiveLayout.cellsById.get(conn.from);
-      const toCell = hiveLayout.cellsById.get(conn.to);
-      if (!fromCell || !toCell) continue;
-      const stroke = conn.kind === 'message' ? palette.pulse
-        : conn.kind === 'waiting' ? palette.workingStroke
-          : palette.doneStroke;
+      const route = routeHiveConnector(conn, hiveLayout);
+      if (!route) continue;
+      const stroke = conn.kind === 'message' ? (palette.messageStroke ?? palette.pulse)
+        : conn.kind === 'waiting' ? (palette.waitingConnector ?? palette.waitingStroke)
+          : (palette.doneConnector ?? palette.doneStroke);
       ctx.strokeStyle = stroke;
       ctx.fillStyle = stroke;
-      ctx.lineWidth = conn.kind === 'message' ? 2.2 : 1.5;
+      ctx.lineWidth = conn.kind === 'message' ? 2.2 : 1.6;
       ctx.setLineDash?.(conn.kind === 'waiting' ? [4, 4] : []);
 
-      if (fromCell === toCell) {
-        const vx = fromCell.x + fromCell.radius * 0.72;
-        const vy = fromCell.y - (SQRT3 / 2) * fromCell.radius * 0.4;
-        ctx.beginPath();
-        ctx.arc(vx + 8, vy, 10, -Math.PI * 0.8, Math.PI * 0.8);
-        ctx.stroke();
-        ctx.setLineDash?.([]);
-        continue;
-      }
-
-      const dx = toCell.x - fromCell.x;
-      const dy = toCell.y - fromCell.y;
-      const dist = Math.hypot(dx, dy);
-      if (dist < 1) continue;
-      const ux = dx / dist, uy = dy / dist;
-      const exitA = hexRayExit(fromCell, ux, uy);
-      const exitB = hexRayExit(toCell, -ux, -uy);
-      const lateral = conn.kind === 'message' ? 8 : conn.kind === 'waiting' ? -8 : 0;
-      const nx = -uy, ny = ux;
-      const ax = fromCell.x + ux * (exitA + 2) + nx * lateral;
-      const ay = fromCell.y + uy * (exitA + 2) + ny * lateral;
-      const bx = toCell.x - ux * (exitB + 2) + nx * lateral;
-      const by = toCell.y - uy * (exitB + 2) + ny * lateral;
       ctx.beginPath();
-      ctx.moveTo(ax, ay);
-      ctx.lineTo(bx, by);
+      ctx.moveTo(route.start.x, route.start.y);
+      if (route.control2) {
+        if (typeof ctx.bezierCurveTo === 'function') {
+          ctx.bezierCurveTo(route.control.x, route.control.y, route.control2.x, route.control2.y, route.end.x, route.end.y);
+        } else {
+          ctx.quadraticCurveTo(route.mid.x, route.mid.y, route.end.x, route.end.y);
+        }
+      } else if (route.control) {
+        ctx.quadraticCurveTo(route.control.x, route.control.y, route.end.x, route.end.y);
+      } else {
+        ctx.lineTo(route.end.x, route.end.y);
+      }
       ctx.stroke();
       ctx.setLineDash?.([]);
-      if (conn.kind !== 'done') {
-        drawArrowHead(ctx, bx, by, Math.atan2(by - ay, bx - ax), 7);
+
+      if (conn.kind !== 'done' && route.arrow) {
+        drawArrowHead(ctx, route.arrow.x, route.arrow.y, route.arrow.angle, 7);
       }
     }
 
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
-    // Draw state cluster hexagons.
+    // Draw state/group cluster hexagons.
     for (const cluster of hiveLayout.clusters) {
       const style = toneStyle(cluster.tone, palette);
       const hasFocus = Boolean(focus);
@@ -1305,13 +1896,15 @@
       ctx.strokeStyle = style.stroke;
       ctx.stroke();
 
-      const halfH = (SQRT3 / 2) * cluster.radius;
       ctx.fillStyle = palette.ink;
-      ctx.font = '600 12px "Segoe UI", system-ui, sans-serif';
-      ctx.fillText(cluster.label, cluster.x, cluster.y - halfH * 0.68);
+      ctx.font = `600 ${cluster.titleFontSize}px "Segoe UI", system-ui, sans-serif`;
+      const lines = cluster.titleLines?.length ? cluster.titleLines : [cluster.label];
+      for (let i = 0; i < lines.length; i++) {
+        ctx.fillText(lines[i], cluster.x, cluster.titleY + i * cluster.titleLineHeight);
+      }
       ctx.fillStyle = palette.muted;
-      ctx.font = '500 11px "Segoe UI", system-ui, sans-serif';
-      ctx.fillText(String(cluster.count), cluster.x, cluster.y - halfH * 0.50);
+      ctx.font = `500 ${cluster.subtitleFontSize}px "Segoe UI", system-ui, sans-serif`;
+      ctx.fillText(String(cluster.subtitle ?? cluster.count), cluster.x, cluster.subtitleY);
 
       for (const slot of cluster.slots) {
         const s = slot.beeScale;
@@ -1352,10 +1945,13 @@
       ctx.strokeStyle = coordTone.stroke;
       ctx.stroke();
 
-      const coordScale = Math.max(1.2, Math.min(2.1, coord.radius / 48));
+      const coordSlot = coord.slots?.[0];
+      const coordScale = coordSlot?.beeScale ?? Math.max(1.1, Math.min(2.1, coord.radius / 48));
       const cBeeW = 20 * coordScale;
       const cBeeH = 18 * coordScale;
-      drawBeeOnCtx(ctx, coord.x - cBeeW / 2, coord.y - cBeeH * 0.78, 'coordinator', {
+      const beeX = (coordSlot?.x ?? coord.x) - cBeeW / 2;
+      const beeY = (coordSlot?.y ?? coord.y) - cBeeH * 0.56;
+      drawBeeOnCtx(ctx, beeX, beeY, 'coordinator', {
         status: coord.model?.status ?? 'waiting',
         coordinator: true,
         tint: coord.model?.tint,
@@ -1363,16 +1959,15 @@
         scale: coordScale,
       }, beesLib);
 
-      const halfH = (SQRT3 / 2) * coord.radius;
       ctx.fillStyle = palette.ink;
-      ctx.font = '650 12px "Segoe UI", system-ui, sans-serif';
-      ctx.fillText('Coordinator', coord.x, coord.y + halfH * 0.34);
+      ctx.font = `650 ${coord.titleFontSize ?? 12}px "Segoe UI", system-ui, sans-serif`;
+      ctx.fillText('Coordinator', coord.x, coord.titleY);
       ctx.fillStyle = palette.muted;
-      ctx.font = '500 11px "Segoe UI", system-ui, sans-serif';
-      ctx.fillText(`${coord.model?.doneCount ?? 0} of ${coord.model?.totalWorkers ?? 0} done`, coord.x, coord.y + halfH * 0.56);
+      ctx.font = `500 ${coord.subtitleFontSize ?? 11}px "Segoe UI", system-ui, sans-serif`;
+      ctx.fillText(coord.subtitle ?? `${coord.model?.doneCount ?? 0} of ${coord.model?.totalWorkers ?? 0} done`, coord.x, coord.subtitleY);
     }
 
-    // Bottom legend matching Screenshot 1.
+    // Bottom legend.
     ctx.globalAlpha = 1;
     const ly = height - 16;
     let lx = 24;
@@ -1380,20 +1975,21 @@
     ctx.textBaseline = 'middle';
     ctx.font = '500 11px "Segoe UI", system-ui, sans-serif';
 
-    ctx.strokeStyle = palette.doneStroke;
+    ctx.strokeStyle = palette.doneConnector ?? palette.doneStroke;
     ctx.lineWidth = 1.6;
     ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(lx + 16, ly); ctx.stroke();
     ctx.fillStyle = palette.muted;
     ctx.fillText('Tasks done', lx + 22, ly);
     lx += 102;
 
-    ctx.strokeStyle = palette.pulse;
+    ctx.strokeStyle = palette.messageStroke ?? palette.pulse;
     ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(lx + 16, ly); ctx.stroke();
     ctx.fillText('Message just sent', lx + 22, ly);
     lx += 136;
 
-    ctx.strokeStyle = palette.workingStroke;
-    ctx.fillStyle = palette.workingStroke;
+    const waitColor = palette.waitingConnector ?? palette.waitingStroke;
+    ctx.strokeStyle = waitColor;
+    ctx.fillStyle = waitColor;
     ctx.setLineDash?.([3, 3]);
     ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(lx + 16, ly); ctx.stroke();
     ctx.setLineDash?.([]);
@@ -1599,6 +2195,7 @@
     isPost, shouldMergeUserToCoordinator, project, elapsedSpan, unmentionedNode, minimumHeight, layout,
     nodeBox, roundedRectSignedDistance, clipEdge, routeEdges, draw,
     smartTaskLabel, mentionsMinimumHeight, layoutMentions,
-    projectHive, hiveMinimumHeight, layoutHive, renderGraphFrame,
+    projectHive, hiveMinimumHeight, layoutHive, renderHiveFrame, renderGraphFrame,
+    hexRayExit, wrapHexTitle, routeHiveConnector, themePalette, toneStyle,
   });
 })();
