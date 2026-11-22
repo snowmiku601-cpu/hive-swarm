@@ -16,7 +16,7 @@ function parse(endpoint,value) {
     exact(value,['teamId','since','revision','timeoutSec']);short(value.teamId,'team identity');
     if(value.since!==undefined&&(!Number.isSafeInteger(value.since)||value.since<0))throw Error('Invalid cursor.');
     short(value.revision,'revision',{optional:true});
-    if(value.timeoutSec!==undefined&&(!Number.isFinite(value.timeoutSec)||value.timeoutSec<0||value.timeoutSec>55))throw Error('Invalid wait duration.');
+    if(value.timeoutSec!==undefined&&(!Number.isSafeInteger(value.timeoutSec)||value.timeoutSec<1||value.timeoutSec>55))throw Error('Invalid wait duration.');
     return value;
   }
   if(endpoint==='command') {

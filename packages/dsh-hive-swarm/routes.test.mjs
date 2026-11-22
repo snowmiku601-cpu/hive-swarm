@@ -171,3 +171,17 @@ test('POST snapshot Connection RPC includes getMeta version/update while GET sna
   assert.equal(getRes.status,200);
   assert.deepEqual(await getRes.json(),{teams:[],team:null});
 });
+
+test('2.2.0 /api/hive-swarm/v1/events strictly requires integer timeoutSec in 1..55 (rejecting 0 and floats)',async t=>{
+  const f=await fixture(t);
+  assert.equal((await f.rpc('wait',{teamId:'one',since:0,timeoutSec:1},signal(),owner)).ok,true);
+  for(const bad of [0,-1,1.5,55.5,56,'10',null,NaN]) {
+    const res=await f.rpc('wait',{teamId:'one',since:0,timeoutSec:bad},signal(),owner);
+    assert.equal(res.ok,false,'RPC wait must reject timeoutSec='+String(bad));
+  }
+  const route=f.routes.get('/api/hive-swarm/v1/events');
+  for(const bad of ['0','1.5','-2','56','abc']) {
+    const res=await route.fetch(new Request('http://fixture/api/hive-swarm/v1/events?teamId=one&since=0&timeoutSec='+bad));
+    assert.equal(res.status,400,'GET events must reject timeoutSec='+bad);
+  }
+});

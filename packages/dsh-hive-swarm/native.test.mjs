@@ -421,3 +421,178 @@ test('B2: samePath handles Windows drive-letter case mismatch in prepare and cre
   assert.equal(await f.native.create({cwd:process.cwd()}),'owned');
   assert.equal(f.calls.findLast(c=>c.method==='create').args.request.workspaceId,'ws-case');
 });
+
+test('2.2.0 sandbox parent inheritance: danger-full-access propagates to writable workers only, never escalates read-only or workspace-write',async()=>{
+  const {createNativeAccess}=await import('./native.mjs');
+  // (a) parent danger-full-access -> writable subagent inherits danger-full-access (even with additionalWritableRoots)
+  const f1=subagentFixture({extraRoots:true});
+  f1.modes.set('parent-chat','danger-full-access');
+  const native1=createNativeAccess(f1.ctx,{ownsSession:()=>false,coordinationTools:['hive_swarm_set_turn_outcome']});
+  const writableSub=await native1.startSubagent({
+    teamId:'team-dfa',parentSessionId:'parent-chat',memberName:'builder',label:'@builder',
+    cwd:process.cwd(),writable:true,model:{provider:'p',model:'m'},effort:'max',forkCoordinator:false,prompt:'Write code',
+  });
+  assert.equal(f1.modes.get(writableSub.sessionId),'danger-full-access');
+
+  // (b) parent danger-full-access -> read-only worker (writable: false) STILL locks to read-only and rejects extra roots
+  const f2=subagentFixture({extraRoots:false});
+  f2.modes.set('parent-chat','danger-full-access');
+  const native2=createNativeAccess(f2.ctx,{ownsSession:()=>false});
+  const roSub=await native2.startSubagent({
+    teamId:'team-dfa',parentSessionId:'parent-chat',memberName:'reader',label:'@reader',
+    cwd:process.cwd(),writable:false,model:{provider:'p',model:'m'},effort:'max',forkCoordinator:false,prompt:'Read only',
+  });
+  assert.equal(f2.modes.get(roSub.sessionId),'read-only');
+  assert.equal(f2.restrictions.at(-1).f.allow.includes('write'),false);
+  assert.match(f2.guards.at(-1).fn({name:'pwsh',args:{sandbox_permissions:'workspace-write'}}),/read-only/i);
+
+  // (c) parent workspace-write -> writable worker stays workspace-write (never escalates)
+  const f3=subagentFixture({extraRoots:false});
+  f3.modes.set('parent-chat','workspace-write');
+  const native3=createNativeAccess(f3.ctx,{ownsSession:()=>false});
+  const wwSub=await native3.startSubagent({
+    teamId:'team-ww',parentSessionId:'parent-chat',memberName:'writer',label:'@writer',
+    cwd:process.cwd(),writable:true,model:{provider:'p',model:'m'},effort:'max',forkCoordinator:false,prompt:'Write confined',
+  });
+  assert.equal(f3.modes.get(wwSub.sessionId),'workspace-write');
+
+  // Worktree / session/create fallback path via prepare({..., parentSessionId}) also inherits parent danger-full-access
+  const parentSess={id:'parent-dfa',header:{cwd:process.cwd()}};
+  const childSess={id:'wt-sess',header:{cwd:process.cwd()},append:(_t,d)=>{if(_t==='sandbox/mode')wtMode=d.mode;}};
+  let wtMode='workspace-write';
+  const sessions=new Map([['parent-dfa',parentSess],['wt-sess',childSess]]);
+  const childAgent={id:'wt-sess',session:childSess,ctx:{tools:{restrict:()=>()=>{},definitions:()=>[{name:'read'},{name:'write'}],guard:()=>()=>{}}},model:{select:()=>{}},whenIdle:async()=>{}};
+  const nWt=createNativeAccess({
+    connection:{createPeer:()=>({principal:{kind:'owner'},dispose:async()=>{}})},
+    typertGateway:{invoke:async()=>({accepted:true})},
+    sessions:{get:id=>sessions.get(id),flush:async()=>true},
+    agents:{get:id=>id==='wt-sess'?childAgent:undefined},
+    sandboxPolicy:{resolve:({session})=>({mode:session.id==='parent-dfa'?'danger-full-access':wtMode,workspaceRoot:process.cwd(),additionalWritableRoots:['C:/other']})},
+    fs:{sandboxMode:'read-only'},shell:{sandboxMode:'read-only'},
+  },{ownsSession:id=>id==='wt-sess'});
+  await nWt.prepare('wt-sess',{cwd:process.cwd(),writable:true,model:{provider:'p',model:'m'},parentSessionId:'parent-dfa'});
+  assert.equal(wtMode,'danger-full-access');
+  await native1.dispose();await native2.dispose();await native3.dispose();await nWt.dispose();
+});
+
+test('2.2.0 validateAndLock excludes scope-local non-restrictable tools from tools.restrict without weakening guard',async()=>{
+  const {createNativeAccess}=await import('./native.mjs');
+  const f=await fixture();
+  const defs=['read','write','pwsh','skill','hive_swarm_set_turn_outcome','unrelated_admin'].map(name=>({name}));
+  const restrictable=new Set(['read','write','pwsh','unrelated_admin']);
+  f.agent.ctx.tools={
+    definitions:()=>defs,
+    view:()=>({restrictableNames:restrictable}),
+    restrict:filter=>{
+      for(const n of filter.allow??[])if(!restrictable.has(n))throw Error(`tools.restrict() names unknown global tool "${n}"`);
+      f.restrictions.push(filter);return()=>{};
+    },
+    guard:fn=>{f.guards.push(fn);return()=>{};},
+  };
+  await f.native.prepare('owned',{cwd:process.cwd(),writable:false,model:{provider:'p',model:'m'}});
+  assert.equal(f.restrictions.at(-1).allow.includes('skill'),false);
+  assert.equal(f.restrictions.at(-1).allow.includes('read'),true);
+  assert.equal(f.guards.at(-1)({name:'skill'}),undefined);
+  assert.ok(f.guards.at(-1)({name:'unrelated_admin'}));
+
+  // Fallback when tools.view is absent and tools.restrict throws on a scope-local tool
+  const restrictions2=[],guards2=[];
+  const f2=await fixture();
+  f2.agent.ctx.tools={
+    definitions:()=>defs,
+    restrict:filter=>{
+      for(const n of filter.allow??[])if(!restrictable.has(n))throw Error(`tools.restrict() names unknown global tool "${n}"`);
+      restrictions2.push(filter);return()=>{};
+    },
+    guard:fn=>{guards2.push(fn);return()=>{};},
+  };
+  const n2=createNativeAccess(f2.ctx,{ownsSession:id=>id==='owned',coordinationTools:['hive_swarm_set_turn_outcome']});
+  await n2.prepare('owned',{cwd:process.cwd(),writable:false,model:{provider:'p',model:'m'}});
+  assert.deepEqual(restrictions2.at(-1).allow.sort(),['pwsh','read']);
+  assert.equal(guards2.at(-1)({name:'hive_swarm_set_turn_outcome'}),undefined);
+  assert.ok(guards2.at(-1)({name:'write'}));
+  await n2.dispose();
+});
+
+test('2.2.0 Turn-1 session/fork-unavailable falls back cleanly in forkParent and startSubagent',async()=>{
+  const {createNativeAccess}=await import('./native.mjs');
+  const f=subagentFixture();
+  const origInvoke=f.ctx.typertGateway.invoke;
+  f.ctx.typertGateway.invoke=async request=>{
+    f.calls.push(request);
+    if(request.method==='fork')throw Object.assign(Error('session/fork-unavailable: source has no completed turn'),{code:'session/fork-unavailable'});
+    if(request.method==='create')return {sessionId:'clean-session-1'};
+    return origInvoke(request);
+  };
+  const native=createNativeAccess(f.ctx,{ownsSession:()=>false});
+  const sid=await native.forkParent('parent-chat',{cwd:process.cwd()});
+  assert.equal(sid,'clean-session-1');
+  assert.equal(native.wasForkFallback(sid),true);
+
+  const origStart=f.ctx.subagents.startActivation;
+  f.ctx.subagents.startActivation=async spec=>{
+    if(spec.provider==='fork')throw Object.assign(Error('session/fork-unavailable'),{code:'session/fork-unavailable'});
+    return origStart(spec);
+  };
+  const started=await native.startSubagent({
+    teamId:'t1',parentSessionId:'parent-chat',memberName:'helper',label:'@helper',
+    cwd:process.cwd(),writable:false,model:{provider:'p',model:'m'},forkCoordinator:true,prompt:'Earlier messages in this chat are source history from @coordinator; follow only the Hive Swarm brief below.\n\nWork',
+  });
+  assert.ok(started?.sessionId);
+  assert.equal(native.wasForkFallback(started.sessionId),true);
+  const lastSpec=f.calls.findLast(c=>c.kind==='startActivation').spec;
+  assert.equal(lastSpec.provider,'spawn');
+  assert.doesNotMatch(lastSpec.prompt[0].text,/Earlier messages in this chat are source history/);
+  await native.dispose();
+});
+
+test('2.2.0 events({afterSeq}) stops pagination early and sessionRoute widens fallback lookback to 200',async()=>{
+  const {createNativeAccess}=await import('./native.mjs');
+  const f=await fixture();
+  const eventCalls=[];
+  f.ctx.typertGateway.invoke=async request=>{
+    if(request.method==='state')return {active:true};
+    if(request.method==='events'){
+      eventCalls.push(request.args.request);
+      if(request.args.request.address.sessionId==='parent'){
+        const records=Array.from({length:60},(_,i)=>({event:{seq:i+1,type:i===0?'request/header':'tool/call',data:i===0?{header:{config:{provider:'x',model:'y',reasoningEffort:'high'}}}:{}}}));
+        return {cursor:60,records,hasMore:false};
+      }
+      if(!request.args.request.beforeSeq){
+        return {cursor:15,records:[{event:{seq:11,type:'turn/start'}},{event:{seq:12,type:'turn/end'}}],hasMore:true};
+      }
+      throw Error('should not fetch earlier page when afterSeq <= earliest');
+    }
+    return {accepted:true};
+  };
+  const delta=await f.native.events('owned',{afterSeq:11});
+  assert.deepEqual(delta.map(e=>e.seq),[12]);
+
+  const route=await f.native.sessionRoute({id:'parent',session:{header:{cwd:process.cwd()}},model:{}});
+  assert.equal(eventCalls.at(-1).maxMessages,200);
+  assert.equal(route.model,'x/y');
+});
+
+test('2.2.0 startSubagent invokes onStarting synchronously before startActivation and rolls back on failure',async()=>{
+  const {createNativeAccess}=await import('./native.mjs');
+  const f=subagentFixture({failSandbox:true});
+  const native=createNativeAccess(f.ctx,{ownsSession:()=>false});
+  const lifecycle=[];
+  const origStart=f.ctx.subagents.startActivation;
+  f.ctx.subagents.startActivation=async spec=>{
+    lifecycle.push(['in-startActivation',spec.childId]);
+    return origStart(spec);
+  };
+  await assert.rejects(native.startSubagent({
+    teamId:'t1',parentSessionId:'parent-chat',memberName:'builder',label:'@builder',
+    cwd:process.cwd(),writable:true,model:{provider:'p',model:'m'},forkCoordinator:false,prompt:'Run',
+    onStarting:id=>lifecycle.push(['onStarting',id]),
+    onRollback:id=>lifecycle.push(['onRollback',id]),
+  }),/sandbox/i);
+  assert.equal(lifecycle[0][0],'onStarting');
+  assert.equal(lifecycle[1][0],'in-startActivation');
+  assert.equal(lifecycle[2][0],'onRollback');
+  assert.equal(lifecycle[0][1],lifecycle[1][1]);
+  assert.equal(lifecycle[0][1],lifecycle[2][1]);
+  await native.dispose();
+});

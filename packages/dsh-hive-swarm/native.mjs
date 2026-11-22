@@ -41,21 +41,105 @@ function isFallbackSubagentError(error) {
   return error.name==='SubagentDepthError'||fallbackSubagentCodes.has(error.code);
 }
 
+function isForkUnavailableError(error) {
+  if(!error||error.securityViolation||error.name==='AbortError')return false;
+  if(error.code==='session/fork-unavailable'||error.code==='FORK_UNAVAILABLE'||error.error?.code==='session/fork-unavailable')return true;
+  return /session\/fork-unavailable|fork-unavailable|no completed turn/i.test(String(error.message??error));
+}
+
+function stripForkFraming(prompt) {
+  const note='Note: source chat has no completed turn to fork yet (session/fork-unavailable), so this worker started a clean session. Follow only the Hive Swarm brief below.';
+  const text=String(prompt??'');
+  if(/^Earlier messages in this chat are source history[^\n]*$/m.test(text)) {
+    return text.replace(/^Earlier messages in this chat are source history[^\n]*$/m,note);
+  }
+  return note+'\n\n'+text;
+}
+
 /** Adapter for DSH 0.2.2-rc.5 subagents, Gateway, SessionStore and per-session sandbox contracts. */
-export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=[]}={}) {
+export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=[],scopedTools}={}) {
   if(typeof ctx.connection?.createPeer!=='function'||typeof ctx.typertGateway?.invoke!=='function')throw Error('Native DSH Gateway and Connection are unavailable.');
   const peer=ctx.connection.createPeer({principal:{kind:'owner'},interactions:'none'});
   const subagents=optionalService(ctx,'subagents');
   const sessionTitle=optionalService(ctx,'sessionTitle');
   const created=new Set(),scopes=new Map();
-  const subagentsSeen=new Set(),subagentParents=new Map(),subagentActivations=new Map(),subagentResumes=new Map(),pendingStarts=new Map(),usedSubagentNames=new Set();
+  const subagentsSeen=new Set(),subagentParents=new Map(),sessionParents=new Map(),forkFallbacks=new Set(),subagentActivations=new Map(),subagentResumes=new Map(),pendingStarts=new Map(),usedSubagentNames=new Set();
   let disposed=false;
   const owned=id=>{if(disposed||(!created.has(id)&&!ownsSession(id)))throw Error('Only a Hive-owned session may be controlled.');};
   const invoke=(method,request,signal,namespace='session')=>ctx.typertGateway.invoke({namespace,method,args:request===undefined?{}:{request},peer,signal:signal??never()});
   const live=id=>{const agent=ctx.agents?.get(id);if(!agent||agent.session!==ctx.sessions?.get(id))throw Error('The owned native Agent is unavailable.');return agent;};
   const selectionOf=(model,effort)=>({provider:model?.provider,model:model?.model,...effort?{reasoningEffort:effort}:{}});
 
-  function validateAndLock(agent,{cwd,writable,selection,agentCtx}) {
+  function resolveWorkerMode(id,agent,{writable,parentSessionId,policyService}) {
+    if(!writable)return 'read-only';
+    const resolvedParentId=parentSessionId??subagentParents.get(id)??sessionParents.get(id)??agent.session?.header?.parentSession;
+    const parentAgent=resolvedParentId?ctx.agents?.get(resolvedParentId):undefined;
+    const parentSession=resolvedParentId?(ctx.sessions?.get(resolvedParentId)??parentAgent?.session):undefined;
+    if(!parentSession)return 'workspace-write';
+    let parentPolicyService=policyService;
+    if(parentAgent?.ctx) {
+      const parentPreset=ctx.agentPresets?.composedPreset(parentAgent.ctx);
+      parentPolicyService=parentPreset===undefined
+        ?ctx.sandboxPolicy
+        :ctx.agentPresets.serviceFor(parentAgent,'sandboxPolicy')??parentAgent.ctx?.get?.('sandboxPolicy');
+    }
+    const parentMode=parentPolicyService?.resolve?.({session:parentSession})?.mode;
+    return parentMode==='danger-full-access'?'danger-full-access':'workspace-write';
+  }
+
+  function applyToolScope(id,agent,effectiveCtx,{allow,writable}) {
+    const releases=[];
+    try {
+      const scopedDefs=typeof scopedTools==='function'?scopedTools(agent,effectiveCtx):[];
+      if(Array.isArray(scopedDefs)&&scopedDefs.length&&typeof effectiveCtx.tools.register==='function') {
+        for(const def of scopedDefs) {
+          const release=effectiveCtx.tools.register(def.tool??def,def.options);
+          if(typeof release==='function')releases.push(release);
+        }
+      }
+      const viewRestrictable=typeof effectiveCtx.tools.view==='function'?effectiveCtx.tools.view(agent)?.restrictableNames:undefined;
+      const explicitRestrictable=effectiveCtx.tools.restrictableNames;
+      const knownRestrictable=viewRestrictable??(typeof explicitRestrictable==='function'?explicitRestrictable(agent):explicitRestrictable);
+      let restrictAllow=knownRestrictable?allow.filter(toolName=>new Set(knownRestrictable).has(toolName)):allow;
+      const tryRestrict=names=>{
+        try{return {ok:true,release:effectiveCtx.tools.restrict({allow:names})};}
+        catch(error){return {ok:false,error};}
+      };
+      let restricted=tryRestrict(restrictAllow);
+      if(!restricted.ok) {
+        const emptyProbe=tryRestrict([]);
+        if(!emptyProbe.ok)throw restricted.error;
+        if(typeof emptyProbe.release==='function')emptyProbe.release();
+        const filterRestrictable=items=>{
+          if(!items.length)return [];
+          const probe=tryRestrict(items);
+          if(probe.ok){if(typeof probe.release==='function')probe.release();return items;}
+          if(items.length===1)return [];
+          const mid=items.length>>1;
+          return [...filterRestrictable(items.slice(0,mid)),...filterRestrictable(items.slice(mid))];
+        };
+        restrictAllow=filterRestrictable(restrictAllow);
+        restricted=tryRestrict(restrictAllow);
+        if(!restricted.ok)throw restricted.error;
+      }
+      if(typeof restricted.release==='function')releases.push(restricted.release);
+      const permitted=new Set(allow);
+      const guardRelease=effectiveCtx.tools.guard(exec=>{
+        if(!permitted.has(exec.name))return 'This capability is outside the Hive worker grant.';
+        if(!writable&&shellTools.has(exec.name)&&(exec.args?.sandbox_permissions||exec.input?.sandbox_permissions)) {
+          return 'Read-only Hive workers cannot escalate shell sandbox permissions.';
+        }
+        return undefined;
+      });
+      if(typeof guardRelease==='function')releases.push(guardRelease);
+      scopes.set(id,()=>{for(const release of releases.reverse())release();});
+    } catch(error) {
+      for(const release of releases.reverse()){try{release();}catch{}}
+      throw error;
+    }
+  }
+
+  function validateAndLock(agent,{cwd,writable,selection,agentCtx,parentSessionId}) {
     const id=agent?.id;
     const effectiveCtx=agent?.ctx??agentCtx;
     if(!agent||!id||agent.session!==ctx.sessions?.get(id)||!samePath(agent.session.header.cwd,cwd))throw Error('Owned session workspace does not match.');
@@ -65,32 +149,27 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
     if(service('fs')?.sandboxMode===undefined||service('shell')?.sandboxMode===undefined||typeof policyService?.resolve!=='function') {
       throw Error('Enforcing filesystem and shell sandbox capabilities are required in the worker preset.');
     }
-    const mode=writable?'workspace-write':'read-only';
+    const mode=resolveWorkerMode(id,agent,{writable,parentSessionId,policyService});
     let policy=policyService.resolve({session:agent.session});
     if(policy?.mode!==mode) {
       agent.session.append('sandbox/mode',{mode});
       policy=policyService.resolve({session:agent.session});
     }
-    if(policy?.mode!==mode||!samePath(policy.workspaceRoot,cwd)||(policy.additionalWritableRoots?.length??0)>0) {
+    const confined=mode!=='danger-full-access';
+    if(policy?.mode!==mode||
+      (confined?(!policy.workspaceRoot||!samePath(policy.workspaceRoot,cwd)):(policy.workspaceRoot!=null&&!samePath(policy.workspaceRoot,cwd)))||
+      (confined&&(policy.additionalWritableRoots?.length??0)>0)) {
       throw Error('Native sandbox scope has broader writable roots or the wrong policy.');
     }
     if(typeof effectiveCtx?.tools?.restrict!=='function'||typeof effectiveCtx.tools.guard!=='function'||typeof agent.model?.select!=='function') {
       throw Error('Scoped tools, guards and session-local model selection are unavailable.');
     }
+    scopes.get(id)?.();
+    scopes.delete(id);
     const definitions=effectiveCtx.tools.definitions(agent);
     const coordination=new Set(coordinationTools);
     const allow=definitions.map(tool=>tool.name).filter(name=>readTools.has(name)||shellTools.has(name)||(writable&&writeTools.has(name))||coordination.has(name));
-    scopes.get(id)?.();
-    const releases=[effectiveCtx.tools.restrict({allow})];
-    const permitted=new Set(allow);
-    releases.push(effectiveCtx.tools.guard(exec=>{
-      if(!permitted.has(exec.name))return 'This capability is outside the Hive worker grant.';
-      if(!writable&&shellTools.has(exec.name)&&(exec.args?.sandbox_permissions||exec.input?.sandbox_permissions)) {
-        return 'Read-only Hive workers cannot escalate shell sandbox permissions.';
-      }
-      return undefined;
-    }));
-    scopes.set(id,()=>{for(const release of releases.reverse())release();});
+    applyToolScope(id,agent,effectiveCtx,{allow,writable});
     // SessionController.selectModel also saves the personal default in rc.5. Keep this choice session-local.
     if(selection?.provider&&selection?.model)agent.model.select(selection);
   }
@@ -172,9 +251,19 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
     if(disposed||typeof parentSessionId!=='string'||!parentSessionId)throw Error('Coordinator history is unavailable to fork.');
     const parentSession=ctx.sessions?.get(parentSessionId);
     if(parentSession?.header?.cwd&&!samePath(parentSession.header.cwd,cwd))throw Error('A native history fork cannot change its immutable workspace.');
-    const value=await invoke('fork',{sessionId:parentSessionId,allowMigration:false},signal);
-    if(typeof value?.sessionId!=='string'||!value.sessionId||value.sessionId===parentSessionId)throw Error('Native fork returned no distinct session identity.');
-    created.add(value.sessionId);return value.sessionId;
+    try {
+      const value=await invoke('fork',{sessionId:parentSessionId,allowMigration:false},signal);
+      if(typeof value?.sessionId!=='string'||!value.sessionId||value.sessionId===parentSessionId)throw Error('Native fork returned no distinct session identity.');
+      created.add(value.sessionId);sessionParents.set(value.sessionId,parentSessionId);return value.sessionId;
+    } catch(error) {
+      if(!signal?.aborted&&isForkUnavailableError(error)) {
+        const sessionId=await create({cwd},signal);
+        sessionParents.set(sessionId,parentSessionId);
+        forkFallbacks.add(sessionId);
+        return sessionId;
+      }
+      throw error;
+    }
   }
 
   async function rename(id,title,signal) {
@@ -191,16 +280,19 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
     }
   }
 
-  async function prepare(id,{cwd,writable,model,effort},signal) {
+  async function prepare(id,{cwd,writable,model,effort,parentSessionId},signal) {
     owned(id);signal?.throwIfAborted();
+    if(parentSessionId&&!ctx.sessions?.get(parentSessionId)&&!ctx.agents?.get(parentSessionId)&&typeof ctx.sessionController?.resolveAgent==='function') {
+      await ctx.sessionController.resolveAgent(parentSessionId).catch(()=>{});
+    }
     const agent=await resolveLiveAgent(id);
     const selection=selectionOf(model,effort);
     await ctx.llm?.resolveCallConfig(selection);
-    validateAndLock(agent,{cwd,writable,selection});
+    validateAndLock(agent,{cwd,writable,selection,parentSessionId});
     if(!await ctx.sessions.flush(agent.session))throw Error('Session policy has no durable persistence listener.');
   }
 
-  async function startSubagent({teamId,parentSessionId,memberName,label,cwd,writable,model,effort,forkCoordinator,prompt},signal) {
+  async function startSubagent({teamId,parentSessionId,memberName,label,cwd,writable,model,effort,forkCoordinator,prompt,onStarting,onRollback},signal) {
     if(disposed)throw Error('Native adapter is disposed.');
     signal?.throwIfAborted();
     if(!subagents||typeof subagents.startActivation!=='function'||!parentSessionId)return null;
@@ -219,9 +311,19 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
     const parentDepth=Math.max(parent.session?.header?.delegationDepth??0,parent.options?.subagentDepth??0);
     const childId=randomUUID();
     const subagentName=await allocateSubagentName(parentSessionId,memberName,teamId,signal);
-    const pending={cwd,writable,selection,prepared:false,error:null};
+    const pending={cwd,writable,selection,parentSessionId,prepared:false,error:null};
     pendingStarts.set(childId,pending);
-    let activation;
+    const rollbackChild=id=>{
+      created.delete(id);
+      subagentsSeen.delete(id);
+      subagentParents.delete(id);
+      forkFallbacks.delete(id);
+      onRollback?.(id);
+    };
+    created.add(childId);
+    registerSubagent(childId,parentSessionId);
+    onStarting?.(childId);
+    let activation,forkFallback=false;
     try {
       const baseSpec={
         provider:forkCoordinator?'fork':'spawn',
@@ -235,14 +337,27 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
         childId,
         signal,
       };
+      const launchActivation=async spec=>{
+        try {
+          return await subagents.startActivation({...spec,...subagentName?{name:subagentName}:{}});
+        } catch(error) {
+          if((error?.code==='INVALID_AGENT_NAME'||error?.code==='DUPLICATE_AGENT_NAME')&&subagentName) {
+            return await subagents.startActivation(spec);
+          }
+          throw error;
+        }
+      };
       try {
-        activation=await subagents.startActivation({...baseSpec,...subagentName?{name:subagentName}:{}});
+        activation=await launchActivation(baseSpec);
       } catch(error) {
-        if((error?.code==='INVALID_AGENT_NAME'||error?.code==='DUPLICATE_AGENT_NAME')&&subagentName) {
-          activation=await subagents.startActivation(baseSpec);
+        if(!pending.error&&!signal?.aborted&&forkCoordinator&&isForkUnavailableError(error)) {
+          forkFallback=true;
+          pending.prepared=false;
+          activation=await launchActivation({...baseSpec,provider:'spawn',prompt:[{type:'text',text:stripForkFraming(prompt)}]});
         } else throw error;
       }
     } catch(error) {
+      rollbackChild(childId);
       if(pending.error)throw pending.error;
       if(!signal?.aborted&&isFallbackSubagentError(error))return null;
       throw error;
@@ -250,26 +365,31 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
       pendingStarts.delete(childId);
     }
     const actualId=activation.childId??childId;
+    if(actualId!==childId) {
+      rollbackChild(childId);
+      created.add(actualId);
+      registerSubagent(actualId,parentSessionId);
+      onStarting?.(actualId);
+    }
+    if(forkFallback)forkFallbacks.add(actualId);
     const done=Promise.resolve(activation.result).catch(()=>{});
     const disposeActivation=async()=>{
       try{await activation.dispose?.();}catch{/* Ignore secondary dispose error */}
       await done;
     };
-    if(pending.error){await disposeActivation();throw pending.error;}
-    created.add(actualId);
-    registerSubagent(actualId,parentSessionId);
+    if(pending.error){rollbackChild(actualId);await disposeActivation();throw pending.error;}
     subagentActivations.set(actualId,{activation,done});
     if(!pending.prepared) {
-      try{await prepare(actualId,{cwd,writable,model,effort},signal);}
-      catch(error){await disposeActivation();subagentActivations.delete(actualId);throw error;}
+      try{await prepare(actualId,{cwd,writable,model,effort,parentSessionId},signal);}
+      catch(error){rollbackChild(actualId);subagentActivations.delete(actualId);await disposeActivation();throw error;}
     } else {
       const session=ctx.sessions?.get(actualId);
       if(!session||!await ctx.sessions.flush(session)){
-        await disposeActivation();subagentActivations.delete(actualId);
+        rollbackChild(actualId);subagentActivations.delete(actualId);await disposeActivation();
         throw Error('Session policy has no durable persistence listener.');
       }
     }
-    return {sessionId:actualId,subagentName:activation.name??subagentName,messageId:activation.messageId,executionMode:'subagent'};
+    return {sessionId:actualId,subagentName:activation.name??subagentName,messageId:activation.messageId,executionMode:'subagent',...forkFallback?{forkFallback:true}:{}};
   }
 
   async function prepareSubagentTurn(id,{parentSessionId,cwd,writable,model,effort},signal) {
@@ -281,9 +401,12 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
     if(priorResume){try{await priorResume.handle.dispose?.();}catch{} subagentResumes.delete(id);}
     const selection=selectionOf(model,effort);
     await ctx.llm?.resolveCallConfig(selection);
+    if(parentSessionId&&!ctx.sessions?.get(parentSessionId)&&!ctx.agents?.get(parentSessionId)&&typeof ctx.sessionController?.resolveAgent==='function') {
+      await ctx.sessionController.resolveAgent(parentSessionId).catch(()=>{});
+    }
     const existing=ctx.agents?.get(id);
     if(existing) {
-      validateAndLock(existing,{cwd,writable,selection});
+      validateAndLock(existing,{cwd,writable,selection,parentSessionId});
       if(!await ctx.sessions.flush(existing.session))throw Error('Session policy has no durable persistence listener.');
       return;
     }
@@ -296,7 +419,7 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
           const presets=ctx.agentPresets;
           const presetId=child.session?.header?.agentPreset??presets?.presetForSession?.(child.session);
           if(presetId&&typeof presets?.mount==='function')await presets.mount(childCtx,presetId);
-          validateAndLock(child,{cwd,writable,selection,agentCtx:childCtx});
+          validateAndLock(child,{cwd,writable,selection,agentCtx:childCtx,parentSessionId});
         },
       });
       try {
@@ -310,13 +433,10 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
       }
       return;
     }
-    if(parentSessionId&&!ctx.agents?.get(parentSessionId)&&typeof ctx.sessionController?.resolveAgent==='function') {
-      await ctx.sessionController.resolveAgent(parentSessionId).catch(()=>{});
-    }
-    pendingStarts.set(id,{cwd,writable,selection,prepared:false,error:null});
+    pendingStarts.set(id,{cwd,writable,selection,parentSessionId,prepared:false,error:null});
   }
 
-  async function promptSubagentTurn({sessionId,requestId,cwd,writable,model,effort,prompt},signal) {
+  async function promptSubagentTurn({sessionId,requestId,parentSessionId,cwd,writable,model,effort,prompt},signal) {
     owned(sessionId);signal?.throwIfAborted();
     const resumed=subagentResumes.get(sessionId);
     const warmAgent=resumed?.handle?.agent??(typeof ctx.agents?.get(sessionId)?.followup==='function'?ctx.agents.get(sessionId):null);
@@ -335,7 +455,7 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
         throw pending.error;
       }
       if(pending&&!pending.prepared&&ctx.agents?.get(sessionId)) {
-        await prepare(sessionId,{cwd,writable,model,effort},signal);
+        await prepare(sessionId,{cwd,writable,model,effort,parentSessionId:parentSessionId??pending.parentSessionId},signal);
       }
       return receipt;
     } finally {
@@ -383,14 +503,19 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
     const parentSessionId=opts.parentSessionId??subagentParents.get(id);
     if(isSubagent&&!parentSessionId)throw Error('Parent session identity is required to read subagent history.');
     const address=isSubagent?{kind:'subagent',parentSessionId,childSessionId:id,mode:'continuable'}:{kind:'session',sessionId:id};
+    const afterSeq=Number.isSafeInteger(opts.afterSeq)&&opts.afterSeq>=0?opts.afterSeq:undefined;
     const records=[];let beforeSeq,throughSeq;
     for(let page=0;page<100;page++) {
-      const value=await invoke('events',{address,maxMessages:1000,
+      const value=await invoke('events',{address,maxMessages:afterSeq!==undefined&&page===0?200:1000,
         ...beforeSeq===undefined?{}:{beforeSeq},...throughSeq===undefined?{}:{throughSeq}},signal);
       throughSeq??=value.cursor;
-      const batch=value.records.map(record=>record.event);records.push(...batch);
-      if(!value.hasMore)return records;
+      const batch=(value.records??[]).map(record=>record.event??record);
+      for(const ev of batch) {
+        if(afterSeq===undefined||ev.seq>afterSeq)records.push(ev);
+      }
+      if(!value.hasMore||!batch.length)return records;
       const earliest=Math.min(...batch.map(event=>event.seq));
+      if(afterSeq!==undefined&&earliest<=afterSeq)return records;
       if(!Number.isSafeInteger(earliest)||beforeSeq!==undefined&&earliest>=beforeSeq)throw Error('Native history cursor made no progress.');
       beforeSeq=earliest;
     }
@@ -465,11 +590,21 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
         const address=(subagentsSeen.has(agent.id)||agent.session?.header?.origin==='subagent')&&parentSessionId
           ?{kind:'subagent',parentSessionId,childSessionId:agent.id,mode:'continuable'}
           :{kind:'session',sessionId:agent.id};
-        const value=await invoke('events',{address,maxMessages:40},signal);
-        for(const record of [...(value?.records??[])].reverse()) {
-          const ev=record?.event??record;
-          const cfg=ev?.type==='request/header'?ev.data?.header?.config:(ev?.type==='model/selection'||ev?.type==='model/selected')?ev.data:null;
-          if(cfg?.provider&&cfg?.model){provider=cfg.provider;model=cfg.model;effort??=cfg.reasoningEffort;break;}
+        let beforeSeq,throughSeq;
+        for(let page=0;page<5;page++) {
+          const value=await invoke('events',{address,maxMessages:200,
+            ...beforeSeq===undefined?{}:{beforeSeq},...throughSeq===undefined?{}:{throughSeq}},signal);
+          throughSeq??=value?.cursor;
+          const recs=value?.records??[];
+          for(const record of [...recs].reverse()) {
+            const ev=record?.event??record;
+            const cfg=ev?.type==='request/header'?ev.data?.header?.config:(ev?.type==='model/selection'||ev?.type==='model/selected')?ev.data:null;
+            if(cfg?.provider&&cfg?.model){provider=cfg.provider;model=cfg.model;effort??=cfg.reasoningEffort;break;}
+          }
+          if((provider&&model)||!value?.hasMore||!recs.length)break;
+          const earliest=Math.min(...recs.map(r=>(r?.event??r)?.seq));
+          if(!Number.isSafeInteger(earliest)||(beforeSeq!==undefined&&earliest>=beforeSeq))break;
+          beforeSeq=earliest;
         }
       } catch {/* Ignore unavailable session events */}
     }
@@ -482,9 +617,23 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
   }
 
   return {listModels,sessionRoute,create,forkParent,rename,prepare,startSubagent,prepareSubagentTurn,promptSubagentTurn,settleTurn,releaseTurn,registerSubagent,events,flush,cancel,
-    fork:async(id,signal)=>{owned(id);const value=await invoke('fork',{sessionId:id,allowMigration:false},signal);
-      if(typeof value?.sessionId!=='string'||!value.sessionId||value.sessionId===id)throw Error('Native fork returned no distinct session identity.');
-      created.add(value.sessionId);return value.sessionId;},
+    wasForkFallback:id=>forkFallbacks.has(id),
+    fork:async(id,signal,opts={})=>{
+      owned(id);
+      try {
+        const value=await invoke('fork',{sessionId:id,allowMigration:false},signal);
+        if(typeof value?.sessionId!=='string'||!value.sessionId||value.sessionId===id)throw Error('Native fork returned no distinct session identity.');
+        created.add(value.sessionId);return value.sessionId;
+      } catch(error) {
+        const fallbackCwd=opts?.cwd??ctx.sessions?.get(id)?.header?.cwd;
+        if(!signal?.aborted&&fallbackCwd&&isForkUnavailableError(error)) {
+          const sessionId=await create({cwd:fallbackCwd},signal);
+          forkFallbacks.add(sessionId);
+          return sessionId;
+        }
+        throw error;
+      }
+    },
     currentTurn:id=>{owned(id);return ctx.agents.turnBoundaryOf(live(id).session)},
     isCurrentAgent:agent=>Boolean(agent&&ctx.agents?.get(agent.id)===agent&&ctx.sessions?.get(agent.id)===agent.session),
     state:async(id,signal)=>{owned(id);return invoke('state',{sessionId:id},signal)},
@@ -494,7 +643,7 @@ export function createNativeAccess(ctx,{ownsSession=()=>false,coordinationTools=
       if(disposed)return;disposed=true;
       try{releaseLifecycle?.();}catch{}
       for(const release of scopes.values())release();scopes.clear();
-      pendingStarts.clear();subagentActivations.clear();subagentResumes.clear();
+      pendingStarts.clear();subagentActivations.clear();subagentResumes.clear();sessionParents.clear();forkFallbacks.clear();
       await peer.dispose();
     },
   };
