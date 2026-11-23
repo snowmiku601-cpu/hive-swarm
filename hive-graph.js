@@ -1245,7 +1245,7 @@
     const titleFontSize = radius < 65 ? 10.5 : 11.5;
     const subtitleFontSize = radius < 65 ? 10 : 11;
     const titleLineHeight = radius < 65 ? 11.5 : 13;
-    const maxTitleChars = Math.max(8, Math.floor((1.36 * radius - 14) / (titleFontSize * 0.56)));
+    const maxTitleChars = Math.max(8, Math.min(16, Math.floor((1.36 * radius - 14) / (titleFontSize * 0.56))));
     const rawTitle = cl.fullTitle ?? cl.label ?? '';
     const wrapped = wrapHexTitle(rawTitle, maxTitleChars, 2);
     const titleLines = wrapped.lines.length ? wrapped.lines : [String(cl.label ?? '')];
