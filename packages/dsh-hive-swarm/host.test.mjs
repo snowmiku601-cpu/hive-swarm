@@ -122,7 +122,8 @@ test('worker tool visibility hides owner-only tools and effort schema accepts nu
   assert.match(f.tools.get('hive_swarm_start_team').tool.parameters.properties.members.items.properties.tasks.description,/sharding|parallel worker/i);
   assert.deepEqual(f.tools.get('hive_swarm_read_board').tool.parameters.properties.limit,{type:['integer','null'],minimum:1,maximum:20});
   assert.deepEqual(f.tools.get('hive_swarm_board_history').tool.parameters.properties.limit,{type:['integer','null'],minimum:1,maximum:200});
-  assert.deepEqual(f.tools.get('hive_swarm_wait_for_board').tool.parameters.properties.timeoutSec,{type:['integer','null'],minimum:1,maximum:55});
+  assert.deepEqual(f.tools.get('hive_swarm_wait_for_board').tool.parameters.properties.timeoutSec,{type:['integer','null'],minimum:1,maximum:900});
+  assert.match(f.tools.get('hive_swarm_wait_for_board').tool.description,/900/);
   for(const [toolName,{tool}] of f.tools) {
     const schema=tool.parameters;
     assert.equal(schema.type,'object',toolName+' parameters must be a JSON Schema object');
@@ -415,4 +416,176 @@ test('2.1.2 host registers owner-only hive_swarm_cancel_turn and nullable wake:f
   assert.equal(cancelled.members[0].status,'failed');
   assert.equal(cancelled.members[0].recoveryRequired,false);
   assert.equal(cancelled.members[0].inboxCount,undefined);
+});
+
+test('2.2.0 wait_for_board passes maxWaitTimeoutSec:900 and exposes 2.2.0 schemas with strict-mode normalization',async t=>{
+  const {createHost}=await import('./host.mjs');
+  const root=mkdtempSync(join(tmpdir(),'hive-host-220-'));
+  const tools=new Map(),seenCoreOpts=[],seenCommands=[];
+  const fakeApp={
+    snapshot:async()=>({teams:[],team:null}),close:async()=>({quiescent:true}),
+    board:{db:{prepare:()=>({all:()=>[]})},get:()=>({members:[{name:'builder',role:'worker'}]})},
+    command:async(action,cmdArgs,context)=>{
+      seenCommands.push({action,cmdArgs,context});
+      if(action==='start_team')return {id:'78963630-4947-4a29-93cb-959632ec9471',host:'deepseek-harness',members:cmdArgs.members??[],threads:cmdArgs.threads??[]};
+      return {ok:true};
+    },
+  };
+  const native={listModels:async()=>[],create:async()=>'w',prepare:async()=>{},prompt:async()=>{},wait:async()=>({reason:'idle'}),
+    currentTurn:()=>({}),events:async()=>[],flush:async()=>{},cancel:async()=>{},dispose:async()=>{},isCurrentAgent:agent=>agent?.current===true};
+  const ctx={connection:{fetch:{register:()=>async()=>{}}},workspaceRegistry:{list:()=>[{id:'w',path:root}]},
+    skills:{register:()=>()=>{}},tools:{register:(tool,options)=>{tools.set(tool.name,{tool,options});return()=>tools.delete(tool.name)}}};
+  const host=await createHost(ctx,{
+    dataDirectory:join(root,'state'),
+    coreFactory:opts=>{seenCoreOpts.push(opts);return fakeApp;},
+    storeFactory:file=>new RunStore(file),
+    nativeFactory:()=>native,
+  });
+  t.after(async()=>{await host.close();rmSync(root,{recursive:true,force:true});});
+
+  assert.equal(seenCoreOpts[0].maxWaitTimeoutSec,900);
+
+  const startTool=tools.get('hive_swarm_start_team').tool;
+  const planTool=tools.get('hive_swarm_set_team_plan').tool;
+  const addTool=tools.get('hive_swarm_add_member').tool;
+  const readTool=tools.get('hive_swarm_read_board').tool;
+  const retireTool=tools.get('hive_swarm_retire_member').tool;
+  const waitTool=tools.get('hive_swarm_wait_for_board').tool;
+  const channelTool=tools.get('hive_swarm_manage_channel').tool;
+
+  assert.deepEqual(startTool.parameters.properties.parallelWriters,{type:['boolean','null']});
+  assert.deepEqual(startTool.parameters.properties.worktreeMode,{type:['string','null'],enum:['external','local',null]});
+  assert.equal(startTool.parameters.properties.members.items.properties.brief.maxLength,4000);
+  assert.deepEqual(startTool.parameters.properties.members.items.properties.thread.type,['string','null']);
+  assert.equal(addTool.parameters.properties.member.properties.brief.maxLength,4000);
+  assert.deepEqual(addTool.parameters.properties.member.properties.thread.type,['string','null']);
+  assert.deepEqual(startTool.parameters.properties.threads.items.required,['id','title']);
+  assert.deepEqual(startTool.parameters.properties.threads.items.properties.goal,{type:['string','null']});
+  assert.deepEqual(planTool.parameters.properties.threads.items.required,['id','title']);
+  assert.deepEqual(readTool.parameters.properties.seqs,{type:['array','null'],items:{type:'integer',minimum:1},minItems:1,maxItems:20});
+  assert.deepEqual(retireTool.parameters.properties.dropDependency,{type:['boolean','null']});
+  assert.deepEqual(waitTool.parameters.properties.timeoutSec,{type:['integer','null'],minimum:1,maximum:900});
+  assert.deepEqual(channelTool.parameters.properties.op.enum,['create','list','subscribe','unsubscribe','archive']);
+
+  const exec={signal:new AbortController().signal,agent:{id:'parent-1',current:true,session:{header:{cwd:root}}}};
+  await startTool.execute({
+    cwd:root,task:'2.2.0 task',parallelWriters:true,worktreeMode:'local',
+    threads:[{id:'api',title:'API',goal:null,members:['builder']},{id:'ui',title:'UI',goal:'',members:null}],
+    members:[{name:'builder',brief:'Own API',thread:'api'},{name:'other',brief:'Empty thread',thread:''}],
+  },exec);
+  const started=seenCommands.at(-1).cmdArgs;
+  assert.equal(started.parallelWriters,true);
+  assert.equal(started.worktreeMode,'local');
+  assert.deepEqual(started.threads,[{id:'api',title:'API',members:['builder']},{id:'ui',title:'UI'}]);
+  assert.equal(started.members[0].thread,'api');
+  assert.equal(Object.hasOwn(started.members[1],'thread'),false);
+
+  await readTool.execute({teamId:'t1',after:null,limit:null,channel:null,mentionsOnly:null,seqs:[2,5]},exec);
+  assert.deepEqual(seenCommands.at(-1).cmdArgs.seqs,[2,5]);
+
+  await retireTool.execute({teamId:'t1',member:'builder',dropDependency:true},exec);
+  assert.equal(seenCommands.at(-1).cmdArgs.dropDependency,true);
+
+  await waitTool.execute({teamId:'t1',since:0,timeoutSec:600,channel:null,mentionsOnly:null},exec);
+  assert.equal(seenCommands.at(-1).cmdArgs.timeoutSec,600);
+});
+
+test('2.2.0 Turn-1 subagent sees worker tools synchronously inside subagent/start and hides manage_channel create/archive from non-coordinator workers',async t=>{
+  const {createHost}=await import('./host.mjs');
+  const root=mkdtempSync(join(tmpdir(),'hive-host-turn1-race-'));
+  const tools=new Map(),scopedTools=new Map(),listeners=new Map(),restrictions=[],events=[];
+  let seq=1,childAgent,childSession,releaseIdle,turnOutcomeVisibleDuringStart=null,startTeamVisibleDuringStart=null;
+  const parentSession={id:'parent-chat',header:{cwd:root,delegationDepth:0},append:()=>{}};
+  const parentAgent={id:'parent-chat',current:true,session:parentSession,options:{subagentDepth:0}};
+  const agents=new Map([['parent-chat',parentAgent]]);
+  const sessions=new Map([['parent-chat',parentSession]]);
+  let mode='workspace-write';
+  const emit=(topic,info)=>{for(const fn of listeners.get(topic)??[])fn(info);};
+  const globalNames=['read','write','bash','subagent','hive_swarm_post_message','hive_swarm_set_turn_outcome','hive_swarm_manage_channel','hive_swarm_start_team'];
+  const restrictable=new Set(globalNames);
+  const ctx={
+    connection:{createPeer:()=>({principal:{kind:'owner'},dispose:async()=>{}}),fetch:{register:()=>async()=>{}}},
+    typertGateway:{invoke:async({namespace,method})=>{
+      if(method==='modelCatalog')return {default:{provider:'p',model:'m'},groups:[{id:'p',models:[{id:'m',name:'M',reasoning:{efforts:[{id:'max'}],defaultEffort:'max'}}]}]};
+      if(namespace==='session'&&method==='events')return {cursor:seq,records:events.map(event=>({type:'event',event})),hasMore:false};
+      if(namespace==='session'&&method==='state')return {active:false,running:false,queue:[],pendingInput:[]};
+      if(namespace==='session'&&method==='wait'){await new Promise(resolve=>{releaseIdle=resolve;});return {reason:'idle',state:{running:false,active:true,queue:[],pendingInput:[]}};}
+      return {accepted:true};
+    }},
+    sessions:{get:id=>sessions.get(id),flush:async()=>true},
+    agents:{get:id=>agents.get(id),turnBoundaryOf:()=>({lastTurn:2,openTurnStartSeq:2})},
+    sandboxPolicy:{resolve:()=>({mode,workspaceRoot:root})},
+    fs:{sandboxMode:'read-only'},shell:{sandboxMode:'read-only'},
+    workspaceRegistry:{list:()=>[{id:'w',path:root}]},
+    skills:{register:()=>()=>{}},
+    tools:{
+      definitions:()=>globalNames.map(name=>({name})),
+      register:(tool,options)=>{tools.set(tool.name,{tool,options});return()=>tools.delete(tool.name);},
+    },
+    on:(topic,fn)=>{const set=listeners.get(topic)??new Set();set.add(fn);listeners.set(topic,set);return()=>set.delete(topic);},
+    subagents:{
+      startActivation:async spec=>{
+        childSession={id:spec.childId,header:{cwd:root,origin:'subagent',parentSession:'parent-chat'},append:(_t,d)=>{if(_t==='sandbox/mode')mode=d.mode;}};
+        childAgent={id:spec.childId,current:true,session:childSession,
+          ctx:{tools:{
+            definitions:()=>[...[...tools.values()].filter(e=>e.options.when({agent:childAgent})).map(e=>e.tool),{name:'read'},{name:'bash'},{name:'scope_local_skill'}],
+            view:()=>({restrictableNames:restrictable}),
+            register:(tool,options)=>{scopedTools.set(tool.name,{tool,options});return()=>scopedTools.delete(tool.name);},
+            restrict:f=>{for(const n of f.allow??[])if(!restrictable.has(n))throw Error('non-restrictable '+n);restrictions.push(f);return()=>{};},
+            guard:()=>()=>{},
+          }},
+          model:{select:()=>{}},whenIdle:async()=>{}};
+        agents.set(spec.childId,childAgent);sessions.set(spec.childId,childSession);
+        // Simulate Turn 1 tool-visibility check synchronously during subagent/start BEFORE startActivation resolves!
+        emit('subagent/start',{id:spec.childId,parentSessionId:'parent-chat',provider:'spawn'});
+        turnOutcomeVisibleDuringStart=tools.get('hive_swarm_set_turn_outcome').options.when({agent:childAgent});
+        startTeamVisibleDuringStart=tools.get('hive_swarm_start_team').options.when({agent:childAgent});
+        events.push(
+          {seq:seq++,type:'agent/inbox/spliced',data:{target:'next-turn',start:0,inserted:[{id:'msg-1',source:{kind:'user'}}]}},
+          {seq:seq++,type:'turn/start',data:{turn:2}},
+          {seq:seq++,type:'agent/inbox/spliced',data:{target:'next-turn',start:0,removedCount:1,inserted:[]}},
+        );
+        return {childId:spec.childId,name:spec.name,messageId:'msg-1',result:Promise.resolve({status:'completed'}),dispose:async()=>{}};
+      },
+    },
+  };
+  const compatCoreFactory=options=>{
+    const app=createSwarmApplication(options);
+    const origCreate=app.board.create.bind(app.board);
+    let nextParentId;
+    app.board.create=(input,wsSource,opts)=>{
+      const team=origCreate(input,wsSource,opts);
+      if(nextParentId&&!team.parentSessionId){team.parentSessionId=nextParentId;app.board.save(team);}
+      return team;
+    };
+    const origCmd=app.command.bind(app);
+    return {...app,command:async(action,cmdArgs,context={})=>{
+      nextParentId=action==='start_team'?context.parentSessionId:undefined;
+      try{return await origCmd(action,cmdArgs,context);}finally{nextParentId=undefined;}
+    }};
+  };
+  const host=await createHost(ctx,{dataDirectory:join(root,'state'),coreFactory:compatCoreFactory,storeFactory:file=>new RunStore(file)});
+  t.after(async()=>{await host.close();rmSync(root,{recursive:true,force:true});});
+
+  const parentExec={signal:new AbortController().signal,agent:parentAgent};
+  const team=await tools.get('hive_swarm_start_team').tool.execute(args(root),parentExec);
+  for(let i=0;i<200&&!releaseIdle;i++)await delay(5);
+
+  assert.equal(turnOutcomeVisibleDuringStart,true,'Turn-1 subagent must see hive_swarm_set_turn_outcome immediately during subagent/start');
+  assert.equal(startTeamVisibleDuringStart,false,'Turn-1 subagent must NOT see owner-only hive_swarm_start_team');
+  assert.equal(restrictions[0].allow.includes('hive_swarm_set_turn_outcome'),true);
+  assert.equal(restrictions[0].allow.includes('scope_local_skill'),false);
+
+  // Scoped worker variant of manage_channel hides create/archive while owner/coordinator keeps all 5 ops
+  const workerChannel=scopedTools.get('hive_swarm_manage_channel')?.tool;
+  assert.ok(workerChannel,'non-coordinator worker must get scoped manage_channel variant');
+  assert.deepEqual(workerChannel.parameters.properties.op.enum,['list','subscribe','unsubscribe']);
+  assert.deepEqual(tools.get('hive_swarm_manage_channel').tool.parameters.properties.op.enum,['create','list','subscribe','unsubscribe','archive']);
+
+  const workerExec={signal:new AbortController().signal,agent:childAgent,concludeTurn:()=>{workerExec.concluded=true;}};
+  await tools.get('hive_swarm_set_turn_outcome').tool.execute({turn:1,state:'done',message:'[done] Fast turn 1',notify:[],waitFor:[]},workerExec);
+  events.push({seq:seq++,type:'turn/end',data:{turn:2,reason:{kind:'completed'}}});
+  releaseIdle();
+  for(let i=0;i<200&&host.application.board.get(team.id).members[0].status==='working';i++)await delay(5);
+  assert.equal(host.application.board.get(team.id).members[0].status,'done');
 });

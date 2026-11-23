@@ -72,7 +72,15 @@ test('only an owned active session may declare an outcome, and cancellation cann
   await assert.rejects(f.runner.setOutcome('owned-session',2,outcome),/turn|identity/i);
   f.claim();await f.runner.setOutcome('owned-session',1,outcome);abort.abort(Error('cancel fixture'));
   await assert.rejects(result,/cancel|unconfirmed/i);
-  assert.equal(f.calls.filter(x=>x==='cancel').length,1);assert.equal(f.store.findSession('owned-session').settled,false);
+  assert.equal(f.calls.filter(x=>x==='cancel').length,1);
+  const cancelledRun=f.store.findSession('owned-session');
+  if(typeof f.store.abandon==='function'){
+    assert.equal(cancelledRun.settled,true);
+    assert.equal(cancelledRun.status,'cancelled');
+    assert.notEqual(cancelledRun.outcome?.state,'done');
+  }else{
+    assert.equal(cancelledRun.settled,false);
+  }
 });
 
 test('outcome admission requires this prompt durable claim and the same live Host turn',async t=>{
@@ -414,4 +422,174 @@ test('correlateRun formats nested turn/end error and abort objects without [obje
     /RATE_LIMITED: Rate limit 429/,
   );
   assert.equal(formatTurnEndReason(null),'incomplete');
+});
+
+test('2.2.0 explicit abort skips bogus recoveryRequired flash, calls store.abandon after cancel, and onRunSettled settles orphaned runs',async t=>{
+  const f=await fixture(t);
+  const rememberCalls=[],abandoned=[],abandonedForMember=[];
+  f.request.remember=patch=>{rememberCalls.push(patch);Object.assign(f.member,patch);};
+  f.store.abandon=(identity,opts)=>{abandoned.push({identity,opts});return {settled:true};};
+  f.store.abandonPendingForMember=(teamId,member,opts)=>{abandonedForMember.push({teamId,member,opts});return [{turn:1,status:opts.state}];};
+
+  const abort=new AbortController();f.request.signal=abort.signal;
+  const running=f.runner.run(f.request);
+  await until(()=>f.calls.includes('wait'));
+  abort.abort(Error('Worker turn cancelled.'));
+  await assert.rejects(running);
+
+  assert.equal(rememberCalls.some(p=>p.recoveryRequired===true||p.status==='failed'),false,'must never flash recoveryRequired:true on abort');
+  assert.equal(abandoned.length,1);
+  assert.equal(abandoned[0].identity.member,'builder');
+  assert.deepEqual(abandoned[0].opts,{state:'cancelled',message:'Turn cancelled.'});
+
+  // If native.cancel fails, store.abandon must not mark it cleanly settled
+  const f2=await fixture(t);
+  const abandoned2=[];
+  f2.store.abandon=(identity,opts)=>{abandoned2.push({identity,opts});};
+  f2.native.cancel=async()=>{f2.release();throw Error('cancel unconfirmed');};
+  const abort2=new AbortController();f2.request.signal=abort2.signal;
+  const r2=f2.runner.run(f2.request);
+  await until(()=>f2.calls.includes('wait'));
+  abort2.abort();
+  await assert.rejects(r2);
+  assert.equal(abandoned2.length,0);
+  await f2.runner.close().catch(()=>{});
+
+  // onRunSettled delegates to abandonPendingForMember
+  const settled=f.runner.onRunSettled({teamId:'team',member:'builder',turn:1,reason:'Dismissed by owner.',state:'cancelled'});
+  assert.equal(settled.length,1);
+  assert.deepEqual(abandonedForMember[0],{teamId:'team',member:'builder',opts:{state:'cancelled',message:'Dismissed by owner.'}});
+
+  // Graceful fallback when RunStore lacks abandonPendingForMember
+  const f3=await fixture(t);
+  delete f3.store.abandonPendingForMember;
+  assert.deepEqual(f3.runner.onRunSettled({teamId:'team',member:'builder'}),[]);
+});
+
+test('2.2.0 Turn-1 subagent pre-admits actorForSession before startSubagent resolves and rolls back on error',async t=>{
+  const {NativeRunner}=await import('./runner.mjs');
+  const {RunStore}=await import('../../run-store.mjs');
+  const store=new RunStore();t.after(()=>store.close());
+  let actorDuringStart=null;
+  const native={
+    listModels:async()=>[{id:'p/m',provider:'p',model:'m',efforts:['max']}],
+    startSubagent:async spec=>{
+      spec.onStarting?.('pre-child-1');
+      actorDuringStart=runner.actorForSession('pre-child-1');
+      spec.onRollback?.('pre-child-1');
+      throw Object.assign(Error('blocked'),{securityViolation:true});
+    },
+    dispose:async()=>{},
+  };
+  const runner=new NativeRunner({native,store});
+  const member={name:'reader',lastTurn:1,writable:false,model:'p/m',effort:'max',brief:'Inspect'};
+  const team={id:'team-pre',parentSessionId:'parent-1',cwd:process.cwd(),task:'Task',members:[member]};
+  await assert.rejects(runner.run({team,member,remember:p=>Object.assign(member,p),signal:new AbortController().signal}),/blocked/);
+  assert.deepEqual(actorDuringStart,{teamId:'team-pre',member:'reader',turn:1});
+  assert.equal(runner.actorForSession('pre-child-1'),null);
+});
+
+test('2.2.0 forked Turn-1 prompts add Codex-style source-history framing and handle Turn-1 fork fallback note + prepare parentSessionId',async t=>{
+  const {NativeRunner}=await import('./runner.mjs');
+  const {RunStore}=await import('../../run-store.mjs');
+  const store=new RunStore();t.after(()=>store.close());
+  const prompts=[],prepares=[];let releaseWait,forkFallback=false,coordSeq=0;
+  const native={
+    listModels:async()=>[{id:'p/m',provider:'p',model:'m',efforts:['max']}],
+    forkParent:async()=>'sess-coord-'+(++coordSeq),
+    fork:async()=>'sess-mate',
+    wasForkFallback:()=>forkFallback,
+    prepare:async(_id,opts)=>{prepares.push(opts);},
+    prompt:async({content})=>{prompts.push(content[0].text);},
+    wait:async()=>{await new Promise(r=>{releaseWait=r;});return {reason:'idle',state:{running:false,queue:[],pendingInput:[]}};},
+    events:async()=>[],currentTurn:()=>({lastTurn:1,openTurnStartSeq:1}),state:async()=>({running:false,queue:[],pendingInput:[]}),
+    flush:async()=>{},cancel:async()=>releaseWait?.(),dispose:async()=>{},
+  };
+  const runner=new NativeRunner({native,store});
+  const team={id:'t-fork',parentSessionId:'parent-1',cwd:process.cwd(),task:'Task',members:[{name:'analyst',status:'done'}]};
+
+  // 1) coordinator fork
+  const m1={name:'builder',lastTurn:1,writable:true,forkSource:'coordinator',model:'p/m',effort:'max',brief:'Build feature'};
+  const a1=new AbortController();
+  const r1=runner.run({team,member:m1,remember:p=>Object.assign(m1,p),signal:a1.signal});
+  await until(()=>prompts.length===1&&releaseWait);
+  assert.match(prompts[0],/Earlier messages in this chat are source history from @coordinator; follow only the Hive Swarm brief below\./);
+  assert.equal(prepares[0].parentSessionId,'parent-1');
+  a1.abort();await assert.rejects(r1);
+
+  // 2) teammate fork
+  store.begin({teamId:'t-fork',member:'analyst',turn:1,requestId:'req-a',sessionId:'sess-analyst',workspace:process.cwd()});
+  const m2={name:'verifier',lastTurn:1,writable:false,forkFrom:'sess-analyst',model:'p/m',effort:'max',brief:'Verify feature'};
+  releaseWait=undefined;const a2=new AbortController();
+  const r2=runner.run({team,member:m2,remember:p=>Object.assign(m2,p),signal:a2.signal});
+  await until(()=>prompts.length===2&&releaseWait);
+  assert.match(prompts[1],/Earlier messages in this chat are source history from @analyst; follow only the Hive Swarm brief below\./);
+  a2.abort();await assert.rejects(r2);
+
+  // 3) session/fork-unavailable fallback replaces source-history framing with clean-session note
+  forkFallback=true;
+  const m3={name:'fallback_w',lastTurn:1,writable:false,forkSource:'coordinator',model:'p/m',effort:'max',brief:'Fallback task'};
+  releaseWait=undefined;const a3=new AbortController();
+  const r3=runner.run({team,member:m3,remember:p=>Object.assign(m3,p),signal:a3.signal});
+  await until(()=>prompts.length===3&&releaseWait);
+  assert.doesNotMatch(prompts[2],/Earlier messages in this chat are source history/);
+  assert.match(prompts[2],/no completed turn.*clean session/i);
+  a3.abort();await assert.rejects(r3);
+});
+
+test('2.2.0 runner tracks incremental afterSeq cursor across 30s timeout polls and falls back cleanly on splice gap',async t=>{
+  const f=await fixture(t);
+  const seenAfterSeq=[];let waits=0,releaseIdle;
+  f.native.wait=async()=>{
+    waits++;
+    if(waits<=3)return {reason:'timeout'};
+    await new Promise(r=>{releaseIdle=r;});
+    return {reason:'idle',state:{running:false,queue:[],pendingInput:[]}};
+  };
+  f.native.events=async(_id,_sig,opts)=>{
+    seenAfterSeq.push(opts?.afterSeq??null);
+    return opts?.afterSeq!=null?f.events.filter(e=>e.seq>opts.afterSeq):f.events;
+  };
+  const running=f.runner.run(f.request);
+  await until(()=>waits>=4&&releaseIdle);
+  assert.equal(seenAfterSeq[0],null,'first poll must start from baseline');
+  assert.ok(seenAfterSeq[1]>=1,'second poll must pass afterSeq cursor');
+  assert.equal(seenAfterSeq[2],seenAfterSeq[1],'no-op timeout must retain cursor without re-reading seq 0');
+
+  f.claim();
+  f.event('request/header',{header:{config:{provider:'p',model:'m',reasoningEffort:'max'}}});
+  await f.runner.setOutcome('owned-session',1,outcome);
+  f.event('turn/end',{turn:4,reason:{kind:'completed'}});
+  releaseIdle();
+  assert.deepEqual(await running,outcome);
+  assert.ok(seenAfterSeq.slice(1).every(v=>v!==null));
+
+  // Verify splice-gap fallback: if incremental fetch gets an incomplete splice, runner falls back cleanly to a full read
+  const fGap=await fixture(t);
+  let gapWaits=0,gapRelease,injectedGap=false;
+  const gapSeen=[];
+  fGap.native.wait=async()=>{
+    gapWaits++;
+    if(gapWaits===1)return {reason:'timeout'};
+    await new Promise(r=>{gapRelease=r;});
+    return {reason:'idle',state:{running:false,queue:[],pendingInput:[]}};
+  };
+  fGap.native.events=async(_id,_sig,opts)=>{
+    gapSeen.push(opts?.afterSeq??null);
+    if(opts?.afterSeq!=null&&!injectedGap){
+      injectedGap=true;
+      return [{seq:999,type:'agent/inbox/spliced',data:{target:'next-turn',start:5,removedCount:1,inserted:[]}}];
+    }
+    return fGap.events;
+  };
+  const rGap=fGap.runner.run(fGap.request);
+  await until(()=>gapWaits>=2&&gapRelease);
+  fGap.claim();
+  await fGap.runner.setOutcome('owned-session',1,outcome);
+  fGap.event('turn/end',{turn:4,reason:{kind:'completed'}});
+  gapRelease();
+  assert.deepEqual(await rGap,outcome);
+  assert.equal(gapSeen[0],null);
+  assert.ok(gapSeen[1]>=1);
+  assert.equal(gapSeen[2],null,'incomplete splice on delta must fall back to full read');
 });
