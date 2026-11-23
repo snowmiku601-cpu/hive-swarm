@@ -388,3 +388,45 @@ test('exportGraphReplayGif and buildReplayFrames forward threads/channels and re
   const same01 = decoded.frames[1].indices.every((v, idx) => v === decoded.frames[2].indices[idx]);
   assert.equal(same01, false, 'mid-replay frame at seq=1 differs from seq=2');
 });
+
+test('software canvas honors ctx.textAlign center/left/right and save/restore for textBaseline', () => {
+  const { buildReplayFrames } = globalThis.HiveGif;
+  let capturedAlign, capturedBaseline;
+  const { frames } = buildReplayFrames({
+    width: 120,
+    height: 60,
+    graph: {
+      renderGraphFrame(ctx) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, 120, 60);
+        ctx.save();
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        assert.equal(ctx.textAlign, 'center');
+        assert.equal(ctx.textBaseline, 'middle');
+        ctx.fillStyle = '#000000';
+        ctx.fillText('CenteredLabel', 60, 30);
+        ctx.restore();
+        capturedAlign = ctx.textAlign;
+        capturedBaseline = ctx.textBaseline;
+      },
+    },
+    bees: globalThis.HiveBee,
+  });
+
+  assert.equal(capturedAlign, 'left');
+  assert.equal(capturedBaseline, 'alphabetic');
+  const rgba = frames[0].rgba;
+  let minX = 120, maxX = -1;
+  for (let y = 0; y < 60; y++) {
+    for (let x = 0; x < 120; x++) {
+      const p = (y * 120 + x) * 4;
+      if (rgba[p] < 128) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+      }
+    }
+  }
+  assert.ok(minX < 40 && maxX > 80 && maxX < 100,
+    `centered text must span symmetrically around x=60 (got ${minX}..${maxX})`);
+});

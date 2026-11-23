@@ -483,7 +483,7 @@
   function createSoftwareCanvas(width, height) {
     const data = new Uint8ClampedArray(width * height * 4);
     const stack = [];
-    let state = { fillStyle: '#000000', strokeStyle: '#000000', lineWidth: 1, globalAlpha: 1, lineDash: [] };
+    let state = { fillStyle: '#000000', strokeStyle: '#000000', lineWidth: 1, globalAlpha: 1, lineDash: [], textAlign: 'left', textBaseline: 'alphabetic' };
     let path = [];
     let curX = 0, curY = 0, startX = 0, startY = 0;
 
@@ -532,8 +532,10 @@
       get globalAlpha() { return state.globalAlpha; },
       set globalAlpha(v) { state.globalAlpha = v; },
       font: '',
-      textAlign: 'left',
-      textBaseline: 'alphabetic',
+      get textAlign() { return state.textAlign; },
+      set textAlign(v) { state.textAlign = v; },
+      get textBaseline() { return state.textBaseline; },
+      set textBaseline(v) { state.textBaseline = v; },
       lineCap: 'butt',
       save() { stack.push({ ...state, lineDash: [...state.lineDash] }); },
       restore() { if (stack.length) state = stack.pop(); },
