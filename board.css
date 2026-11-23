@@ -348,6 +348,7 @@ button.bee-pill:hover:not(:disabled) {border-color:var(--gold-solid);background:
 .member-path,.member-chip {display:inline-flex;align-items:center;max-width:min(100%,380px);margin-top:0;padding:1px 8px;border-radius:999px;border:1px solid var(--line);background:var(--field);color:var(--muted);font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .member-path {direction:rtl;text-align:left}
 .member-chip[data-tone=wait] {color:var(--sleep);border-color:color-mix(in oklab,var(--sleep) 36%,var(--line))}
+.member-chip[data-tone=blocked],.blocked-reason-pill {color:var(--gold);border-color:color-mix(in oklab,var(--gold-solid) 45%,var(--line));background:var(--wash)}
 .member-card:not([data-menu-open=true]) > .member-main > .member-actions,
 .member-card:not([data-menu-open=true]) > .member-main > .model-editor {display:none}
 .member-card[data-recovery=true] > .member-main > .member-actions {display:flex}
@@ -401,13 +402,20 @@ button.bee-pill:hover:not(:disabled) {border-color:var(--gold-solid);background:
 
 .graph-stage {position:relative;isolation:isolate;overflow:clip;height:clamp(380px,58vh,540px);background:var(--stage)}
 .graph-stage canvas {display:block}
-#graph-canvas,#graph-nodes {position:absolute;inset:0;width:100%;height:100%}
+#graph-canvas,#graph-hexes,#graph-nodes {position:absolute;inset:0;width:100%;height:100%}
+#graph-canvas {pointer-events:none;z-index:0}
+#graph-hexes {pointer-events:none;z-index:1}
+#graph-nodes {pointer-events:none;z-index:2}
+.graph-node {pointer-events:auto}
+.graph-hive-hex {position:absolute;transform:translate(-50%,-50%);pointer-events:auto;min-height:0;padding:0;border:0;border-radius:0;background:transparent;color:transparent;clip-path:polygon(25% 0%,75% 0%,100% 50%,75% 100%,25% 100%,0% 50%);transition:opacity 150ms ease}
+.graph-hive-hex:hover:not(:disabled),.graph-hive-hex[aria-pressed=true] {background:transparent;border-color:transparent}
+.graph-hive-hex[data-dimmed=true] {opacity:.35}
 
 /* Hive Mode Interactive Bee Slots */
 .graph-hive-bee {position:absolute;transform:translate(-50%,-50%);display:grid;justify-items:center;gap:2px;min-width:0;width:62px;padding:4px 2px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--ink);transition:opacity 150ms ease,border-color 150ms ease,background-color 150ms ease}
 .graph-hive-bee:hover:not(:disabled) {background:color-mix(in oklab,var(--surface) 75%,transparent);border-color:var(--line)}
 .graph-hive-bee[aria-pressed=true] {background:var(--surface);border-color:var(--gold-solid);box-shadow:0 2px 8px rgb(0 0 0 / 16%)}
-.graph-hive-bee .bee-pixel {display:block;width:28px;height:25px;image-rendering:pixelated}
+.graph-hive-bee .bee-pixel {display:block;width:calc(28px * var(--bee-scale,1));height:calc(25px * var(--bee-scale,1));image-rendering:pixelated}
 .graph-hive-bee[data-role=coordinator] .bee-pixel {width:36px;height:32px}
 .graph-hive-bee[data-bee-muted=true] .bee-pixel {filter:grayscale(1) saturate(.25);opacity:.8}
 .graph-hive-bee[data-dimmed=true] {opacity:.26}

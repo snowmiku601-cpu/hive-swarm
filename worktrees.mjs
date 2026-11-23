@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { realpathSync } from 'node:fs';
-import { lstat, mkdir } from 'node:fs/promises';
+import { lstat, mkdir, readFile, rmdir, writeFile } from 'node:fs/promises';
 import path, { isAbsolute, join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
@@ -100,20 +100,72 @@ export async function worktreeSource(cwd) {
   return {...repo, commit, offset};
 }
 
-async function managedPath(storage, teamId, member, create = false) {
-  if (!/^[a-f0-9-]{36}$/.test(teamId) || !/^[a-z][a-z0-9_-]{0,29}$/.test(member)) {
-    throw Error('Invalid team or member workspace name.');
+function validateWorktreeMode(mode = 'external') {
+  if (mode !== 'external' && mode !== 'local') throw Error('Worktree mode must be external or local.');
+  return mode;
+}
+
+function localBranchName(teamId, member) {
+  return 'hive-swarm/' + teamId.slice(0, 8) + '/' + member;
+}
+
+async function ensureLocalExclude(gitDir) {
+  const infoDir = join(gitDir, 'info');
+  const excludeFile = join(infoDir, 'exclude');
+  await mkdir(infoDir, {recursive: true});
+  let current = '';
+  try { current = await readFile(excludeFile, 'utf8'); }
+  catch (error) { if (error?.code !== 'ENOENT') throw error; }
+  const lines = current.split(/\r?\n/).map(line => line.trim());
+  if (lines.some(line => ['.hive-swarm-worktrees/', '.hive-swarm-worktrees', '/.hive-swarm-worktrees/'].includes(line))) {
+    return;
   }
-  if (create) await mkdir(storage, {recursive:true});
-  const root = realPathSync(storage);
-  const directory = join(root, 'worktrees', teamId);
-  if (create) await mkdir(directory, {recursive:true});
+  const prefix = current.length && !current.endsWith('\n') ? '\n' : '';
+  await writeFile(excludeFile, current + prefix + '.hive-swarm-worktrees/\n', 'utf8');
+}
+
+async function pruneEmptyLocalDirs(repoRoot, teamId) {
+  const base = join(realPathSync(repoRoot), '.hive-swarm-worktrees');
+  for (const dir of [join(base, teamId), base]) {
+    try { await rmdir(dir); }
+    catch (error) {
+      if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error?.code)) throw error;
+    }
+  }
+}
+
+function assertResolvedDirectory(directory, create) {
   let resolved = null;
   try { resolved = realPathSync(directory); }
   catch (error) {
     if (create || error.code !== 'ENOENT') throw error;
   }
   if (resolved && !samePath(directory, resolved)) throw Error('Unexpected worktree storage location.');
+}
+
+async function managedPath(storage, teamId, member, create = false, {worktreeMode = 'external', source} = {}) {
+  if (!/^[a-f0-9-]{36}$/.test(teamId) || !/^[a-z][a-z0-9_-]{0,29}$/.test(member)) {
+    throw Error('Invalid team or member workspace name.');
+  }
+  const mode = validateWorktreeMode(worktreeMode);
+  if (mode === 'local') {
+    if (!source?.root || !source?.directory) throw Error('Repository source is required for local worktrees.');
+    const repoRoot = realPathSync(source.root);
+    const base = join(repoRoot, '.hive-swarm-worktrees');
+    const directory = join(base, teamId);
+    if (create) {
+      await ensureLocalExclude(source.directory);
+      await mkdir(directory, {recursive: true});
+    }
+    assertResolvedDirectory(base, create);
+    assertResolvedDirectory(directory, create);
+    return join(directory, member);
+  }
+  if (create) await mkdir(storage, {recursive:true});
+  const root = realPathSync(storage);
+  const directory = join(root, 'worktrees', teamId);
+  if (create) await mkdir(directory, {recursive:true});
+  assertResolvedDirectory(directory, create);
   return join(directory, teamId + '-' + member);
 }
 
@@ -133,35 +185,48 @@ async function ownedCheckout(destination, source, gitOpts) {
   return true;
 }
 
-export async function openWorktree(storage, source, teamId, member, {mustExist = false, exec, retryDelayMs = 120} = {}) {
+export async function openWorktree(storage, source, teamId, member, {mustExist = false, worktreeMode = 'external', exec, retryDelayMs = 120} = {}) {
+  const mode = validateWorktreeMode(worktreeMode);
   const gitOpts = {exec, retryDelayMs};
   return withRepoLock(source.directory, async () => {
-    const destination = await managedPath(storage, teamId, member, true);
+    const destination = await managedPath(storage, teamId, member, true, {worktreeMode: mode, source});
+    const branch = mode === 'local' ? localBranchName(teamId, member) : undefined;
     if (!(await ownedCheckout(destination, source, gitOpts))) {
       if (mustExist) throw Error('Saved worktree is missing: ' + destination);
-      await git(source.root, ['worktree', 'add', '--detach', destination, source.commit], 120000, gitOpts);
+      const args = branch
+        ? ['worktree', 'add', '-B', branch, destination, source.commit]
+        : ['worktree', 'add', '--detach', destination, source.commit];
+      await git(source.root, args, 120000, gitOpts);
     }
     const cwd = realPathSync(join(destination, source.offset));
     if (!within(destination, cwd)) throw Error('Worktree workspace resolved outside its checkout.');
-    return {path:destination, cwd, base:source.commit};
+    return {path:destination, cwd, base:source.commit, ...(branch ? {branch} : {})};
   });
 }
 
-export async function removeWorktree(storage, source, teamId, member, workspace, {force = false, exec, retryDelayMs = 120} = {}) {
+export async function removeWorktree(storage, source, teamId, member, workspace, {force = false, worktreeMode, exec, retryDelayMs = 120} = {}) {
+  const mode = validateWorktreeMode(worktreeMode ?? (workspace?.branch ? 'local' : 'external'));
   const gitOpts = {exec, retryDelayMs};
   return withRepoLock(source.directory, async () => {
-    const destination = await managedPath(storage, teamId, member);
+    const destination = await managedPath(storage, teamId, member, false, {worktreeMode: mode, source});
     if (!isAbsolute(workspace.path) || !samePath(destination, workspace.path)) {
       throw Error('The saved path is not the owned checkout for this member.');
     }
     const exists = await ownedCheckout(destination, source, gitOpts);
     if (exists) {
-      if (force !== true && await git(destination, ['status','--porcelain','--untracked-files=all'], 5000, gitOpts)) {
+      if (force !== true && await git(destination, ['status','--porcelain','--untracked-files=all'], 20000, gitOpts)) {
         throw Error('The worktree has uncommitted changes. Use force only to discard them.');
       }
       const options = force === true ? ['--force'] : [];
       await git(source.root, ['worktree','remove',...options,'--',destination], 120000, gitOpts);
     }
     await git(source.root, ['worktree','prune',...(exists ? [] : ['--expire','now'])], 5000, gitOpts);
+    if (mode === 'local') {
+      const branch = localBranchName(teamId, member);
+      if (await git(source.root, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/' + branch], 5000, gitOpts)) {
+        await git(source.root, ['branch', '-D', branch], 5000, gitOpts);
+      }
+      await pruneEmptyLocalDirs(source.root, teamId);
+    }
   });
 }

@@ -28,7 +28,7 @@
   let historyTail=0,historyRequest,refreshing=false,following=true,seen=0,feedLimit=160;
   let recentTeams=[],teamListKey='',loadingTeams=false,channelKey='',memberKey='';
   let stream,streamOnline=false,modelCatalog,titleEditing=false,transcript,lightbox,extendingBudget=false;
-  let requestNumber=0,refreshTimer,playTimer,playing=false,cursor=null,focusedNode=null,graphFrame=0;
+  let requestNumber=0,refreshTimer,playTimer,playing=false,cursor=null,focusedNode=null,focusedCluster=null,graphFrame=0;
   let graphMode=loadGraphMode(),exportingGif=false;
   let appVersion=typeof globalThis.__HIVE_SWARM_VERSION__==='string'?globalThis.__HIVE_SWARM_VERSION__.trim():'';
   let updateInfo=null,updateOpen=false;
@@ -55,6 +55,17 @@
   }
   function author(name) {return Object.hasOwn(authors,name)?authors[name]:'@'+name;}
   function condition(member) {return member.retireAfterTurn?'Retiring after turn':states[member.status]??member.status;}
+  const blockedReasons={
+    'shared-writer-active':'Waiting for shared writer',
+    'concurrency-limit':'Concurrency limit',
+    'recovery-required':'Recovery required',
+    'waiting-dependencies':'Waiting on deps',
+  };
+  function blockedReasonLabel(reason) {
+    const clean=String(reason??'').trim();
+    if (!clean) return '';
+    return Object.hasOwn(blockedReasons,clean)?blockedReasons[clean]:clean;
+  }
   function modeBadge(member) {
     if (!member?.executionMode || !Object.hasOwn(executionModes,member.executionMode)) return null;
     const pill=node('span','mode-badge',executionModes[member.executionMode]);
@@ -398,7 +409,7 @@
       latestByAuthor.clear();
       threadOpenState.clear();
       historyTail=seen=0;
-      cursor=focusedNode=null;
+      cursor=focusedNode=focusedCluster=null;
       memberDrafts.clear();
       $('overview-brief-details').open=false;
       $('overview-tasks-accordion').open=false;
@@ -831,7 +842,7 @@
     const done=/\[done\]\s*([^\r\n]+)/i.exec(latest?.text??'');
     if (done) return compact(done[1]);
     if (member.status==='waiting') return 'Waiting for an @mention';
-    if (member.status==='queued') return 'Queued for the next turn';
+    if (member.status==='queued') return blockedReasonLabel(member.blockedReason)||'Queued for the next turn';
     return compact(latest?.text?.split(/\r?\n/)[0])||condition(member);
   }
 
@@ -998,6 +1009,13 @@
         info.append(actions);
       }
       const aside=node('div','task-row-aside');
+      const blockedText=blockedReasonLabel(member.blockedReason);
+      if (blockedText) {
+        const blockedPill=node('span','member-chip blocked-reason-pill',blockedText);
+        blockedPill.dataset.tone='blocked';
+        blockedPill.dataset.reason=String(member.blockedReason);
+        aside.append(blockedPill);
+      }
       aside.append(beePill(member));
       row.append(icon,info,aside);
       return row;
@@ -1291,7 +1309,8 @@
       info.append(reason);
     }
     const waiting=member.pendingWaitFor??member.waitFor;
-    const hasChips=Boolean(member.workspace||member.worktree||member.group||member.channels?.length||member.addedBy||waiting?.length);
+    const blockedText=blockedReasonLabel(member.blockedReason);
+    const hasChips=Boolean(member.workspace||member.worktree||member.group||member.channels?.length||member.addedBy||waiting?.length||blockedText);
     if (hasChips) {
       const chips=node('div','member-chips');
       if (member.workspace) {
@@ -1302,6 +1321,12 @@
       if (member.group) chips.append(node('span','member-chip','@'+member.group));
       if (member.channels?.length) chips.append(node('span','member-chip',member.channels.map(c=>'#'+c).join(' ')));
       if (member.addedBy) chips.append(node('span','member-chip','Invited by '+author(member.addedBy)));
+      if (blockedText) {
+        const blockedChip=node('span','member-chip blocked-reason-pill',blockedText);
+        blockedChip.dataset.tone='blocked';
+        blockedChip.dataset.reason=String(member.blockedReason);
+        chips.append(blockedChip);
+      }
       if (waiting?.length) {
         const waitChip=node('span','member-chip','Waiting on '+waiting.map(author).join(', '));
         waitChip.dataset.tone='wait';
@@ -1394,7 +1419,7 @@
   function renderMembers(roster=people()) {
     const query=$('search-members').value.toLowerCase().trim();
     const visible=roster.filter(member=>!query||[author(member.name),member.group,member.model,condition(member),
-      ...(member.channels??[]),member.addedBy]
+      member.blockedReason,blockedReasonLabel(member.blockedReason),...(member.channels??[]),member.addedBy]
       .join(' ').toLowerCase().includes(query));
     const key=JSON.stringify([query,team.phase,team.attention,team.turns,team.turnLimit,visible.map(member=>[member,latestByAuthor.get(member.name)?.seq])]);
     if (key===memberKey) {renderActivity();return;}
@@ -1416,217 +1441,60 @@
     $('member-empty').hidden=visible.length>0;
   }
 
-  /* Fallback graph & GIF helpers when HiveGraph 2.1 / HiveGif are not yet loaded */
-  function fallbackProjectHive(events,roster,cursorSeq) {
-    const mergeUser=!roster.some(m=>(m.role==='coordinator'||m.name==='coordinator')&&!m.external)&&!roster.some(m=>m.name==='user');
-    const resolveActor=name=>(mergeUser&&name==='user')?'coordinator':name;
-    const upTo=events.filter(event=>event.seq<=cursorSeq&&graph.isPost(event));
-    const lastPost=upTo.at(-1)??null;
-    const latestSeqByAuthor=new Map();
-    for (const post of upTo) latestSeqByAuthor.set(resolveActor(post.author),post.seq);
-    const coordMember=roster.find(member=>member.role==='coordinator')??{name:'coordinator',role:'coordinator',status:'waiting'};
-    const workers=roster.filter(member=>member.role!=='coordinator'&&!member.external);
-    const buckets={working:[],waiting:[],needs:[],done:[]};
-    const memberBucket=new Map();
-    for (const member of workers) {
-      let bucket='waiting';
-      if (member.recoveryRequired||['failed','quota'].includes(member.status)) bucket='needs';
-      else if (member.status==='working') bucket='working';
-      else if (['done','retired'].includes(member.status)) bucket='done';
-      buckets[bucket].push({
-        ...member,
-        muted:['done','retired'].includes(member.status),
-        latestSeq:latestSeqByAuthor.get(member.name)??0,
-      });
-      memberBucket.set(member.name,bucket);
-    }
-    const meta={
-      working:{label:'Working',tone:'working'},
-      waiting:{label:'Waiting',tone:'waiting'},
-      needs:{label:'Needs you',tone:'needs'},
-      done:{label:'Done',tone:'done'},
-    };
-    const clusters=['working','waiting','needs','done']
-      .filter(id=>buckets[id].length>0)
-      .map(id=>({id,label:meta[id].label,tone:meta[id].tone,count:buckets[id].length,members:buckets[id]}));
-    const doneCount=buckets.done.length;
-    const totalWorkers=workers.length;
-    const coordPhase=buckets.needs.length?'stalled':buckets.working.length?'working':
-      totalWorkers>0&&doneCount===totalWorkers?'done':'waiting';
-    const connectors=[];
-    if (buckets.done.length) connectors.push({from:'done',to:'coordinator',kind:'done',label:'Tasks done'});
-    if (buckets.needs.length) connectors.push({from:'coordinator',to:'needs',kind:'waiting',label:'Needs you'});
-    if (buckets.waiting.some(member=>(member.pendingWaitFor??member.waitFor)?.length)) {
-      connectors.push({from:'waiting',to:'coordinator',kind:'waiting',label:'Waiting on'});
-    }
-    if (lastPost&&(lastPost.targets?.length||coordPhase!=='done')) {
-      const authorName=resolveActor(lastPost.author);
-      const from=authorName==='coordinator'?'coordinator':(memberBucket.get(authorName)??'coordinator');
-      const resolvedTargets=(lastPost.targets??[]).map(resolveActor);
-      const target=resolvedTargets.find(name=>name!==authorName);
-      const to=target?(target==='coordinator'?'coordinator':(memberBucket.get(target)??'coordinator')):(from==='coordinator'&&clusters[0]?clusters[0].id:'coordinator');
-      if (from!==to) connectors.push({from,to,kind:'message',label:'Message just sent',seq:lastPost.seq});
-    }
-    return {
-      currentSeq:cursorSeq,
-      lastPost,
-      coordinator:{
-        name:coordMember.name,status:coordMember.status,role:'coordinator',
-        doneCount,totalWorkers,phase:coordPhase,latestSeq:latestSeqByAuthor.get(coordMember.name)??0,
-        tint:coordMember.tint,
-      },
-      clusters,
-      connectors,
-    };
-  }
-  function hexVertices(cx,cy,radius) {
-    return Array.from({length:6},(_,k)=>{
-      const angle=k*Math.PI/3;
-      return {x:cx+radius*Math.cos(angle),y:cy+radius*Math.sin(angle)};
-    });
-  }
-  function fallbackLayoutHive(hiveModel,width,height) {
-    const clusters=hiveModel.clusters??[];
-    const count=clusters.length;
-    const radius=count<=1
-      ? Math.max(88,Math.min(120,width*0.25,height*0.225))
-      : Math.max(70,Math.min(104,width*0.21,height*0.195));
-    const hexH=Math.sqrt(3)*radius;
-    const cellsById=new Map();
-    let coordPos;
-    const clusterLayouts=[];
-    if (count===0) {
-      coordPos={x:width/2,y:height/2};
-    } else if (count===1) {
-      const gap=Math.max(12,Math.min(22,height-hexH*2-20));
-      const totalH=hexH*2+gap;
-      const topY=Math.max(hexH/2+10,(height-totalH)/2+hexH/2);
-      const clusterPos={x:width/2,y:topY};
-      coordPos={x:width/2,y:topY+hexH+gap};
-      clusterLayouts.push({pos:clusterPos,cluster:clusters[0]});
-    } else {
-      coordPos={x:width/2,y:height*0.64};
-      const spreadX=Math.min(width*0.33,radius*2.2);
-      const spreadY=Math.min(height*0.34,hexH*1.12);
-      clusters.forEach((cluster,idx)=>{
-        const angle=-Math.PI+(idx+1)*Math.PI/(count+1);
-        clusterLayouts.push({
-          pos:{x:width/2+Math.cos(angle)*spreadX,y:coordPos.y+Math.sin(angle)*spreadY},
-          cluster,
-        });
-      });
-    }
-    const coordinator={
-      id:'coordinator',x:coordPos.x,y:coordPos.y,radius,
-      vertices:hexVertices(coordPos.x,coordPos.y,radius),
-      model:hiveModel.coordinator,
-    };
-    cellsById.set('coordinator',coordinator);
-    const laidOutClusters=clusterLayouts.map(({pos,cluster})=>{
-      const items=cluster.members??[];
-      const cols=items.length<=2?items.length:items.length<=6?3:4;
-      const rows=Math.max(1,Math.ceil(items.length/Math.max(1,cols)));
-      const slotW=Math.min(68,(radius*1.58)/Math.max(1,cols));
-      const rowGap=rows===1?0:Math.min(48,(hexH*0.56)/Math.max(1,rows));
-      const baseY=pos.y+12-((rows-1)*rowGap)/2;
-      const slots=items.map((member,idx)=>{
-        const row=Math.floor(idx/cols);
-        const col=idx%cols;
-        const inRow=Math.min(cols,items.length-row*cols);
-        const sx=pos.x+(col-(inRow-1)/2)*slotW;
-        const sy=baseY+row*rowGap;
-        return {member,x:sx,y:sy,slotWidth:slotW,beeScale:1};
-      });
-      const cell={
-        id:cluster.id,label:cluster.label,tone:cluster.tone,count:cluster.count,
-        x:pos.x,y:pos.y,radius,vertices:hexVertices(pos.x,pos.y,radius),slots,
-      };
-      cellsById.set(cluster.id,cell);
-      return cell;
-    });
-    return {width,height,radius,coordinator,clusters:laidOutClusters,cellsById};
-  }
-  function fallbackHiveMinimumHeight(clusterCount,width) {
-    if (clusterCount<=1) return width<440?380:430;
-    return width<440?420:460;
-  }
-  function fallbackLayoutMentions(nodes,width,height) {
-    const result=new Map();
-    if (!nodes.length) return result;
-    if (nodes.length>12||width<320) return graph.layout(nodes,width,height);
-    const ordered=[...nodes].sort((a,b)=>(b.role==='coordinator')-(a.role==='coordinator'));
-    const topPad=48,bottomPad=48;
-    const centerY=(topPad+(height-bottomPad))/2;
-    const radiusY=Math.max(54,(height-topPad-bottomPad)/2);
-    const sidePad=Math.min(110,Math.max(72,width*0.16));
-    const radiusX=Math.max(60,width/2-sidePad);
-    if (ordered.length===1) {
-      result.set(ordered[0].name,{x:width/2,y:centerY});
-      return result;
-    }
-    ordered.forEach((member,idx)=>{
-      const angle=-Math.PI/2+idx*Math.PI*2/ordered.length;
-      result.set(member.name,{
-        x:width/2+Math.cos(angle)*radiusX,
-        y:centerY+Math.sin(angle)*radiusY,
-      });
-    });
-    return result;
-  }
-  function fallbackPillBox(member,narrow) {
-    const len=String(member?.name??'').length;
-    const w=Math.max(76,Math.min(narrow?134:180,len*7.1+48));
-    return {halfW:w/2,halfH:15,offsetX:0,offsetY:0,radius:15};
-  }
-  function pillBoxFor(member,narrow) {
-    if (typeof graph.layoutMentions==='function'&&typeof graph.nodeBox==='function') {
-      return graph.nodeBox(member,{variant:'pill',narrow});
-    }
-    return fallbackPillBox(member,narrow);
-  }
-  function clipRayToHex(origin,target,vertices) {
-    if (!vertices?.length) return origin;
-    const dx=target.x-origin.x,dy=target.y-origin.y;
-    let bestT=Infinity;
-    for (let i=0;i<vertices.length;i++) {
-      const a=vertices[i],b=vertices[(i+1)%vertices.length];
-      const ex=b.x-a.x,ey=b.y-a.y;
-      const denom=dx*ey-dy*ex;
-      if (Math.abs(denom)<1e-6) continue;
-      const t=((a.x-origin.x)*ey-(a.y-origin.y)*ex)/denom;
-      const u=((a.x-origin.x)*dy-(a.y-origin.y)*dx)/denom;
-      if (t>0&&u>=-1e-4&&u<=1+1e-4&&t<bestT) bestT=t;
-    }
-    return Number.isFinite(bestT)?{x:origin.x+dx*bestT,y:origin.y+dy*bestT}:origin;
-  }
-  function rayClipHex(fromCell,toCell,offset=0) {
-    const angle=Math.atan2(toCell.y-fromCell.y,toCell.x-fromCell.x);
-    const nx=-Math.sin(angle),ny=Math.cos(angle);
-    const fromPt=offset?{x:fromCell.x+nx*offset,y:fromCell.y+ny*offset}:fromCell;
-    const toPt=offset?{x:toCell.x+nx*offset,y:toCell.y+ny*offset}:toCell;
-    const start=clipRayToHex(fromPt,toPt,fromCell.vertices);
-    const end=clipRayToHex(toPt,fromPt,toCell.vertices);
-    return {start,end};
-  }
-  function drawHexCell(ctx,cell,palette,title,subtitle) {
+  function drawHexCell(ctx,cell,style,palette,lines,subtitle,focused,dimmed) {
+    const ring=cell.progressRing??null;
+    const rawTone=cell.tone??cell.model?.phase??'waiting';
+    const isNeeds=rawTone==='needs'||rawTone==='stalled'||rawTone==='blocked';
+    ctx.globalAlpha=dimmed?0.28:1;
     ctx.beginPath();
     cell.vertices.forEach((pt,idx)=>idx===0?ctx.moveTo(pt.x,pt.y):ctx.lineTo(pt.x,pt.y));
     ctx.closePath();
-    ctx.fillStyle=palette.fill;
-    ctx.fill();
-    ctx.lineWidth=2;
-    ctx.strokeStyle=palette.stroke;
-    ctx.stroke();
+    if (ring) {
+      const needs=!ring.fullDone&&isNeeds;
+      ctx.fillStyle=ring.fullDone?palette.doneFill:(needs?palette.needsFill:palette.surface);
+      ctx.fill();
+      const baseStroke=needs?palette.needsStroke:palette.border;
+      ctx.lineWidth=focused?2.6:(needs?1.6:1.5);
+      ctx.strokeStyle=focused?(palette.accent??baseStroke):baseStroke;
+      ctx.stroke();
+      if (ring.ratio>0&&ring.segments?.length>=2) {
+        ctx.save?.();
+        ctx.strokeStyle=palette.doneStroke;
+        ctx.lineWidth=2.2;
+        ctx.lineCap='round';
+        ctx.lineJoin='round';
+        ctx.setLineDash?.([]);
+        ctx.beginPath();
+        const pts=ring.fullDone?ring.segments.slice(0,6):ring.segments;
+        pts.forEach((pt,idx)=>idx===0?ctx.moveTo(pt[0],pt[1]):ctx.lineTo(pt[0],pt[1]));
+        if (ring.fullDone) ctx.closePath();
+        ctx.stroke();
+        ctx.restore?.();
+      }
+    } else {
+      ctx.fillStyle=style.fill;
+      ctx.fill();
+      ctx.lineWidth=focused?2.6:2;
+      ctx.strokeStyle=focused?(palette.accent??style.stroke):style.stroke;
+      ctx.stroke();
+    }
     ctx.textAlign='center';
     ctx.textBaseline='middle';
-    const titleY=cell.id==='coordinator'?cell.y+cell.radius*0.42:cell.y-cell.radius*0.62;
+    const titleLines=lines?.length?lines:[String(cell.label??'')];
+    const titleFontSize=cell.titleFontSize??(cell.id==='coordinator'?12:11.5);
+    const titleLineHeight=cell.titleLineHeight??13;
+    const titleY=cell.titleY??(cell.id==='coordinator'?cell.y+cell.radius*0.42:cell.y-cell.radius*0.62);
     ctx.fillStyle=palette.ink;
-    ctx.font='650 12px var(--sans), system-ui, sans-serif';
-    ctx.fillText(title,cell.x,titleY);
+    ctx.font=(cell.id==='coordinator'?'650 ':'600 ')+titleFontSize+'px "Segoe UI", system-ui, sans-serif';
+    for (let i=0;i<titleLines.length;i++) {
+      ctx.fillText(titleLines[i],cell.x,titleY+i*titleLineHeight);
+    }
     if (subtitle!=null) {
+      const subtitleFontSize=cell.subtitleFontSize??11;
+      const subtitleY=cell.subtitleY??(titleY+(titleLines.length-1)*titleLineHeight+14);
       ctx.fillStyle=palette.muted;
-      ctx.font='500 11px var(--sans), system-ui, sans-serif';
-      ctx.fillText(String(subtitle),cell.x,titleY+15);
+      ctx.font='500 '+subtitleFontSize+'px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(String(subtitle),cell.x,subtitleY);
     }
   }
   function drawArrowHead(ctx,end,angle,color) {
@@ -1640,8 +1508,8 @@
     ctx.closePath();
     ctx.fill();
   }
-  function drawHiveCanvas(canvas,hiveLayout,connectors,color) {
-    const width=canvas.clientWidth,height=canvas.clientHeight;
+  function drawHiveCanvas(canvas,hiveLayout,connectors,palette,focusState) {
+    const width=canvas.clientWidth||hiveLayout.width,height=canvas.clientHeight||hiveLayout.height;
     if (!width||!height) return;
     const scale=Math.min(devicePixelRatio||1,2);
     const pw=Math.round(width*scale),ph=Math.round(height*scale);
@@ -1649,37 +1517,53 @@
     const ctx=canvas.getContext('2d');
     ctx.setTransform(scale,0,0,scale,0,0);
     ctx.clearRect(0,0,width,height);
+    const activeHexId=focusState?.activeHexId??null;
+    const highlightedHexes=focusState?.highlightedHexes??null;
     for (const conn of connectors) {
-      const fromCell=hiveLayout.cellsById.get(conn.from);
-      const toCell=hiveLayout.cellsById.get(conn.to);
-      if (!fromCell||!toCell||fromCell===toCell) continue;
-      const offset=conn.kind==='message'?8:conn.kind==='waiting'?-8:0;
-      const {start,end}=rayClipHex(fromCell,toCell,offset);
-      if (Math.hypot(end.x-start.x,end.y-start.y)<1) continue;
-      const stroke=conn.kind==='done'?color.good:conn.kind==='message'?color.purple:color.gold;
+      const route=graph.routeHiveConnector(conn,hiveLayout);
+      if (!route) continue;
+      const isRelated=!activeHexId||conn.from===activeHexId||conn.to===activeHexId;
+      const stroke=conn.kind==='message'?(palette.messageStroke??palette.pulse)
+        :conn.kind==='waiting'?(palette.waitingConnector??palette.waitingStroke)
+          :(palette.doneConnector??palette.doneStroke);
+      ctx.globalAlpha=isRelated?1:0.18;
       ctx.strokeStyle=stroke;
+      ctx.fillStyle=stroke;
       ctx.lineWidth=conn.kind==='message'?2.2:1.8;
-      ctx.setLineDash(conn.kind==='waiting'?[5,4]:[]);
+      ctx.setLineDash(conn.kind==='waiting'?[4,4]:[]);
       ctx.beginPath();
-      ctx.moveTo(start.x,start.y);
-      ctx.lineTo(end.x,end.y);
+      ctx.moveTo(route.start.x,route.start.y);
+      if (route.control2) {
+        if (typeof ctx.bezierCurveTo==='function') {
+          ctx.bezierCurveTo(route.control.x,route.control.y,route.control2.x,route.control2.y,route.end.x,route.end.y);
+        } else {
+          ctx.quadraticCurveTo(route.mid.x,route.mid.y,route.end.x,route.end.y);
+        }
+      } else if (route.control) {
+        ctx.quadraticCurveTo(route.control.x,route.control.y,route.end.x,route.end.y);
+      } else {
+        ctx.lineTo(route.end.x,route.end.y);
+      }
       ctx.stroke();
       ctx.setLineDash([]);
-      if (conn.kind==='waiting') drawArrowHead(ctx,end,Math.atan2(end.y-start.y,end.x-start.x),stroke);
+      if (conn.kind!=='done'&&route.arrow) drawArrowHead(ctx,route.arrow,route.arrow.angle,stroke);
     }
-    const tonePalette=tone=>{
-      if (tone==='done') return {fill:color.goodSoft,stroke:color.good,ink:color.text,muted:color.muted};
-      if (tone==='working') return {fill:color.wash,stroke:color.gold,ink:color.text,muted:color.muted};
-      if (tone==='needs') return {fill:color.badSoft,stroke:color.bad,ink:color.text,muted:color.muted};
-      return {fill:color.paper,stroke:color.link,ink:color.text,muted:color.muted};
-    };
     for (const cluster of hiveLayout.clusters) {
-      drawHexCell(ctx,cluster,tonePalette(cluster.tone),cluster.label,cluster.count);
+      const style=graph.toneStyle(cluster.tone,palette);
+      const lines=cluster.titleLines?.length?cluster.titleLines:[String(cluster.label??'')];
+      const subtitle=cluster.subtitle??String(cluster.count??0);
+      const dimmed=Boolean(activeHexId&&!highlightedHexes?.has(cluster.id));
+      drawHexCell(ctx,cluster,style,palette,lines,subtitle,activeHexId===cluster.id,dimmed);
     }
-    const coordTone=hiveLayout.coordinator.model.phase==='done'?'done':
-      hiveLayout.coordinator.model.phase==='stalled'?'needs':'working';
-    const doneTotal=hiveLayout.coordinator.model.doneCount+' of '+hiveLayout.coordinator.model.totalWorkers+' done';
-    drawHexCell(ctx,hiveLayout.coordinator,tonePalette(coordTone),'Coordinator',doneTotal);
+    const coord=hiveLayout.coordinator;
+    if (coord) {
+      const coordTone=graph.toneStyle(coord.model?.phase??'waiting',palette);
+      const coordLines=coord.titleLines?.length?coord.titleLines:['Coordinator'];
+      const coordSubtitle=coord.subtitle??((coord.model?.doneCount??0)+' of '+(coord.model?.totalWorkers??0)+' done');
+      const coordDimmed=Boolean(activeHexId&&!highlightedHexes?.has('coordinator'));
+      drawHexCell(ctx,coord,coordTone,palette,coordLines,coordSubtitle,activeHexId==='coordinator',coordDimmed);
+    }
+    ctx.globalAlpha=1;
   }
   function drawMentionsCanvas(canvas,projection,coordinates,boxes,focus,highlight,color) {
     const width=canvas.clientWidth,height=canvas.clientHeight;
@@ -1764,6 +1648,7 @@
   }
   function setGraphMode(mode) {
     graphMode=mode==='mentions'?'mentions':'hive';
+    if (graphMode==='mentions') focusedCluster=null;
     saveGraphMode(graphMode);
     $('graph-mode-hive').setAttribute('aria-pressed',String(graphMode==='hive'));
     $('graph-mode-mentions').setAttribute('aria-pressed',String(graphMode==='mentions'));
@@ -1835,29 +1720,101 @@
     const stage=$('graph-stage');
     const color=graphPalette(stage);
     const activeFocus=document.activeElement?.dataset.graphName;
+    const activeHexFocus=document.activeElement?.dataset.clusterId;
     const projByName=new Map(mentionsProjection.nodes.map(item=>[item.name,item]));
     const isConnected=name=>!focusedNode||focusedNode===name||mentionsProjection.links.some(
       edge=>(edge.from===focusedNode&&edge.to===name)||(edge.to===focusedNode&&edge.from===name));
+    let hiveLayout=null;
+    let focusedCell=null;
 
     if (graphMode==='hive') {
-      const hiveModel=(graph.projectHive??fallbackProjectHive)(events,roster,current?.seq??0);
-      const minimum=(graph.hiveMinimumHeight??fallbackHiveMinimumHeight)(hiveModel.clusters.length,stage.clientWidth);
+      const cursorSeq=cursor===null?null:(current?.seq??0);
+      const hiveModel=graph.projectHive(events,roster,cursorSeq,{threads:team.threads,channels:team.channels});
+      const stageW=stage.clientWidth||680;
+      const minimum=graph.hiveMinimumHeight(hiveModel.clusters.length,stageW);
       stage.style.height=minimum?minimum+'px':'';
-      const hiveLayout=(graph.layoutHive??fallbackLayoutHive)(hiveModel,stage.clientWidth,stage.clientHeight);
+      const stageH=Math.max(minimum||0,stage.clientHeight||0)||460;
+      hiveLayout=graph.layoutHive(hiveModel,stageW,stageH);
       if (focusedNode&&!roster.some(member=>member.name===focusedNode)) focusedNode=null;
+      if (focusedCluster&&focusedCluster!=='coordinator'&&!hiveLayout.clusters.some(c=>c.id===focusedCluster)) {
+        focusedCluster=null;
+      }
+      const hexByMember=new Map([['coordinator','coordinator']]);
+      for (const cluster of hiveLayout.clusters) {
+        for (const slot of cluster.slots) hexByMember.set(slot.member.name,cluster.id);
+      }
+      const activeHexId=focusedCluster??(focusedNode?(hexByMember.get(focusedNode)??null):null);
+      const highlightedHexes=activeHexId?new Set([activeHexId]):null;
+      if (highlightedHexes) {
+        for (const conn of hiveModel.connectors) {
+          if (conn.from===activeHexId||conn.to===activeHexId) {
+            highlightedHexes.add(conn.from);
+            highlightedHexes.add(conn.to);
+          }
+        }
+      }
+      const isHexActive=hexId=>!highlightedHexes||highlightedHexes.has(hexId);
+      focusedCell=focusedCluster
+        ?(focusedCluster==='coordinator'?hiveLayout.coordinator:(hiveLayout.cellsById?.get?.(focusedCluster)??hiveLayout.clusters.find(c=>c.id===focusedCluster)??null))
+        :null;
+
+      $('graph-hexes').hidden=false;
+      const hexButtons=[];
+      const makeHexButton=(cell,id,tooltip,subtitle)=>{
+        const btn=node('button','graph-hive-hex');
+        btn.type='button';
+        btn.style.left=cell.x+'px';
+        btn.style.top=cell.y+'px';
+        btn.style.width=(cell.radius*2).toFixed(1)+'px';
+        btn.style.height=(Math.sqrt(3)*cell.radius).toFixed(1)+'px';
+        btn.dataset.clusterId=id;
+        btn.dataset.tone=cell.tone??(id==='coordinator'?(cell.model?.phase??'waiting'):'waiting');
+        btn.dataset.dimmed=String(!isHexActive(id));
+        btn.title=tooltip;
+        btn.setAttribute('aria-label',cell.mode==='group'?tooltip:(tooltip+(subtitle?' · '+subtitle:'')));
+        btn.setAttribute('aria-pressed',String(focusedCluster===id));
+        btn.onclick=()=>{
+          focusedNode=null;
+          focusedCluster=focusedCluster===id?null:id;
+          scheduleGraph();
+        };
+        return btn;
+      };
+      for (const cluster of hiveLayout.clusters) {
+        const fullTitle=String(cluster.fullTitle??cluster.label??cluster.id??'');
+        const goalText=String(cluster.goal??'').trim();
+        const memberNames=(cluster.members??cluster.slots?.map(s=>s.member)??[]).map(m=>m.name).filter(Boolean).join(', ');
+        let tooltip;
+        if (cluster.mode==='group') {
+          const done=cluster.doneCount??0;
+          const total=cluster.totalCount??cluster.count??0;
+          const baseTip=`${fullTitle} · ${done}/${total} done${memberNames?' · '+memberNames:''}`;
+          tooltip=goalText&&goalText!==fullTitle?`${baseTip} — ${goalText}`:baseTip;
+        } else {
+          tooltip=goalText&&goalText!==fullTitle?fullTitle+' — '+goalText:fullTitle;
+        }
+        hexButtons.push(makeHexButton(cluster,cluster.id,tooltip,cluster.subtitle??cluster.count));
+      }
+      if (hiveLayout.coordinator) {
+        const coordSubtitle=hiveLayout.coordinator.subtitle??((hiveLayout.coordinator.model?.doneCount??0)+' of '+(hiveLayout.coordinator.model?.totalWorkers??0)+' done');
+        hexButtons.push(makeHexButton(hiveLayout.coordinator,'coordinator','Coordinator',coordSubtitle));
+      }
+      $('graph-hexes').replaceChildren(...hexButtons);
+
       const buttons=[];
-      const makeHiveButton=(member,x,y,isCoordinator,slotWidth)=>{
+      const makeHiveButton=(member,x,y,isCoordinator,slotWidth,hexId,beeScale)=>{
         const projNode=projByName.get(member.name)??member;
         const btn=node('button','graph-node graph-hive-bee');
         btn.type='button';
         btn.style.left=x+'px';
         btn.style.top=y+'px';
-        if (Number.isFinite(slotWidth)&&slotWidth>0) btn.style.width=Math.max(46,Math.min(70,Math.floor(slotWidth)))+'px';
+        if (Number.isFinite(slotWidth)&&slotWidth>0) btn.style.width=Math.min(Math.max(Math.floor(slotWidth),28),64)+'px';
+        if (Number.isFinite(beeScale)&&beeScale>0&&beeScale<1) btn.style.setProperty?.('--bee-scale',String(Math.max(0.65,beeScale)));
         btn.dataset.graphName=member.name;
         btn.dataset.role=isCoordinator?'coordinator':'worker';
         btn.dataset.status=member.status??'waiting';
         btn.dataset.muted=String(!projNode.posts&&!mentionsProjection.links.some(edge=>edge.to===member.name));
-        btn.dataset.dimmed=String(!isConnected(member.name));
+        btn.dataset.dimmed=String(!isHexActive(hexId));
         btn.dataset.unmentioned=String(graph.unmentionedNode(projNode));
         const beeMuted=!isCoordinator&&['done','retired'].includes(member.status);
         btn.dataset.beeMuted=String(beeMuted);
@@ -1867,6 +1824,7 @@
         btn.append(beeSprite({...member,role:isCoordinator?'coordinator':'worker'},{muted:beeMuted}));
         if (!isCoordinator) btn.append(node('span','hive-bee-label',member.name));
         btn.onclick=()=>{
+          focusedCluster=null;
           focusedNode=focusedNode===member.name?null:member.name;
           scheduleGraph();
         };
@@ -1874,24 +1832,27 @@
       };
       const coordMember=roster.find(member=>member.role==='coordinator')??{name:'coordinator',role:'coordinator',status:'waiting'};
       const coordSlot=hiveLayout.coordinator.slots?.[0];
-      buttons.push(makeHiveButton(coordMember,coordSlot?.x??hiveLayout.coordinator.x,coordSlot?.y??(hiveLayout.coordinator.y-16),true));
+      buttons.push(makeHiveButton(coordMember,coordSlot?.x??hiveLayout.coordinator.x,coordSlot?.y??(hiveLayout.coordinator.y-16),true,undefined,'coordinator'));
       for (const cluster of hiveLayout.clusters) {
         for (const slot of cluster.slots) {
-          buttons.push(makeHiveButton(slot.member,slot.x,slot.y,false,slot.slotWidth));
+          buttons.push(makeHiveButton(slot.member,slot.x,slot.y,false,slot.slotWidth,cluster.id,slot.beeScale));
         }
       }
       $('graph-nodes').replaceChildren(...buttons);
-      drawHiveCanvas($('graph-canvas'),hiveLayout,hiveModel.connectors,color);
+      const hivePalette=graph.themePalette(currentTheme());
+      drawHiveCanvas($('graph-canvas'),hiveLayout,hiveModel.connectors,hivePalette,{activeHexId,highlightedHexes});
     } else {
+      $('graph-hexes').hidden=true;
+      $('graph-hexes').replaceChildren();
       const minimum=(graph.mentionsMinimumHeight??graph.minimumHeight)(mentionsProjection.nodes.length,stage.clientWidth);
       stage.style.height=minimum?minimum+'px':'';
-      const coordinates=(graph.layoutMentions??fallbackLayoutMentions)(mentionsProjection.nodes,stage.clientWidth,stage.clientHeight);
+      const coordinates=graph.layoutMentions(mentionsProjection.nodes,stage.clientWidth,stage.clientHeight);
       if (focusedNode&&!coordinates.has(focusedNode)) focusedNode=null;
       const narrow=stage.clientWidth<465;
       const pillBoxes=new Map();
       const pillButtons=mentionsProjection.nodes.map(member=>{
         const point=coordinates.get(member.name);
-        pillBoxes.set(member.name,pillBoxFor(member,narrow));
+        pillBoxes.set(member.name,graph.nodeBox(member,{variant:'pill',narrow}));
         const btn=node('button','graph-node graph-pill-node');
         btn.type='button';
         btn.style.left=point.x+'px';
@@ -1928,9 +1889,10 @@
     }
 
     if (activeFocus) [...$('graph-nodes').children].find(button=>button.dataset.graphName===activeFocus)?.focus({preventScroll:true});
+    else if (activeHexFocus) [...$('graph-hexes').children].find(button=>button.dataset.clusterId===activeHexFocus)?.focus({preventScroll:true});
 
-    $('inspection-title').textContent=focusedNode?author(focusedNode):'Selected post';
-    $('clear-node').hidden=!focusedNode;
+    $('inspection-title').textContent=focusedNode?author(focusedNode):focusedCell?(focusedCell.fullTitle??focusedCell.label??'Selected group'):'Selected post';
+    $('clear-node').hidden=!focusedNode&&!focusedCell;
     const focusedMember=focusedNode?roster.find(member=>member.name===focusedNode):null;
     const memberActions=$('graph-member-actions');
     memberActions.replaceChildren();
@@ -1939,7 +1901,14 @@
     memberActions.hidden=!memberActions.childElementCount;
     $('graph-post-author').textContent=current?author(current.author)+' · '+stamp(current):'';
     richText($('graph-post'),current?.text??'No post at this position yet.');
-    const links=mentionsProjection.links.filter(edge=>!focusedNode||edge.from===focusedNode||edge.to===focusedNode)
+    const focusedClusterMembers=focusedCell
+      ? new Set(focusedCell.id==='coordinator'?['coordinator']:(focusedCell.slots??[]).map(s=>s.member.name))
+      : null;
+    const links=mentionsProjection.links.filter(edge=>focusedNode
+      ?(edge.from===focusedNode||edge.to===focusedNode)
+      :focusedClusterMembers
+        ?(focusedClusterMembers.has(edge.from)||focusedClusterMembers.has(edge.to))
+        :true)
       .sort((a,b)=>b.count-a.count);
     $('edge-list').replaceChildren(...links.map(edge=>{
       const line=node('li');
@@ -2018,11 +1987,21 @@
     try {
       const stage=$('graph-stage');
       const events=timeline();
+      const roster=people();
+      const exportWidth=Math.max(480,stage.clientWidth||680);
+      const exportHiveModel=graphMode==='hive'&&typeof graph.projectHive==='function'
+        ? graph.projectHive(events,roster,null,{threads:team.threads,channels:team.channels})
+        : null;
+      const minExportHeight=exportHiveModel&&typeof graph.hiveMinimumHeight==='function'
+        ? graph.hiveMinimumHeight(exportHiveModel.clusters.length,exportWidth)
+        : 0;
       const exporter=globalThis.HiveGif?.exportGraphReplayGif??fallbackExportGraphReplayGif;
       const result=await exporter({
         mode:graphMode,
         posts:events,
-        members:people(),
+        members:roster,
+        threads:team.threads,
+        channels:team.channels,
         phase:team.phase??(team.paused?'paused':'working'),
         pacing:$('pacing').value,
         speed:Number($('speed').value),
@@ -2030,8 +2009,8 @@
         expandBroadcast:$('expand-all').checked,
         focus:focusedNode,
         theme:currentTheme(),
-        width:Math.max(480,stage.clientWidth||680),
-        height:Math.max(360,stage.clientHeight||460),
+        width:exportWidth,
+        height:Math.max(360,stage.clientHeight||460,minExportHeight),
         graph,
         bees:globalThis.HiveBee,
       });
@@ -2394,7 +2373,7 @@
     scheduleGraph();
     nextTick();
   };
-  $('clear-node').onclick=()=>{focusedNode=null;scheduleGraph();};
+  $('clear-node').onclick=()=>{focusedNode=null;focusedCluster=null;scheduleGraph();};
   $('graph-mode-hive').onclick=()=>setGraphMode('hive');
   $('graph-mode-mentions').onclick=()=>setGraphMode('mentions');
   $('hide-inactive').onchange=$('expand-all').onchange=scheduleGraph;
@@ -2442,7 +2421,7 @@
       }
     });
     rpc('ui/initialize',{
-      appInfo:{name:'Hive Swarm',version:globalThis.__HIVE_SWARM_VERSION__||'2.1.1'},appCapabilities:{},protocolVersion:'2026-01-26',
+      appInfo:{name:'Hive Swarm',version:appVersion||''},appCapabilities:{},protocolVersion:'2026-01-26',
     }).then(()=>{
       parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');
       refresh();

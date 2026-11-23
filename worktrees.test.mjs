@@ -155,3 +155,54 @@ test('B3: concurrent openWorktree and removeWorktree serialize per repo and retr
   ));
   assert.ok(created.every(ws => !existsSync(ws.path)));
 });
+
+test('local worktreeMode places checkouts under .hive-swarm-worktrees with named branch, clean git status, and branch cleanup', async t => {
+  const {source, state, id, git, subdir} = await repoFixture(t);
+  const checkout = await openWorktree(state, source, id, 'writer-a', {worktreeMode: 'local'});
+  const expectedRoot = join(source.root, '.hive-swarm-worktrees', id, 'writer-a');
+  const expectedBranch = 'hive-swarm/' + id.slice(0, 8) + '/writer-a';
+  assert.equal(worktrees.samePath(checkout.path, expectedRoot), true);
+  assert.equal(worktrees.samePath(checkout.cwd, join(expectedRoot, 'package')), true);
+  assert.equal(checkout.branch, expectedBranch);
+  assert.equal(git('status', '--porcelain', '--untracked-files=all').toString().trim(), '');
+  assert.equal(execFileSync('git', ['-C', checkout.path, 'rev-parse', '--abbrev-ref', 'HEAD'], {encoding: 'utf8', windowsHide: true}).trim(), expectedBranch);
+
+  // Committing inside local worktree survives reopening.
+  writeFileSync(join(checkout.cwd, 'local.txt'), 'local commit\n');
+  execFileSync('git', ['-C', checkout.path, 'add', 'package/local.txt'], {windowsHide: true});
+  execFileSync('git', ['-C', checkout.path, '-c', 'user.name=Test', '-c', 'user.email=test@example.test', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'worker commit'], {windowsHide: true});
+  const reopened = await openWorktree(state, source, id, 'writer-a', {worktreeMode: 'local', mustExist: true});
+  assert.deepEqual(reopened, checkout);
+
+  // Opening a second local worktree does not duplicate .git/info/exclude lines and still keeps status clean.
+  const second = await openWorktree(state, source, id, 'writer-b', {worktreeMode: 'local'});
+  const exclude = readFileSync(join(source.directory, 'info', 'exclude'), 'utf8');
+  assert.equal(exclude.split(/\r?\n/).filter(line => line.trim() === '.hive-swarm-worktrees/').length, 1);
+  assert.equal(git('status', '--porcelain', '--untracked-files=all').toString().trim(), '');
+
+  // Dirty local worktree refuses removal without force, then cleans worktree and branch with force.
+  writeFileSync(join(checkout.cwd, 'dirty.txt'), 'dirty\n');
+  await assert.rejects(() => worktrees.removeWorktree(state, source, id, 'writer-a', checkout, {worktreeMode: 'local'}), /uncommitted/);
+  await worktrees.removeWorktree(state, source, id, 'writer-a', checkout, {worktreeMode: 'local', force: true});
+  assert.equal(existsSync(checkout.path), false);
+  assert.equal(git('branch', '--list', expectedBranch).toString().trim(), '');
+
+  // Clean second worktree removes cleanly along with its branch and empty container directories.
+  await worktrees.removeWorktree(state, source, id, 'writer-b', second, {worktreeMode: 'local'});
+  assert.equal(existsSync(join(source.root, '.hive-swarm-worktrees')), false);
+  assert.equal(git('branch', '--list', 'hive-swarm/' + id.slice(0, 8) + '/writer-b').toString().trim(), '');
+  assert.equal(readFileSync(join(subdir, 'value.txt'), 'utf8'), 'base\n');
+});
+
+test('removeWorktree uses 20000ms git status timeout', async t => {
+  const {source, state, id} = await repoFixture(t);
+  const checkout = await openWorktree(state, source, id, 'timeout-check');
+  let statusTimeout;
+  await worktrees.removeWorktree(state, source, id, 'timeout-check', checkout, {
+    exec: async (cmd, args, opts) => {
+      if (args.includes('status')) statusTimeout = opts.timeout;
+      return execFileAsync(cmd, args, opts);
+    },
+  });
+  assert.equal(statusTimeout, 20000);
+});

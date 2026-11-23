@@ -211,6 +211,28 @@ function isAttachFallbackError(error) {
     /beforeTurnId|paginated parent|no rollout found|turn not found|method not found|thread not found|not found/i.test(msg);
 }
 
+function makeAbortError(reason) {
+  if (reason instanceof Error && reason.name === 'AbortError') return reason;
+  const message = reason instanceof Error ? reason.message : typeof reason === 'string' && reason ? reason : 'Turn cancelled.';
+  const error = new Error(message);
+  error.name = 'AbortError';
+  if (reason !== undefined) error.cause = reason;
+  return error;
+}
+
+function raceAbort(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(makeAbortError(signal.reason));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(makeAbortError(signal.reason));
+    signal.addEventListener('abort', onAbort, {once: true});
+    Promise.resolve(promise).then(
+      value => { signal.removeEventListener('abort', onAbort); resolve(value); },
+      error => { signal.removeEventListener('abort', onAbort); reject(error); },
+    );
+  });
+}
+
 export class CodexRunner {
   constructor({ephemeral = false, spawnProcess = spawn, turnIdleTimeoutMs, turnMaxTimeoutMs} = {}) {
     this.pending = new Map();
@@ -473,15 +495,16 @@ export class CodexRunner {
     }
   }
 
-  async run({team, member, remember, declaredOutcome, peerToken, peerPort, onActivity}) {
-    await this.start();
+  async run({team, member, remember, declaredOutcome, peerToken, peerPort, onActivity, signal}) {
+    if (signal?.aborted) throw makeAbortError(signal.reason);
+    await raceAbort(this.start(), signal);
     const model = member.model ?? team.model;
     let catalog;
     if (model && (member.effort === null || (!this.modelProviders.has(model) && !this.modelsHydrated))) {
       try {
-        catalog = await this.listModels();
+        catalog = await raceAbort(this.listModels(), signal);
       } catch (error) {
-        if (member.effort === null) throw error;
+        if (signal?.aborted || member.effort === null) throw error;
       }
     }
     const effort = member.effort === null && model
@@ -510,41 +533,41 @@ export class CodexRunner {
       let created = !id;
       if (forkCoordinator) {
         if (!team.parentSessionId) throw Error('Cannot fork from coordinator without a parent session.');
-        scope = await this.ensureModelProvider(scope, cwd);
-        const canAttach = await this.parentSupportsAttach(team.parentSessionId);
-        response = await this.forkThread(team.parentSessionId, scope, {attachToSource: canAttach});
+        scope = await raceAbort(this.ensureModelProvider(scope, cwd), signal);
+        const canAttach = await raceAbort(this.parentSupportsAttach(team.parentSessionId), signal);
+        response = await raceAbort(this.forkThread(team.parentSessionId, scope, {attachToSource: canAttach}), signal);
         executionMode = response.thread?.attachedToThreadId ? 'attached' : 'session';
       } else if (forkTeammate) {
         const sourceId = member.forkFrom;
         const sourceAttached = team.members?.find(m => m.threadId === sourceId)?.executionMode === 'attached';
-        if (!sourceAttached) releaseSource = await this.holdThread(sourceId);
-        scope = await this.ensureModelProvider(scope, cwd);
-        response = await this.forkThread(sourceId, scope, {attachToSource: sourceAttached});
+        if (!sourceAttached) releaseSource = await raceAbort(this.holdThread(sourceId), signal);
+        scope = await raceAbort(this.ensureModelProvider(scope, cwd), signal);
+        response = await raceAbort(this.forkThread(sourceId, scope, {attachToSource: sourceAttached}), signal);
         executionMode = response.thread?.attachedToThreadId ? 'attached' : 'session';
       } else if (!id) {
         const attached = team.parentSessionId && !this.ephemeral
-          ? await this.tryStartAttached(team.parentSessionId, scope, cwd)
+          ? await raceAbort(this.tryStartAttached(team.parentSessionId, scope, cwd), signal)
           : null;
         if (attached) {
           response = attached.response;
           scope = attached.scope;
           executionMode = response.thread?.attachedToThreadId ? 'attached' : 'session';
         } else {
-          response = await this.startThread(scope, model);
+          response = await raceAbort(this.startThread(scope, model), signal);
           executionMode = 'session';
         }
       } else {
-        if (!wasAttached) releaseSource = await this.holdThread(id);
+        if (!wasAttached) releaseSource = await raceAbort(this.holdThread(id), signal);
         const loaded = this.loadedThreads.get(id);
         if (!loaded || loaded.model !== model || loaded.requestedProvider !== requestedProvider || loaded.config !== configKey) {
-          scope = await this.ensureModelProvider(scope, cwd);
+          scope = await raceAbort(this.ensureModelProvider(scope, cwd), signal);
           try {
-            response = await this.rpc('thread/resume', {threadId: id, excludeTurns: true, ...scope});
+            response = await raceAbort(this.rpc('thread/resume', {threadId: id, excludeTurns: true, ...scope}), signal);
           } catch (error) {
-            if (!/cannot change this thread's model provider/i.test(error.message)) throw error;
+            if (signal?.aborted || !/cannot change this thread's model provider/i.test(error.message)) throw error;
           }
           if (!response || (response.modelProvider && response.modelProvider !== scope.modelProvider)) {
-            response = await this.forkThread(id, scope, {attachToSource: wasAttached});
+            response = await raceAbort(this.forkThread(id, scope, {attachToSource: wasAttached}), signal);
             executionMode = response.thread?.attachedToThreadId ? 'attached' : 'session';
             created = true;
           }
@@ -553,9 +576,9 @@ export class CodexRunner {
       if (response) {
         id = response.thread.id;
         if (created) {
-          if (executionMode !== 'attached') releaseNew = await this.holdThread(id, true);
+          if (executionMode !== 'attached') releaseNew = await raceAbort(this.holdThread(id, true), signal);
           const name = [...('🐝 @'+member.name+' · '+(team.title??team.task))].slice(0,95).join('');
-          await this.rpc('thread/name/set', {threadId: id, name}).catch(()=>{});
+          await raceAbort(this.rpc('thread/name/set', {threadId: id, name}).catch(()=>{}), signal);
           const finishSource = releaseSource;
           releaseSource = null;
           if (finishSource) await finishSource(Boolean(savedId));
@@ -576,14 +599,14 @@ export class CodexRunner {
       }
       const resuming = Boolean(savedId);
       this.loadedThreads.set(id, {model, requestedProvider, modelProvider: scope.modelProvider, config: configKey});
-      return await this.runTurn(id, {team, member, remember, declaredOutcome, onActivity, model, effort, cwd, inheriting, resuming});
+      return await this.runTurn(id, {team, member, remember, declaredOutcome, onActivity, model, effort, cwd, inheriting, resuming, signal});
     } finally {
       try { await releaseNew?.(); }
       finally { await releaseSource?.(); }
     }
   }
 
-  async runTurn(id,{team,member,remember,declaredOutcome,onActivity,model,effort,cwd,inheriting,resuming=false}) {
+  async runTurn(id,{team,member,remember,declaredOutcome,onActivity,model,effort,cwd,inheriting,resuming=false,signal}) {
     const activeRoster = team.members.filter(m => m.name !== member.name && m.status !== 'retired');
     const compactPeers = activeRoster.map(m => '@' + m.name).join(', ');
     const rosterChanged = Boolean(compactPeers && member.lastPeers !== compactPeers);
@@ -613,14 +636,26 @@ export class CodexRunner {
       'New board messages:\n' + formatInbox(member.inbox),
     ]).filter(Boolean).join('\n\n');
 
+    if (signal?.aborted) throw makeAbortError(signal.reason);
     const turn = {messages: [], earlyEvents: [], onActivity};
-    const completed = new Promise((resolve, reject) => Object.assign(turn, {resolve, reject}));
+    let settled = false;
+    const completed = new Promise((resolve, reject) => Object.assign(turn, {
+      resolve: value => { settled = true; resolve(value); },
+      reject: error => { settled = true; reject(error); },
+    }));
     completed.catch(() => {});
     this.turns.set(id, turn);
     const abortTurn = reason => {
+      if (settled) return;
       if (turn.id) this.rpc('turn/interrupt', {threadId: id, turnId: turn.id}).catch(() => {});
       turn.reject(Error(reason));
     };
+    const onAbort = () => {
+      if (settled) return;
+      if (turn.id) this.rpc('turn/interrupt', {threadId: id, turnId: turn.id}).catch(() => {});
+      turn.reject(makeAbortError(signal.reason));
+    };
+    signal?.addEventListener('abort', onAbort, {once: true});
     let idleTimeout;
     const armIdle = () => {
       clearTimeout(idleTimeout);
@@ -630,8 +665,15 @@ export class CodexRunner {
     armIdle();
     const maxTimeout = setTimeout(() => abortTurn('Turn exceeded maximum runtime limit. A new message can resume the saved chat.'), this.turnMaxTimeoutMs);
     try {
-      const accepted = await this.rpc('turn/start', {threadId: id, model, effort,
+      const startPromise = this.rpc('turn/start', {threadId: id, model, effort,
         input: [{type: 'text', text: brief, textElements: []}], outputSchema: schema});
+      startPromise.then(accepted => {
+        if (signal?.aborted && accepted?.turn?.id && !turn.id) {
+          this.rpc('turn/interrupt', {threadId: id, turnId: accepted.turn.id}).catch(() => {});
+        }
+      }, () => {});
+      const accepted = await Promise.race([startPromise, completed]);
+      if (signal?.aborted) throw makeAbortError(signal.reason);
       turn.id = accepted.turn.id;
       for (const event of turn.earlyEvents) deliverTurnEvent(turn, event);
       turn.earlyEvents.length = 0;
@@ -646,6 +688,7 @@ export class CodexRunner {
       if (saved) return saved;
       return parseOutcome(turn.messages.at(-1));
     } finally {
+      signal?.removeEventListener('abort', onAbort);
       clearTimeout(idleTimeout);
       clearTimeout(maxTimeout);
       this.turns.delete(id);

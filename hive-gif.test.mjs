@@ -333,3 +333,142 @@ test('scripts/build-dsh-client.mjs registers hive:gif alias in both API and CLI 
   assert.match(source, /hive:\(graph\|bees\|gif\|icon\)/, 'esbuild plugin resolves hive:gif');
   assert.match(source, /HiveGif/, 'exports globalThis.HiveGif for DSH client');
 });
+
+test('exportGraphReplayGif and buildReplayFrames forward threads/channels and render specialized honeycomb replays', () => {
+  const { exportGraphReplayGif, buildReplayFrames } = globalThis.HiveGif;
+  assert.equal(typeof buildReplayFrames, 'function');
+
+  const threads = [
+    { id: 'core', title: 'Core Engine & Bug Fixes', members: ['alpha', 'alpha-2'] },
+    { id: 'ui', title: 'Dashboard UI Polish', members: ['beta'] },
+  ];
+  const channels = [{ name: 'main', archived: false }];
+  const members = [
+    { name: 'coordinator', role: 'coordinator', status: 'waiting' },
+    { name: 'alpha', status: 'done' },
+    { name: 'alpha-2', status: 'done' },
+    { name: 'beta', status: 'done', waitFor: ['alpha'] },
+  ];
+  const posts = [
+    { seq: 1, kind: 'message', author: 'alpha', targets: ['alpha-2'], text: 'Intra-hex sync', time: '2026-11-21T00:00:00Z' },
+    { seq: 2, kind: 'message', author: 'alpha', targets: ['coordinator'], text: '[done] Alpha done', time: '2026-11-21T00:01:00Z' },
+    { seq: 3, kind: 'message', author: 'beta', targets: ['coordinator'], text: '[done] Beta done', time: '2026-11-21T00:02:00Z' },
+  ];
+
+  const seenCursors = [];
+  const spyGraph = {
+    ...globalThis.HiveGraph,
+    renderGraphFrame(ctx, opts) {
+      seenCursors.push({ cursor: opts.cursor, threads: opts.threads, channels: opts.channels });
+      return globalThis.HiveGraph.renderGraphFrame(ctx, opts);
+    },
+  };
+
+  const out = exportGraphReplayGif({
+    mode: 'hive',
+    posts,
+    members,
+    threads,
+    channels,
+    phase: 'done',
+    width: 480,
+    height: 460,
+    graph: spyGraph,
+    bees: globalThis.HiveBee,
+  });
+  assert.equal(out.frameCount, 4);
+  assert.equal(seenCursors.length, 4);
+  assert.ok(seenCursors.every(c => c.threads === threads && c.channels === channels),
+    'threads and channels forwarded on every replay frame');
+  const decoded = decodeGif89a(out.bytes);
+  assert.equal(decoded.header, 'GIF89a');
+  assert.equal(decoded.sawTrailer, true);
+  assert.equal(decoded.frames.length, 4);
+  // Mid-replay frames (cursor=0, cursor=1) should differ visually from cursor=2 because Waiting on arrow disappears
+  const same01 = decoded.frames[1].indices.every((v, idx) => v === decoded.frames[2].indices[idx]);
+  assert.equal(same01, false, 'mid-replay frame at seq=1 differs from seq=2');
+});
+
+test('software canvas honors ctx.textAlign center/left/right and save/restore for textBaseline', () => {
+  const { buildReplayFrames } = globalThis.HiveGif;
+  let capturedAlign, capturedBaseline;
+  const { frames } = buildReplayFrames({
+    width: 120,
+    height: 60,
+    graph: {
+      renderGraphFrame(ctx) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, 120, 60);
+        ctx.save();
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        assert.equal(ctx.textAlign, 'center');
+        assert.equal(ctx.textBaseline, 'middle');
+        ctx.fillStyle = '#000000';
+        ctx.fillText('CenteredLabel', 60, 30);
+        ctx.restore();
+        capturedAlign = ctx.textAlign;
+        capturedBaseline = ctx.textBaseline;
+      },
+    },
+    bees: globalThis.HiveBee,
+  });
+
+  assert.equal(capturedAlign, 'left');
+  assert.equal(capturedBaseline, 'alphabetic');
+  const rgba = frames[0].rgba;
+  let minX = 120, maxX = -1;
+  for (let y = 0; y < 60; y++) {
+    for (let x = 0; x < 120; x++) {
+      const p = (y * 120 + x) * 4;
+      if (rgba[p] < 128) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+      }
+    }
+  }
+  assert.ok(minX < 40 && maxX > 80 && maxX < 100,
+    `centered text must span symmetrically around x=60 (got ${minX}..${maxX})`);
+});
+
+test('buildReplayFrames renders progressive Antigravity green ring sweep from 0/2 -> 1/2 -> 2/2 across GIF frames', () => {
+  const { buildReplayFrames } = globalThis.HiveGif;
+  const threads = [
+    { id: 'core', title: 'Core', members: ['a', 'b'] },
+  ];
+  const members = [
+    { name: 'coordinator', role: 'coordinator', status: 'waiting' },
+    { name: 'a', status: 'done' },
+    { name: 'b', status: 'done' },
+  ];
+  const posts = [
+    { seq: 1, kind: 'message', author: 'a', targets: ['coordinator'], text: '[done] A ready', time: '2026-11-22T00:00:00Z' },
+    { seq: 2, kind: 'message', author: 'b', targets: ['coordinator'], text: '[done] B ready', time: '2026-11-22T00:01:00Z' },
+  ];
+  const { frames } = buildReplayFrames({
+    mode: 'hive',
+    theme: 'light',
+    width: 360,
+    height: 360,
+    threads,
+    posts,
+    members,
+    graph: globalThis.HiveGraph,
+    bees: globalThis.HiveBee,
+  });
+  assert.equal(frames.length, 3); // cursor 0 (0/2), seq 1 (1/2), seq 2 (2/2)
+
+  // Count #4d9938 green stroke pixels (R=77, G=153, B=56) in each frame: 0/2 < 1/2 < 2/2
+  const countGreenRingPixels = rgba => {
+    let n = 0;
+    for (let i = 0; i < rgba.length; i += 4) {
+      if (Math.abs(rgba[i] - 77) <= 8 && Math.abs(rgba[i + 1] - 153) <= 8 && Math.abs(rgba[i + 2] - 56) <= 8) n++;
+    }
+    return n;
+  };
+  const g0 = countGreenRingPixels(frames[0].rgba);
+  const g1 = countGreenRingPixels(frames[1].rgba);
+  const g2 = countGreenRingPixels(frames[2].rgba);
+  assert.ok(g1 > g0, `1/2 frame draws green progress ring (${g1} > ${g0})`);
+  assert.ok(g2 > g1, `2/2 frame draws full green ring + connector (${g2} > ${g1})`);
+});

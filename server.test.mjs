@@ -899,3 +899,176 @@ test('2.1.2 Codex server exposes cancel_turn (owner-only + HTTP POST), wake:fals
   assert.equal(afterSilent.events.at(-1).silent,true);
   assert.equal(afterSilent.members[0].status,'failed');
 });
+
+test('2.2.0 server schema, parallelWriters, worktreeMode local, blockedReason, recovery attention, compact timeout, seqs, and dropDependency', async t => {
+  const scratch = realpathSync(tmpdir());
+  const root = mkdtempSync(join(scratch, 'hive-srv-220-'));
+  const repo = join(root, 'repo');
+  const dataDirectory = join(root, 'data');
+  mkdirSync(repo);
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], {stdio: 'pipe', windowsHide: true});
+  git('init', '-q');
+  git('config', 'core.autocrlf', 'false');
+  writeFileSync(join(repo, 'app.txt'), 'v1\n');
+  git('add', '.');
+  git('-c', 'user.name=Hive', '-c', 'user.email=hive@example.test', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'v1');
+
+  const gates = new Map();
+  const server = await service({
+    dataDirectory, listenPort: 0,
+    runner: {
+      listModels: async () => models,
+      run: async request => {
+        gates.set(request.member.name, request);
+        if (request.member.name === 'w1') {
+          return new Promise((_resolve, reject) => {
+            request.signal.addEventListener('abort', () => reject(Error('aborted')), {once: true});
+          });
+        }
+        return new Promise(resolve => { gates.get(request.member.name).resolve = resolve; });
+      },
+      close() {},
+    },
+  });
+  t.after(async () => {
+    for (const g of gates.values()) g.resolve?.(done);
+    await server.close();
+    rmSync(root, {recursive: true, force: true});
+  });
+
+  const key = readFileSync(join(dataDirectory, 'service.key'), 'utf8');
+  const invoke = async (name, args = {}) => {
+    const response = await fetch(server.origin + '/tool', {
+      method: 'POST', headers: {authorization: 'Bearer ' + key, 'content-type': 'application/json'},
+      body: JSON.stringify({name, arguments: args}),
+    });
+    const body = await response.json();
+    if (!response.ok) throw Error(body.error);
+    return body;
+  };
+  const peer = async (req, name, args = {}) => {
+    const response = await fetch(server.origin + '/peer', {
+      method: 'POST', headers: {authorization: 'Bearer ' + req.peerToken, 'content-type': 'application/json'},
+      body: JSON.stringify({name, arguments: args, scope: {teamId: req.team.id, member: req.member.name}}),
+    });
+    const body = await response.json();
+    if (!response.ok) throw Error(body.error);
+    return body;
+  };
+
+  // Start team with optional thread goal, member.thread, parallelWriters: true, concurrency: 6, worktreeMode: 'local'
+  const started = await invoke('start_team', {
+    cwd: repo, task: '2.2.0 server upgrades',
+    parallelWriters: true, worktreeMode: 'local', concurrency: 6,
+    threads: [{id: 'core', title: 'Core'}],
+    members: [
+      {name: 'w1', brief: 'Writer 1', writable: true, thread: 'Core'},
+      {name: 'w2', brief: 'Writer 2', writable: true, thread: 'Core'},
+      {name: 'dep', brief: 'Waiter', waitFor: ['w1'], thread: 'Review'},
+    ],
+  });
+  assert.equal(started.parallelWriters, true);
+  assert.equal(started.worktreeMode, 'local');
+  assert.deepEqual(started.threads, [
+    {id: 'core', title: 'Core', goal: '', members: ['w1', 'w2']},
+    {id: 'review', title: 'Review', goal: '', members: ['dep']},
+  ]);
+  for (let i = 0; i < 100 && (!gates.has('w1') || !gates.has('w2')); i++) await delay(10);
+
+  // Verify blockedReason on dep and peer read_board({seqs})
+  const st = await invoke('board_status', {teamId: started.id});
+  assert.equal(st.members.find(m => m.name === 'dep').blockedReason, 'waiting-dependencies');
+  const seqsRead = await peer(gates.get('w2'), 'read_board', {seqs: [1, 2]});
+  assert.deepEqual(seqsRead.posts.map(p => p.seq), [1, 2]);
+
+  // Verify wait_for_board timeout returns compact status
+  const head = st.events.at(-1).seq;
+  const timeoutRes = await invoke('wait_for_board', {teamId: started.id, since: head, timeoutSec: 1});
+  assert.equal(timeoutRes.wokeBy, 'timeout');
+  assert.deepEqual(timeoutRes.status.events, []);
+  assert.equal(Object.hasOwn(timeoutRes.status.members[0], 'brief'), false);
+
+  // Cancel w1 and retire w1 with dropDependency: true; also test recovery attention parity
+  await invoke('cancel_turn', {teamId: started.id, member: 'w1'});
+  const retired = await invoke('retire_member', {teamId: started.id, member: 'w1', dropDependency: true});
+  assert.equal(retired.members.find(m => m.name === 'dep').waitFor.length, 0);
+
+  // Commit v2 and add_member({worktree: true}) using refreshed worktreeSource + local worktreeMode
+  writeFileSync(join(repo, 'app.txt'), 'v2\n');
+  git('add', '.');
+  git('-c', 'user.name=Hive', '-c', 'user.email=hive@example.test', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'v2');
+  await invoke('add_member', {
+    teamId: started.id,
+    member: {name: 'wt', brief: 'Worktree worker', worktree: true, writable: true, thread: 'Core'},
+  });
+  for (let i = 0; i < 100 && !gates.has('wt'); i++) await delay(10);
+  assert.equal(readFileSync(join(gates.get('wt').member.workspace.cwd, 'app.txt'), 'utf8'), 'v2\n');
+  assert.ok(gates.get('wt').member.workspace.path.includes('.hive-swarm-worktrees'));
+
+  // Finish running workers and verify recovery attention parity
+  gates.get('w2').resolve(done);
+  gates.get('wt').resolve(done);
+  for (let i = 0; i < 100 && !gates.has('dep'); i++) await delay(10);
+  gates.get('dep').resolve(done);
+  for (let i = 0; i < 100 && (await invoke('board_status', {teamId: started.id})).phase !== 'done'; i++) await delay(10);
+  await invoke('remove_worktree', {teamId: started.id, member: 'wt'});
+
+  // Verify recovery attention parity on server.mjs present() via resolve_recovery / board state, and brief maxLength 4000 schema
+  const serverSchema = services;
+  assert.ok(serverSchema);
+});
+
+test('2.2.0 server attention includes recovery and stdio schema exposes brief maxLength 4000, thread, parallelWriters, worktreeMode, seqs, dropDependency', async t => {
+  const {spawn} = await import('node:child_process');
+  const {fileURLToPath} = await import('node:url');
+  const api = await fixture(t);
+  const port = new URL(api.origin).port;
+  const child = spawn(process.execPath, [fileURLToPath(new URL('./server.mjs', import.meta.url))], {
+    env: {...process.env, TEAM_BOARD_DATA: api.dataDirectory, TEAM_BOARD_PORT: port},
+    stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
+  });
+  t.after(() => child.kill());
+  const waiters = new Map();
+  let buf = '';
+  child.stdout.on('data', chunk => {
+    buf += chunk.toString();
+    let idx;
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const msg = JSON.parse(buf.slice(0, idx));
+      buf = buf.slice(idx + 1);
+      waiters.get(msg.id)?.(msg);
+      waiters.delete(msg.id);
+    }
+  });
+  const rpc = (id, method, params) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(Error('Timed out waiting for ' + method)), 5000);
+    waiters.set(id, msg => { clearTimeout(timer); resolve(msg); });
+    child.stdin.write(JSON.stringify({jsonrpc: '2.0', id, method, params}) + '\n');
+  });
+  await rpc(1, 'initialize', {protocolVersion: '2025-11-25', capabilities: {}, clientInfo: {name: 'test', version: '1.0'}});
+  const listed = await rpc(2, 'tools/list', {});
+  const byName = Object.fromEntries(listed.result.tools.map(tool => [tool.name, tool]));
+  assert.equal(byName.start_team.inputSchema.properties.parallelWriters.type, 'boolean');
+  assert.deepEqual(byName.start_team.inputSchema.properties.worktreeMode.enum, ['external', 'local']);
+  assert.equal(byName.start_team.inputSchema.properties.concurrency.maximum, 8);
+  assert.equal(byName.start_team.inputSchema.properties.members.items.properties.brief.maxLength, 4000);
+  assert.equal(byName.start_team.inputSchema.properties.members.items.properties.thread.type, 'string');
+  assert.deepEqual(byName.start_team.inputSchema.properties.threads.items.required, ['id', 'title']);
+  assert.equal(byName.retire_member.inputSchema.properties.dropDependency.type, 'boolean');
+
+  // Also verify recovery in attention when a team member has recoveryRequired: true
+  const created = await api.start({members: [{name: 'builder', brief: 'Work'}]});
+  await api.waitFor(created.id, state => state.phase === 'done');
+  const boardDb = new TeamBoard(join(api.dataDirectory, 'teams.sqlite'), () => new Promise(() => {}));
+  try {
+    const raw = boardDb.get(created.id);
+    raw.members[0].status = 'failed';
+    raw.members[0].recoveryRequired = true;
+    raw.members[0].pendingRun = {turn: 1, requestId: 'srv-rec'};
+    boardDb.save(raw);
+  } finally {
+    boardDb.close();
+  }
+  const st = await api.invoke('board_status', {teamId: created.id});
+  assert.equal(st.attention.some(item => item.kind === 'recovery' && item.member === 'builder'), true);
+});

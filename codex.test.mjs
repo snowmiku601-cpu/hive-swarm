@@ -733,3 +733,75 @@ test('Turn 1 sends full onboarding prompt and plain-text inbox while Turn 2+ sen
   assert.match(turns[2],/^\[Hive turn 3 · @builder\] Active members: @qa, @verifier\. End with working-status JSON/);
   assert.equal(saved.lastPeers,'@qa, @verifier');
 });
+
+test('aborting request.signal sends turn/interrupt immediately and rejects with AbortError, enabling TeamBoard cancel_turn', async t => {
+  const {TeamBoard} = await import('./engine.mjs');
+  const runner = new CodexRunner({ephemeral: true, turnIdleTimeoutMs: 1200});
+  t.after(() => runner.close());
+  const interrupts = [];
+  let nextTurn = 0;
+  let startedTurnResolve;
+  let startedTurnPromise = new Promise(resolve => { startedTurnResolve = resolve; });
+  runner.start = async () => {};
+  runner.rpc = async (method, params) => {
+    if (method === 'model/list') return {data: []};
+    if (method === 'config/read') return {config: {model_provider: 'openai'}};
+    if (method === 'thread/start') return {thread: {id: 'codex-thr-1'}, model: params.model, modelProvider: 'openai'};
+    if (method === 'thread/resume') return {thread: {id: params.threadId}, model: params.model, modelProvider: 'openai'};
+    if (method === 'thread/name/set' || method === 'thread/archive' || method === 'thread/unarchive') return {};
+    if (method === 'turn/interrupt') {
+      interrupts.push(params);
+      return {};
+    }
+    assert.equal(method, 'turn/start');
+    const id = 'turn-' + (++nextTurn);
+    startedTurnResolve({threadId: params.threadId, turnId: id});
+    if (nextTurn === 2) {
+      setImmediate(() => {
+        runner.receive(JSON.stringify({method: 'item/completed', params: {threadId: params.threadId, turnId: id, item: {type: 'agentMessage', text: JSON.stringify(outcome)}}}));
+        runner.receive(JSON.stringify({method: 'turn/completed', params: {threadId: params.threadId, turn: {id, status: 'completed'}}}));
+      });
+    }
+    // Turn 1 hangs intentionally until interrupted by AbortSignal.
+    return {turn: {id}};
+  };
+
+  // Direct CodexRunner.run() abort test
+  const ac = new AbortController();
+  const team = {id: 'team-cancel', title: 'Cancel Test', cwd: process.cwd(), task: 'Abort promptly', members: []};
+  const running = runner.run({
+    team,
+    member: {name: 'worker', brief: 'Work', inbox: [], lastTurn: 1},
+    remember: () => {},
+    signal: ac.signal,
+  });
+  const started = await startedTurnPromise;
+  const startedAt = Date.now();
+  ac.abort();
+  await assert.rejects(running, {name: 'AbortError'});
+  assert.ok(Date.now() - startedAt < 500, 'Aborted turn must reject promptly');
+  assert.deepEqual(interrupts, [{threadId: started.threadId, turnId: started.turnId}]);
+
+  // TeamBoard.cancelTurn integration with CodexRunner
+  interrupts.length = 0;
+  nextTurn = 0;
+  startedTurnPromise = new Promise(resolve => { startedTurnResolve = resolve; });
+  const board = new TeamBoard(':memory:', req => runner.run(req));
+  t.after(() => board.close());
+  const created = board.create({cwd: process.cwd(), task: 'Cancel integration', members: [{name: 'worker', brief: 'Work'}]});
+  const activeTurn = await startedTurnPromise;
+  const cancelStart = Date.now();
+  const cancelled = await board.cancelTurn(created.id, 'worker', {clearInbox: true});
+  assert.ok(Date.now() - cancelStart < 500, 'TeamBoard.cancelTurn must complete promptly');
+  assert.deepEqual(interrupts, [{threadId: activeTurn.threadId, turnId: activeTurn.turnId}]);
+  assert.equal(cancelled.members[0].status, 'failed');
+  assert.equal(cancelled.members[0].completed, 0);
+
+  // Subsequent mention resumes cleanly and succeeds on turn 2.
+  board.post(created.id, '@worker Continue cleanly.');
+  for (let i = 0; i < 100 && board.get(created.id).members[0].status !== 'done'; i++) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(board.get(created.id).members[0].status, 'done');
+  assert.equal(board.get(created.id).members[0].completed, 1);
+});

@@ -483,7 +483,7 @@
   function createSoftwareCanvas(width, height) {
     const data = new Uint8ClampedArray(width * height * 4);
     const stack = [];
-    let state = { fillStyle: '#000000', strokeStyle: '#000000', lineWidth: 1, globalAlpha: 1 };
+    let state = { fillStyle: '#000000', strokeStyle: '#000000', lineWidth: 1, globalAlpha: 1, lineDash: [], textAlign: 'left', textBaseline: 'alphabetic' };
     let path = [];
     let curX = 0, curY = 0, startX = 0, startY = 0;
 
@@ -504,16 +504,22 @@
       }
     }
 
-    function drawSeg(x0, y0, x1, y1, rgba, lw) {
-      const steps = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0)));
+    function drawSeg(x0, y0, x1, y1, rgba, lw, dashState) {
+      const segLen = Math.hypot(x1 - x0, y1 - y0);
+      const steps = Math.max(1, Math.ceil(segLen));
       const rad = Math.max(0, Math.floor((lw - 1) / 2));
+      const dash = state.lineDash;
+      const period = dash.length >= 2 ? (dash[0] + dash[1]) : 0;
       for (let i = 0; i <= steps; i++) {
+        const distAt = dashState.acc + (segLen * i) / steps;
+        if (period > 0 && (distAt % period) >= dash[0]) continue;
         const x = x0 + ((x1 - x0) * i) / steps;
         const y = y0 + ((y1 - y0) * i) / steps;
         for (let dy = -rad; dy <= rad; dy++) {
           for (let dx = -rad; dx <= rad; dx++) blendPixel(x + dx, y + dy, rgba);
         }
       }
+      dashState.acc += segLen;
     }
 
     const ctx = {
@@ -526,12 +532,14 @@
       get globalAlpha() { return state.globalAlpha; },
       set globalAlpha(v) { state.globalAlpha = v; },
       font: '',
-      textAlign: 'left',
-      textBaseline: 'alphabetic',
+      get textAlign() { return state.textAlign; },
+      set textAlign(v) { state.textAlign = v; },
+      get textBaseline() { return state.textBaseline; },
+      set textBaseline(v) { state.textBaseline = v; },
       lineCap: 'butt',
-      save() { stack.push({ ...state }); },
+      save() { stack.push({ ...state, lineDash: [...state.lineDash] }); },
       restore() { if (stack.length) state = stack.pop(); },
-      setLineDash() {},
+      setLineDash(arr) { state.lineDash = Array.isArray(arr) ? arr.filter(n => n > 0) : []; },
       clearRect(x, y, w, h) {
         const x0 = Math.max(0, Math.floor(x)), y0 = Math.max(0, Math.floor(y));
         const x1 = Math.min(width, Math.ceil(x + w)), y1 = Math.min(height, Math.ceil(y + h));
@@ -564,6 +572,20 @@
         for (let s = 1; s <= 12; s++) {
           const t = s / 12, u = 1 - t;
           sub.push({ x: u * u * x0 + 2 * u * t * cx + t * t * x, y: u * u * y0 + 2 * u * t * cy + t * t * y });
+        }
+        curX = x; curY = y;
+      },
+      bezierCurveTo(c1x, c1y, c2x, c2y, x, y) {
+        if (!path.length) path.push([{ x: curX, y: curY }]);
+        const sub = path[path.length - 1];
+        const x0 = curX, y0 = curY;
+        for (let s = 1; s <= 16; s++) {
+          const t = s / 16, u = 1 - t;
+          const u2 = u * u, t2 = t * t;
+          sub.push({
+            x: u2 * u * x0 + 3 * u2 * t * c1x + 3 * u * t2 * c2x + t2 * t * x,
+            y: u2 * u * y0 + 3 * u2 * t * c1y + 3 * u * t2 * c2y + t2 * t * y,
+          });
         }
         curX = x; curY = y;
       },
@@ -613,9 +635,10 @@
       stroke() {
         const rgba = parseCssColor(state.strokeStyle);
         const lw = state.lineWidth || 1;
+        const dashState = { acc: 0 };
         for (const poly of path) {
           for (let i = 1; i < poly.length; i++) {
-            drawSeg(poly[i - 1].x, poly[i - 1].y, poly[i].x, poly[i].y, rgba, lw);
+            drawSeg(poly[i - 1].x, poly[i - 1].y, poly[i].x, poly[i].y, rgba, lw, dashState);
           }
         }
       },
@@ -646,10 +669,15 @@
     };
   }
 
-  function exportGraphReplayGif({
+  /**
+   * Render chronological replay frames (passing threads and channels for specialized honeycombs).
+   */
+  function buildReplayFrames({
     mode = 'hive',
     posts = [],
     members = [],
+    threads = null,
+    channels = null,
     phase = 'done',
     pacing = 'even',
     speed = 1,
@@ -658,7 +686,7 @@
     focus = null,
     theme = 'light',
     width = 680,
-    height = 460,
+    height,
     graph,
     bees,
     createCanvas,
@@ -669,6 +697,17 @@
     if (typeof graphLib?.renderGraphFrame !== 'function') {
       throw new Error('HiveGraph.renderGraphFrame is required to export a graph replay GIF.');
     }
+
+    let resolvedHeight = height;
+    if (resolvedHeight == null) {
+      if (mode === 'hive' && typeof graphLib.projectHive === 'function' && typeof graphLib.hiveMinimumHeight === 'function') {
+        const preview = graphLib.projectHive(posts, members, null, { threads, channels });
+        resolvedHeight = Math.max(460, graphLib.hiveMinimumHeight(preview.clusters.length, width));
+      } else {
+        resolvedHeight = 460;
+      }
+    }
+
     const isPost = graphLib.isPost ?? (e => e && (e.kind === 'brief' || e.kind === 'message' || (!e.kind && e.author !== 'system')));
     const timeline = (posts ?? []).filter(isPost).slice().sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
 
@@ -699,9 +738,9 @@
           }
         : createSoftwareCanvas);
 
-    const canvas = makeCanvas(width, height);
+    const canvas = makeCanvas(width, resolvedHeight);
     if (canvas.width !== width) canvas.width = width;
-    if (canvas.height !== height) canvas.height = height;
+    if (canvas.height !== resolvedHeight) canvas.height = resolvedHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('Could not obtain 2D canvas context for GIF export.');
 
@@ -723,10 +762,12 @@
         mode,
         posts,
         members,
+        threads,
+        channels,
         cursor: isLast && timeline.length ? null : snap.seq,
         phase: isLast ? phase : 'working',
         width,
-        height,
+        height: resolvedHeight,
         theme,
         hideInactive,
         expandBroadcast,
@@ -734,23 +775,28 @@
         bees: beesLib,
       });
 
-      const image = ctx.getImageData(0, 0, width, height);
+      const image = ctx.getImageData(0, 0, width, resolvedHeight);
       frames.push({
         rgba: image.data instanceof Uint8ClampedArray ? image.data : new Uint8ClampedArray(image.data),
         delayCs,
       });
     }
 
+    return { frames, width, height: resolvedHeight, frameCount: frames.length };
+  }
+
+  function exportGraphReplayGif(opts = {}) {
+    const { frames, width, height, frameCount } = buildReplayFrames(opts);
     const bytes = encodeGif(frames, { width, height, loop: 0 });
     const blob = typeof Blob !== 'undefined' ? new Blob([bytes], { type: 'image/gif' }) : undefined;
     return {
       bytes,
       blob,
-      frameCount: frames.length,
+      frameCount,
       width,
       height,
     };
   }
 
-  globalThis.HiveGif = Object.freeze({ encodeGif, exportGraphReplayGif });
+  globalThis.HiveGif = Object.freeze({ encodeGif, exportGraphReplayGif, buildReplayFrames });
 })();

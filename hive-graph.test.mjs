@@ -499,3 +499,440 @@ test('Goal mode (no dedicated coordinator) merges user posts/targets into coordi
   assert.equal(dedicatedProj.nodes.some(n => n.name === 'user'), true);
   assert.equal(dedicatedProj.links.find(l => l.from === 'user' && l.to === 'builder').count, 1);
 });
+
+test('projectHive 3-tier grouping (threads, group/channels, status fallback), rich metrics, mid-replay Waiting on, and intra-hex messages', () => {
+  const { projectHive } = globalThis.HiveGraph;
+  const members = [
+    { name: 'coordinator', role: 'coordinator', status: 'waiting' },
+    { name: 'core-1', group: 'core', status: 'done' },
+    { name: 'core-2', group: 'core', status: 'done' },
+    { name: 'ui-dev', status: 'working', waitFor: ['core-1'] },
+    { name: 'auditor', status: 'failed', recoveryRequired: true },
+    { name: 'helper-a', status: 'done' },
+    { name: 'helper-b', status: 'waiting', waitFor: ['ui-dev'] },
+  ];
+  const threads = [
+    { id: 'core-eng', title: 'Core Engine, Bug Fixes & Worktrees', goal: 'Ship core', members: ['core'] },
+    { id: 'dash-ui', title: 'Antigravity Dashboard UI', goal: 'Update UI', members: ['ui-dev', 'core-1'] },
+    { id: 'audit-qa', title: 'Audit, Verification & Coverage', goal: 'Audit', members: ['auditor'] },
+    { id: 'empty-dup', title: 'Empty after dedup', goal: 'Should drop', members: ['core-1'] },
+  ];
+  const posts = [
+    { seq: 1, kind: 'brief', author: 'coordinator', targets: ['core-1', 'core-2'], text: 'Start core' },
+    { seq: 2, kind: 'message', author: 'core-1', targets: ['core-2'], text: 'Sharing core interface' },
+    { seq: 3, kind: 'message', author: 'core-1', targets: ['coordinator'], text: '[done] Core 1 done' },
+    { seq: 4, kind: 'message', author: 'core-2', targets: ['coordinator'], text: '[done] Core 2 done' },
+    { seq: 5, kind: 'message', author: 'ui-dev', targets: ['coordinator'], text: 'Building UI' },
+  ];
+
+  // Tier 1 at head: exclusive 1 bee = 1 hex (core-1 stays in core-eng), unassigned go to Other
+  const headModel = projectHive(posts, members, null, { threads });
+  assert.deepEqual(headModel.clusters.map(c => c.id), ['core-eng', 'dash-ui', 'audit-qa', 'other']);
+  const coreCluster = headModel.clusters[0];
+  assert.equal(coreCluster.mode, 'group');
+  assert.equal(coreCluster.fullTitle, 'Core Engine, Bug Fixes & Worktrees');
+  assert.equal(coreCluster.goal, 'Ship core');
+  assert.equal(coreCluster.count, 2);
+  assert.equal(coreCluster.totalCount, 2);
+  assert.equal(coreCluster.doneCount, 2);
+  assert.equal(coreCluster.workingCount, 0);
+  assert.equal(coreCluster.needsCount, 0);
+  assert.equal(coreCluster.subtitle, '2/2');
+  assert.equal(coreCluster.tone, 'done');
+
+  const dashCluster = headModel.clusters[1];
+  assert.equal(dashCluster.members.length, 1);
+  assert.equal(dashCluster.subtitle, '0/1');
+  assert.equal(dashCluster.tone, 'working');
+
+  const auditCluster = headModel.clusters[2];
+  assert.equal(auditCluster.needsCount, 1);
+  assert.equal(auditCluster.tone, 'needs');
+  assert.equal(auditCluster.subtitle, '0/1');
+
+  const otherCluster = headModel.clusters[3];
+  assert.equal(otherCluster.id, 'other');
+  assert.equal(otherCluster.label, 'Other');
+  assert.equal(otherCluster.fullTitle, 'Other');
+  assert.equal(otherCluster.goal, '');
+  assert.equal(otherCluster.subtitle, '1/2');
+  assert.equal(otherCluster.tone, 'waiting');
+
+  assert.equal(headModel.coordinator.subtitle, '3 of 6 done');
+  assert.ok(headModel.connectors.some(c => c.from === 'core-eng' && c.to === 'coordinator' && c.kind === 'done' && c.label === 'Tasks done'));
+  assert.ok(!headModel.connectors.some(c => c.from === 'dash-ui' && c.kind === 'done'));
+
+  // Mid-replay at seq=2 (!atHead): core-1 hasn't posted [done] yet -> ui-dev waits on core-1, AND core-1->core-2 intra-hex message emits!
+  const mid2 = projectHive(posts, members, 2, { threads });
+  assert.ok(mid2.connectors.some(c => c.kind === 'message' && c.from === 'core-eng' && c.to === 'core-eng'),
+    'intra-hex message emits self-loop connector');
+  assert.ok(mid2.connectors.some(c => c.kind === 'waiting' && c.from === 'dash-ui' && c.to === 'core-eng'),
+    'mid-replay Waiting on connector emitted while core-1 has not posted [done]');
+  assert.ok(mid2.connectors.some(c => c.kind === 'waiting' && c.from === 'other' && c.to === 'dash-ui'),
+    'helper-b waiting on ui-dev emits Waiting on connector mid-replay');
+
+  // Mid-replay at seq=3 (!atHead): core-1 HAS posted [done] -> ui-dev no longer waits on core-1, while helper-b still waits on ui-dev
+  const mid3 = projectHive(posts, members, 3, { threads });
+  assert.ok(!mid3.connectors.some(c => c.kind === 'waiting' && c.from === 'dash-ui' && c.to === 'core-eng'),
+    'Waiting on clears mid-replay once dependency posts [done]');
+  assert.ok(mid3.connectors.some(c => c.kind === 'waiting' && c.from === 'other' && c.to === 'dash-ui'));
+
+  // Tier 2 (no threads, uses member.group and non-main member.channels with topic lookup + Title-Case fallback)
+  const tier2Members = [
+    { name: 'coordinator', role: 'coordinator', status: 'waiting' },
+    { name: 's1', group: 'api-core', status: 'done', channels: ['main'] },
+    { name: 's2', status: 'working', channels: ['main', 'dash-ui'] },
+    { name: 's3', status: 'done', channels: ['main'] },
+  ];
+  const channels = [{ name: 'main', archived: false }, { name: 'dash-ui', archived: false, topic: 'Dashboard & Replay' }];
+  const tier2 = projectHive([], tier2Members, 0, { channels });
+  assert.equal(tier2.clusters.length, 3);
+  assert.equal(tier2.clusters[0].label, 'Api Core');
+  assert.equal(tier2.clusters[0].subtitle, '1/1');
+  assert.equal(tier2.clusters[0].tone, 'done');
+  assert.equal(tier2.clusters[1].label, 'Dashboard & Replay');
+  assert.equal(tier2.clusters[1].tone, 'working');
+  assert.equal(tier2.clusters[2].id, 'other');
+  assert.equal(tier2.clusters[2].subtitle, '1/1');
+
+  // Tier 3 (only main channel, no group, no threads -> status buckets)
+  const tier3 = projectHive([], [
+    { name: 'coordinator', role: 'coordinator', status: 'waiting' },
+    { name: 'w1', channels: ['main'], status: 'working' },
+  ], 0, { channels });
+  assert.equal(tier3.clusters[0].mode, 'status');
+  assert.equal(tier3.clusters[0].id, 'working');
+  assert.equal(tier3.clusters[0].subtitle, '1');
+});
+
+test('wrapHexTitle, Ring-2 layoutHive, hiveMinimumHeight, and zero title/subtitle/bee overlap', () => {
+  const { wrapHexTitle, projectHive, layoutHive, hiveMinimumHeight } = globalThis.HiveGraph;
+  assert.equal(typeof wrapHexTitle, 'function');
+
+  const short = wrapHexTitle('Other', 14, 2);
+  assert.deepEqual(short, { lines: ['Other'], truncated: false });
+
+  const twoLine = wrapHexTitle('Core Engine, Bug Fixes & Worktrees', 15, 2);
+  assert.equal(twoLine.lines.length, 2);
+  assert.equal(twoLine.truncated, true);
+  assert.equal(twoLine.lines[0], 'Core Engine,');
+  assert.ok(twoLine.lines[1].endsWith('...'));
+  assert.ok(twoLine.lines.every(line => line.length <= 15));
+
+  // Ring-2 layout up to 9 and 12 clusters (zero overlaps, inside stage, zero label/bee collision)
+  for (const clusterTotal of [7, 8, 9, 12, 16]) {
+    for (const width of [380, 680, 920]) {
+      const threads = Array.from({ length: clusterTotal - 1 }, (_, i) => ({
+        id: 't-' + i,
+        title: `Specialized Workgroup ${i + 1} With Long Outcome Title`,
+        goal: 'Goal ' + i,
+        members: ['w-' + i],
+      }));
+      const members = [
+        { name: 'coordinator', role: 'coordinator', status: 'done' },
+        ...Array.from({ length: clusterTotal - 1 }, (_, i) => ({ name: 'w-' + i, status: i % 3 === 0 ? 'done' : 'working' })),
+        { name: 'extra-other', status: 'done' },
+      ];
+      const model = projectHive([], members, 0, { threads });
+      assert.equal(model.clusters.length, clusterTotal);
+      const minH = hiveMinimumHeight(clusterTotal, width);
+      assert.ok(minH > 490, `hiveMinimumHeight grows for ${clusterTotal} clusters at width=${width}: ${minH}`);
+      const lay = layoutHive(model, width, minH);
+      const cells = [lay.coordinator, ...lay.clusters];
+      const minCenterDist = Math.sqrt(3) * lay.radius * 0.99;
+      for (let i = 0; i < cells.length; i++) {
+        const c = cells[i];
+        assert.ok(Array.isArray(c.titleLines) && c.titleLines.length >= 1 && c.titleLines.length <= 2);
+        assert.ok(Number.isFinite(c.titleY) && Number.isFinite(c.subtitleY));
+        assert.ok(c.beeBox && Number.isFinite(c.beeBox.top) && Number.isFinite(c.beeBox.bottom));
+        for (const v of c.vertices) {
+          assert.ok(v.x >= 0 && v.x <= width && v.y >= 0 && v.y <= minH,
+            `vertex inside stage for clusterTotal=${clusterTotal}, w=${width}: (${v.x}, ${v.y})`);
+        }
+        for (let j = i + 1; j < cells.length; j++) {
+          const d = Math.hypot(cells[i].x - cells[j].x, cells[i].y - cells[j].y);
+          assert.ok(d >= minCenterDist, `cells ${cells[i].id} & ${cells[j].id} do not overlap (${d} < ${minCenterDist})`);
+        }
+      }
+      for (const cl of lay.clusters) {
+        const lastTitleY = cl.titleY + (cl.titleLines.length - 1) * cl.titleLineHeight;
+        assert.ok(cl.subtitleY > lastTitleY + 6, 'subtitle sits cleanly below wrapped title');
+        for (const slot of cl.slots) {
+          const beeTop = slot.y - 12 * slot.beeScale;
+          assert.ok(beeTop >= cl.subtitleY + 5,
+            `bee sprite top (${beeTop}) clears subtitle (${cl.subtitleY}) at clusterTotal=${clusterTotal}, w=${width}`);
+        }
+      }
+    }
+  }
+});
+
+test('routeHiveConnector, hexRayExit, themePalette, and toneStyle produce curved outer chords, self-loops, and canonical colors', () => {
+  const { projectHive, layoutHive, hiveMinimumHeight, routeHiveConnector, hexRayExit, themePalette, toneStyle } = globalThis.HiveGraph;
+  assert.equal(typeof routeHiveConnector, 'function');
+  assert.equal(typeof hexRayExit, 'function');
+  assert.equal(typeof themePalette, 'function');
+  assert.equal(typeof toneStyle, 'function');
+
+  // Canonical palette check (light & dark): green done, blue working, amber waiting, red needs, purple pulse
+  for (const theme of ['light', 'dark']) {
+    const pal = themePalette(theme);
+    const done = toneStyle('done', pal);
+    const working = toneStyle('working', pal);
+    const waiting = toneStyle('waiting', pal);
+    const needs = toneStyle('needs', pal);
+    assert.notEqual(working.stroke, waiting.stroke);
+    assert.notEqual(working.stroke, needs.stroke);
+    assert.notEqual(waiting.stroke, needs.stroke);
+    assert.notEqual(done.stroke, working.stroke);
+    assert.match(pal.pulse, /^#/);
+  }
+
+  // 4-cluster layout around center Coordinator: diagonal outer-to-outer chord MUST curve around Coordinator
+  const threads = [
+    { id: 'nw', title: 'North West', members: ['a'] },
+    { id: 'ne', title: 'North East', members: ['b'] },
+    { id: 'sw', title: 'South West', members: ['c'] },
+    { id: 'se', title: 'South East', members: ['d'] },
+  ];
+  const members = [
+    { name: 'coordinator', role: 'coordinator', status: 'done' },
+    { name: 'a', status: 'done' },
+    { name: 'b', status: 'done' },
+    { name: 'c', status: 'waiting', waitFor: ['b'] },
+    { name: 'd', status: 'done' },
+  ];
+  const posts = [
+    { seq: 1, kind: 'message', author: 'a', targets: ['d'], text: '@d coordinate' },
+  ];
+  const model = projectHive(posts, members, 1, { threads });
+  const lay = layoutHive(model, 680, 490);
+  const coord = lay.coordinator;
+
+  // Outer diagonal chord (nw -> se) curves via Q and avoids Coordinator hex
+  const diagRoute = routeHiveConnector({ from: 'nw', to: 'se', kind: 'message' }, lay);
+  assert.equal(diagRoute.isSelfLoop, false);
+  assert.match(diagRoute.path, /^M[\d.-]+ [\d.-]+ Q[\d.-]+ [\d.-]+ [\d.-]+ [\d.-]+$/);
+  assert.ok(diagRoute.arrow && Number.isFinite(diagRoute.arrow.angle));
+  const qMatch = /^M([\d.-]+) ([\d.-]+) Q([\d.-]+) ([\d.-]+) ([\d.-]+) ([\d.-]+)$/.exec(diagRoute.path);
+  const p0 = { x: Number(qMatch[1]), y: Number(qMatch[2]) };
+  const ctrl = { x: Number(qMatch[3]), y: Number(qMatch[4]) };
+  const p1 = { x: Number(qMatch[5]), y: Number(qMatch[6]) };
+  for (let i = 0; i <= 16; i++) {
+    const t = i / 16, u = 1 - t;
+    const x = u * u * p0.x + 2 * u * t * ctrl.x + t * t * p1.x;
+    const y = u * u * p0.y + 2 * u * t * ctrl.y + t * t * p1.y;
+    const dCoord = Math.hypot(x - coord.x, y - coord.y);
+    assert.ok(dCoord > coord.radius * 0.88, `curved chord point stays outside coordinator (${dCoord} vs ${coord.radius * 0.88})`);
+  }
+
+  // Center <-> outer straight routing
+  const centerRoute = routeHiveConnector({ from: 'nw', to: 'coordinator', kind: 'done' }, lay);
+  assert.equal(centerRoute.isSelfLoop, false);
+  assert.match(centerRoute.path, /^M[\d.-]+ [\d.-]+ L[\d.-]+ [\d.-]+$/);
+
+  // Self-loop routing
+  const selfRoute = routeHiveConnector({ from: 'nw', to: 'nw', kind: 'message' }, lay);
+  assert.equal(selfRoute.isSelfLoop, true);
+  assert.ok(selfRoute.path.startsWith('M') && selfRoute.arrow && Number.isFinite(selfRoute.arrow.angle));
+  assert.ok(Math.hypot(selfRoute.mid.x - lay.cellsById.get('nw').x, selfRoute.mid.y - lay.cellsById.get('nw').y) > lay.radius * 0.85);
+
+  // Ring-2 hex behind a Ring-1 hex connecting to Coordinator curves around the Ring-1 blocker
+  const ring2Threads = Array.from({ length: 12 }, (_, i) => ({
+    id: 'g-' + i,
+    title: 'Group ' + i,
+    members: ['m-' + i],
+  }));
+  const ring2Members = [
+    { name: 'coordinator', role: 'coordinator', status: 'done' },
+    ...Array.from({ length: 12 }, (_, i) => ({ name: 'm-' + i, status: 'done' })),
+  ];
+  const ring2Model = projectHive([], ring2Members, 0, { threads: ring2Threads });
+  const ring2Lay = layoutHive(ring2Model, 760, hiveMinimumHeight(12, 760));
+  for (const cl of ring2Lay.clusters) {
+    const r = routeHiveConnector({ from: cl.id, to: 'coordinator', kind: 'done' }, ring2Lay);
+    assert.ok(r && r.path.startsWith('M'), `connector from ${cl.id} to coordinator routes cleanly`);
+    if (r.control) {
+      for (let i = 1; i < 16; i++) {
+        const t = i / 16, u = 1 - t;
+        const x = u * u * r.start.x + 2 * u * t * r.control.x + t * t * r.end.x;
+        const y = u * u * r.start.y + 2 * u * t * r.control.y + t * t * r.end.y;
+        for (const other of ring2Lay.clusters) {
+          if (other === cl) continue;
+          assert.ok(Math.hypot(x - other.x, y - other.y) > ring2Lay.radius * 0.82,
+            `Ring-2 curve ${cl.id}->coordinator clears intermediate hex ${other.id}`);
+        }
+      }
+    }
+  }
+});
+
+test('renderGraphFrame renders specialized threads, wrapped titles, and mid-replay Waiting on arrows', () => {
+  const { renderGraphFrame } = globalThis.HiveGraph;
+  const threads = [
+    { id: 'core', title: 'Core Engine, Bug Fixes & Worktrees', members: ['a', 'b'] },
+    { id: 'ui', title: 'Antigravity Dashboard UI', members: ['c'] },
+  ];
+  const members = [
+    { name: 'coordinator', role: 'coordinator', status: 'waiting' },
+    { name: 'a', status: 'done' },
+    { name: 'b', status: 'done' },
+    { name: 'c', status: 'waiting', waitFor: ['a'] },
+  ];
+  const posts = [
+    { seq: 1, kind: 'message', author: 'a', targets: ['b'], text: 'Intra-hex ping' },
+    { seq: 2, kind: 'message', author: 'a', targets: ['coordinator'], text: '[done] Core a ready' },
+  ];
+  const texts = [];
+  const dashCalls = [];
+  const ctx = new Proxy({
+    fillStyle: '', strokeStyle: '', lineWidth: 1, globalAlpha: 1, font: '', textAlign: '', textBaseline: '',
+    setLineDash: (arr) => dashCalls.push(arr),
+    fillText: (text) => texts.push(text),
+  }, { get: (t, k) => t[k] ?? (() => {}) });
+  renderGraphFrame(ctx, { mode: 'hive', theme: 'light', posts, members, threads, cursor: 1, width: 680, height: 480, bees: globalThis.HiveBee });
+  assert.ok(texts.includes('0/2'), 'renders done/total subtitle at cursor=1');
+  assert.ok(texts.includes('0/1'), 'renders 0/1 subtitle for UI group');
+  assert.ok(texts.includes('0 of 3 done'), 'renders coordinator X of Y done');
+  assert.ok(dashCalls.some(arr => Array.isArray(arr) && arr.length > 0), 'renders mid-replay dashed Waiting on connector');
+});
+
+test('hexProgressRing computes clockwise top-left v4 perimeter geometry and layoutHive attaches progressRing cleanly', () => {
+  const { hexProgressRing, projectHive, layoutHive, renderGraphFrame, themePalette } = globalThis.HiveGraph;
+  assert.equal(typeof hexProgressRing, 'function');
+
+  // Construct synthetic layout geometry for 0/2, 1/2, 17/18, 2/2, Coordinator 20/21, and status fallback
+  const r = 60;
+  const cx = 200;
+  const cy = 200;
+  const verts = Array.from({ length: 6 }, (_, i) => {
+    const a = (i * Math.PI) / 3;
+    return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
+  });
+  const v4 = [verts[4].x, verts[4].y]; // top-left
+  const v5 = [verts[5].x, verts[5].y]; // top-right
+  const v0 = [verts[0].x, verts[0].y]; // right
+  const v1 = [verts[1].x, verts[1].y]; // bottom-right
+  const v3 = [verts[3].x, verts[3].y]; // left
+
+  // 0/2 -> ratio 0, empty segments, non-null strokeDasharray
+  const ring0 = hexProgressRing({ id: 'g0', mode: 'group', doneCount: 0, totalCount: 2, vertices: verts });
+  assert.ok(ring0);
+  assert.equal(ring0.ratio, 0);
+  assert.equal(ring0.fullDone, false);
+  assert.deepEqual(ring0.segments, []);
+  assert.ok(Math.abs(ring0.perimeter - 6 * r) < 1e-6);
+  assert.ok(ring0.svgPath.startsWith(`M ${v4[0].toFixed(1)} ${v4[1].toFixed(1)} L ${v5[0].toFixed(1)} ${v5[1].toFixed(1)}`));
+  assert.ok(ring0.svgPath.endsWith(' Z'));
+  assert.equal(ring0.strokeDasharray, `0.0 ${(ring0.perimeter + 1).toFixed(1)}`);
+
+  // 1/2 -> ratio 0.5, starts at v4, sweeps clockwise across v5, v0, ends at v1
+  const ringHalf = hexProgressRing({ id: 'g1', mode: 'group', doneCount: 1, totalCount: 2, vertices: verts });
+  assert.equal(ringHalf.ratio, 0.5);
+  assert.equal(ringHalf.fullDone, false);
+  assert.equal(ringHalf.segments.length, 4);
+  assert.ok(Math.hypot(ringHalf.segments[0][0] - v4[0], ringHalf.segments[0][1] - v4[1]) < 1e-6);
+  assert.ok(Math.hypot(ringHalf.segments[1][0] - v5[0], ringHalf.segments[1][1] - v5[1]) < 1e-6);
+  assert.ok(Math.hypot(ringHalf.segments[2][0] - v0[0], ringHalf.segments[2][1] - v0[1]) < 1e-6);
+  assert.ok(Math.hypot(ringHalf.segments[3][0] - v1[0], ringHalf.segments[3][1] - v1[1]) < 1e-6);
+  assert.equal(ringHalf.strokeDasharray, `${(3 * r).toFixed(1)} ${(6 * r + 1).toFixed(1)}`);
+
+  // 17/18 -> sweeps 5 full edges + 2/3 of final edge v3->v4, leaving 1/3 edge gap right before v4
+  const ring17 = hexProgressRing({ id: 'g17', mode: 'group', doneCount: 17, totalCount: 18, vertices: verts });
+  assert.ok(Math.abs(ring17.ratio - 17 / 18) < 1e-9);
+  assert.equal(ring17.fullDone, false);
+  assert.equal(ring17.segments.length, 7);
+  const end17 = ring17.segments[6];
+  const expected17X = v3[0] + (v4[0] - v3[0]) * (2 / 3);
+  const expected17Y = v3[1] + (v4[1] - v3[1]) * (2 / 3);
+  assert.ok(Math.hypot(end17[0] - expected17X, end17[1] - expected17Y) < 1e-6, '17/18 gap sits on top-left edge right before v4');
+
+  // 2/2 -> fullDone, 7-point closed loop, strokeDasharray null
+  const ringFull = hexProgressRing({ id: 'g2', mode: 'group', doneCount: 2, totalCount: 2, vertices: verts });
+  assert.equal(ringFull.ratio, 1);
+  assert.equal(ringFull.fullDone, true);
+  assert.equal(ringFull.segments.length, 7);
+  assert.ok(Math.hypot(ringFull.segments[6][0] - v4[0], ringFull.segments[6][1] - v4[1]) < 1e-6);
+  assert.equal(ringFull.strokeDasharray, null);
+
+  // Coordinator 20/21 -> reads model.doneCount / model.totalWorkers
+  const coordRing = hexProgressRing({ id: 'coordinator', vertices: verts, model: { doneCount: 20, totalWorkers: 21 } });
+  assert.ok(coordRing);
+  assert.ok(Math.abs(coordRing.ratio - 20 / 21) < 1e-9);
+  assert.equal(coordRing.fullDone, false);
+  assert.equal(coordRing.segments.length, 7);
+  const end20 = coordRing.segments[6];
+  const frac20 = (6 * 20) / 21 - 5; // 5/7 of edge v3 -> v4
+  assert.ok(Math.hypot(end20[0] - (v3[0] + (v4[0] - v3[0]) * frac20), end20[1] - (v3[1] + (v4[1] - v3[1]) * frac20)) < 1e-6);
+
+  // Legacy mode === 'status' returns null
+  assert.equal(hexProgressRing({ id: 'working', mode: 'status', count: 3, totalCount: 3, doneCount: 0, vertices: verts }), null);
+
+  // layoutHive sets progressRing on coordinator + group clusters, null on status clusters
+  const statusLay = layoutHive(projectHive([], [
+    { name: 'coordinator', role: 'coordinator', status: 'waiting' },
+    { name: 'w1', status: 'working' },
+    { name: 'w2', status: 'done' },
+  ], 0), 680, 460);
+  assert.ok(statusLay.coordinator.progressRing);
+  assert.equal(statusLay.coordinator.progressRing.done, 1);
+  assert.equal(statusLay.coordinator.progressRing.total, 2);
+  assert.ok(statusLay.clusters.every(cl => cl.progressRing === null));
+
+  const threads = [
+    { id: 'zero', title: 'Zero Done', members: ['z1', 'z2'] },
+    { id: 'half', title: 'Half Done', members: ['h1', 'h2'] },
+    { id: 'full', title: 'All Done', members: ['d1', 'd2'] },
+    { id: 'needs', title: 'Needs Fix', members: ['n1'] },
+  ];
+  const groupMembers = [
+    { name: 'coordinator', role: 'coordinator', status: 'waiting' },
+    { name: 'z1', status: 'working' },
+    { name: 'z2', status: 'waiting' },
+    { name: 'h1', status: 'done' },
+    { name: 'h2', status: 'working' },
+    { name: 'd1', status: 'done' },
+    { name: 'd2', status: 'done' },
+    { name: 'n1', status: 'failed' },
+  ];
+  const groupLay = layoutHive(projectHive([], groupMembers, null, { threads }), 680, 480);
+  assert.equal(groupLay.cellsById.get('zero').progressRing.ratio, 0);
+  assert.equal(groupLay.cellsById.get('half').progressRing.ratio, 0.5);
+  assert.equal(groupLay.cellsById.get('full').progressRing.fullDone, true);
+  assert.equal(groupLay.coordinator.progressRing.done, 3);
+  assert.equal(groupLay.coordinator.progressRing.total, 7);
+
+  // renderGraphFrame paints neutral surface/border for partial hexes and overlays 2.2px round green progress ring
+  const palette = themePalette('light');
+  const recorded = [];
+  const state = { fillStyle: '', strokeStyle: '', lineWidth: 1, lineCap: 'butt', lineJoin: 'miter', globalAlpha: 1, font: '', textAlign: '', textBaseline: '' };
+  const ctx = new Proxy(state, {
+    set(t, k, v) { t[k] = v; return true; },
+    get(t, k) {
+      if (k in t) return t[k];
+      if (k === 'stroke') return () => recorded.push({ op: 'stroke', strokeStyle: t.strokeStyle, lineWidth: t.lineWidth, lineCap: t.lineCap, lineJoin: t.lineJoin });
+      if (k === 'fill') return () => recorded.push({ op: 'fill', fillStyle: t.fillStyle });
+      if (k === 'moveTo') return (x, y) => recorded.push({ op: 'moveTo', x, y });
+      if (k === 'lineTo') return (x, y) => recorded.push({ op: 'lineTo', x, y });
+      return () => {};
+    },
+  });
+  renderGraphFrame(ctx, { mode: 'hive', theme: 'light', posts: [], members: groupMembers, threads, width: 680, height: 480, bees: globalThis.HiveBee });
+
+  const fills = recorded.filter(r => r.op === 'fill').map(r => r.fillStyle);
+  const strokes = recorded.filter(r => r.op === 'stroke');
+  assert.ok(fills.includes(palette.surface), '0/2 and 1/2 hexes fill with neutral palette.surface');
+  assert.ok(fills.includes(palette.doneFill), '2/2 fullDone hex fills with palette.doneFill');
+  assert.ok(fills.includes(palette.needsFill), 'needs hex fills with palette.needsFill');
+  assert.ok(!fills.includes(palette.workingFill), 'group-mode working hex does not use workingFill');
+  assert.ok(strokes.some(s => s.strokeStyle === palette.border && s.lineWidth === 1.5), 'neutral track border uses palette.border 1.5px');
+  assert.ok(strokes.some(s => s.strokeStyle === palette.needsStroke && s.lineWidth === 1.6), 'needs track border uses palette.needsStroke 1.6px');
+  assert.ok(strokes.some(s => s.strokeStyle === palette.doneStroke && s.lineWidth === 2.2 && s.lineCap === 'round' && s.lineJoin === 'round'),
+    'green progress ring overlay draws in doneStroke 2.2px round');
+
+  // Verify partial 1/2 green ring traces exact segments starting at halfCell.progressRing.segments[0]
+  const halfRing = groupLay.cellsById.get('half').progressRing;
+  const halfStart = halfRing.segments[0];
+  assert.ok(recorded.some(r => r.op === 'moveTo' && Math.hypot(r.x - halfStart[0], r.y - halfStart[1]) < 0.2),
+    'partial ring starts moveTo at top-left v4');
+});

@@ -1,21 +1,25 @@
 # Hive Swarm for DeepSeek Harness
 
-Native worker sessions and a bee-marked **Swarm** Start card, right tab, and full panel for **DSH 0.2.2-rc.5**. The package pins the matching `hive-swarm` core. React and native SDK services are supplied by the Host.
+Native hidden subagent swarms and a bee-marked **Swarm** Start card, right-dock tab, and full React dashboard for **DSH `0.2.2-rc.5`**. Pins the matching `hive-swarm@2.2.0` core; React and native SDK services are supplied by the Host.
 
-This is the **experimental `2.1.2` release** for DSH `0.2.2-rc.5` (native-compact Turn 2+ wake prompts, structured turn-end error reporting, silent `wake: false` posts, owner-only `cancel_turn` + Members overflow action, completed-member `Dismiss` recovery, Goal-mode `@lead` routing, Antigravity-style Overview, uncluttered Board & clickable Members rows, Dual-Mode `Hive`/`Mentions` Graph with zero-dependency **Export GIF**, dashboard version badge with cached npm update alerts, confined `Screenshot:` timeline + lightbox, `goalLine`/`taskLabel` plan schema, B1–B7 bug fixes, native hidden child subagents via `ctx.subagents.startActivation` + `ctx.agents.resume`, and synchronous fail-closed sandbox & tool-restriction locks). The core/build/native test suite passes on Windows, macOS, and Linux; live DSH Desktop qualification is Windows-specific.
+## Highlights in `2.2.0` (experimental)
 
-Close Desktop and let DSH manage its profile:
+- **Hidden Native Subagents & Sandbox Parity:** Non-worktree workers run as hidden native DSH child subagents (`ctx.subagents.startActivation`, zero workspace sidebar clutter) and resume quietly via `ctx.agents.resume` + `followup`. Writable workers inherit `'danger-full-access'` when the parent session is `'danger-full-access'` (preventing Windows `workspace-write` `spawn EPERM`) while locking `writable: false` strictly to `'read-only'`, filtering non-restrictable tools before `tools.restrict`, and denying `sandbox_permissions` escalation.
+- **`parallelWriters` vs `worktreeMode: "local"`:** Use `worktreeMode: "local"` (`worktree: true`) for isolated branches under `<repoRoot>/.hive-swarm-worktrees/<teamId>/<member>`, or `parallelWriters: true` (`concurrency` `1..8`) when concurrent writers own disjoint paths in the shared checkout. Queued workers surface explicit `blockedReason` badges (`Waiting for shared writer`, `Concurrency limit`, `Waiting on deps`).
+- **`900s` `wait_for_board` & `RunStore.abandon()`:** Long-poll up to `900s` without 45s polling loops (`inputRequired` wakes immediately via `wokeBy: "input"`, compact timeout payloads, `kind: "status"` wake exclusion). `cancel_turn` and `resolve_recovery(action: "dismiss")` settle pending runs cleanly in `runs.sqlite`, and Turn-1 subagent tool visibility + `session/fork-unavailable` fallback handle early-turn starts smoothly.
+- **Specialized Honeycomb React UI:** Groups **Overview** `Threads` and **Graph · Hive** hex cells exclusively by outcome (`threads` → `group`/`channels` → status) with Ring-2 support, wrapped titles, **clockwise hexagonal `done/total` progress-ring borders** (`hexProgressRing`), curved Bézier connectors, self-loops, focus dimming, `blockedReason` pills, **Board** Markdown/`#seq` jumps, **Members** (`Subagent`/`Session` badges, `Open session`, **Journal** with `✓ Verified route:` proof), **Mentions** ring, and pure-JS **Export GIF** — bundled minified under `215 KB` (`client/dist.js`).
+
+## Install & Usage
+
+Close DeepSeek Harness Desktop and let DSH manage its profile:
 
 ```sh
-dsh plugin --profile desktop add dsh-hive-swarm@2.1.2
+dsh plugin --profile desktop add dsh-hive-swarm@2.2.0
 ```
 
-Use the native `/hive-swarm` skill for requested teams (pass `fork: "coordinator"` when a worker should inherit the active parent chat). Opening Swarm or reading a Journal does not start a model. Select an exact team in its workspace; the four views are **Overview** (task summary accordion with `goalLine`/`taskLabel`/bee pills, outcome `threads` progress bars, confined `Screenshots` strip + lightbox, `Needs you` alerts, Coordinator honeycomb tile), **Board** (safe Markdown, `#seq` jumps, channels, deduplicated Author filter, live activity), **Members** (`Subagent`/`Session` badges, model controls, recovery, worktree cleanup, `SubagentAddress` **Open session** with **Journal** fallback), and **Graph** (**`Hive`** honeycomb clusters + **`Mentions`** capsule ring + **Export GIF** replay). Worker Journals render host-verified `✓ Verified route:` pills, and native tool results can open their Host-verified team directly.
+Run `/hive-swarm` in an authorized workspace chat to launch a team (use `hive_swarm_read_board({ seqs })` to inspect cited posts and `hive_swarm_retire_member({ dropDependency: true })` to unblock retired upstream dependencies). Opening Swarm or reading a Journal never starts a model turn.
 
-Non-worktree workers run as hidden native DSH child subagents (`ctx.subagents.startActivation`, zero workspace sidebar clutter) and enforce read-only or workspace-write sandboxing synchronously inside `subagent/start` before Turn 1 executes (failing closed on any violation). Turn 2+ resumes quietly via `ctx.agents.resume` + `followup` without waking the parent user chat, while `worktree: true` and fallback workers use `session/create` with clean pinned titles. Hive never changes global model defaults or grants wider roots; unknown outcomes remain **Needs you** with explicit **Retry fresh turn** and **Dismiss** recovery controls rather than automatically repeating potentially paid work.
-
-Windows DSH reports shell enforcement as `partial`. Real probes verified allowed reads, denied read-only file/shell writes, and workspace file boundaries. Workspace-write follows DSH's policy, including its platform temporary directories; this package does not claim stronger confinement than the Host supplies.
-
-State is isolated under the active Host's `<profileContext.dir>/.hive-swarm`. The Codex database and other plugins are not migrated. Plugin removal retains sessions, journals, and Hive data. Use DSH's supported manager for updates and version-pinned rollback; do not edit its profile manifest or lockfile by hand.
+- **Windows confinement note:** Windows DSH reports shell enforcement as `partial` (read-only writes denied; `workspace-write` follows DSH's policy and NTFS ACL limits).
+- **State isolation:** Stored under `<profileContext.dir>/.hive-swarm`, completely separate from Codex. Removal keeps sessions, journals, and Hive data intact.
 
 [Source and full documentation](https://github.com/snowmiku601-cpu/hive-swarm) · MIT license
