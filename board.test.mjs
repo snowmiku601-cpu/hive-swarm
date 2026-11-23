@@ -813,7 +813,7 @@ test('graph defaults to Hive mode, persists Mentions mode in sessionStorage, ren
   assert.equal(rawGif[rawGif.length-1],0x3B);
 });
 
-test('threads count retired members as done and Hive connectors skip self-loops while offsetting concurrent edges',async()=>{
+test('threads count retired members as done and Hive connectors route self-loops while offsetting concurrent edges',async()=>{
   const state={
     id:'team',title:'Connector & Thread Audit',cwd:'fixture',phase:'working',turns:2,turnLimit:8,
     threads:[{id:'t-retired',title:'Retired stream',goal:'Done work',members:['legacy']}],
@@ -863,8 +863,10 @@ test('threads count retired members as done and Hive connectors skip self-loops 
   const [mDone,mMsg]=moves;
   const dist=Math.hypot(mMsg[0]-mDone[0],mMsg[1]-mDone[1]);
   assert.ok(dist>=7.5&&dist<=9.5,'Expected ~8px lateral offset between concurrent done and message connectors, got '+dist);
+  const selfLoops=ops.filter(item=>item.op==='bezierCurveTo');
+  assert.equal(selfLoops.length,1);
   const dashedWires=ops.filter(item=>item.op==='setLineDash'&&item.args[0]?.length>0);
-  assert.equal(dashedWires.length,0);
+  assert.equal(dashedWires.length,1);
 });
 
 test('Antigravity Board filter toggle, post clamping, Latest pill, and clickable Member cards work cleanly',async()=>{
@@ -968,4 +970,223 @@ test('standalone Members overflow shows Cancel turn only for working workers and
   assert.equal(restBtns.length,0);
   await workingBtns[0].onclick({isTrusted:true});
   assert.deepEqual(posts,[['/board/team/cancel-turn',{member:'builder'}]]);
+});
+
+test('specialized honeycomb wires threads/channels, Ring-2 height, wrapped titles, tooltips, palette, and GIF options',async()=>{
+  const html=read('board.html');
+  assert.match(html,/id="graph-hexes"/);
+  const gifCalls=[];
+  const mockGif={
+    async exportGraphReplayGif(opts) {
+      gifCalls.push(opts);
+      return {bytes:new Uint8Array([0x47,0x49,0x46,0x38,0x39,0x61,0x3B]),frameCount:4,width:opts.width,height:opts.height};
+    },
+  };
+  const threads=[
+    {id:'core-eng',title:'Core Engine, Bug Fixes & Worktrees',goal:'Harden scheduler and worktrees',members:['alpha','alpha-2']},
+    {id:'ui-polish',title:'Dashboard UI',goal:'Match Antigravity honeycomb',members:['beta']},
+  ];
+  const channels=[{name:'main'},{name:'ops',topic:'Operations'}];
+  const state={
+    id:'team',title:'Specialized Honeycomb',cwd:'fixture',phase:'working',turns:4,turnLimit:10,
+    threads,channels,
+    members:[
+      {name:'coordinator',role:'coordinator',status:'waiting'},
+      {name:'alpha',status:'done'},
+      {name:'alpha-2',status:'done'},
+      {name:'beta',status:'working'},
+      {name:'extra',status:'done'},
+    ],
+    events:[
+      {seq:1,kind:'message',author:'alpha',targets:['alpha-2'],text:'Intra-hex handoff',time:'2026-11-22T10:00:00Z'},
+      {seq:2,kind:'message',author:'beta',targets:['coordinator'],text:'Building UI',time:'2026-11-22T10:01:00Z'},
+    ],
+  };
+  const view=await boardView(state,{hiveGif:mockGif,darkMatches:false});
+  view.element('tab-graph').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+
+  const ops=view.element('graph-canvas').canvasOps;
+  const drawnTexts=ops.filter(o=>o.op==='fillText').map(o=>o.args[0]);
+  assert.ok(drawnTexts.includes('2/2'),'renders done/total subtitle for Core group');
+  assert.ok(drawnTexts.includes('0/1'),'renders 0/1 subtitle for UI group');
+  assert.ok(drawnTexts.includes('1/1'),'renders 1/1 subtitle for Other group');
+  assert.ok(drawnTexts.includes('3 of 4 done'),'renders X of Y done on Coordinator');
+  assert.ok(drawnTexts.some(t=>t.includes('Core Engine')),'renders wrapped group title lines');
+
+  const fillColors=ops.filter(o=>o.op==='set:fillStyle').map(o=>o.args[0]);
+  const strokeColors=ops.filter(o=>o.op==='set:strokeStyle').map(o=>o.args[0]);
+  assert.ok(fillColors.includes('#edf7ed')&&strokeColors.includes('#4d9938'),'uses light themePalette done colors');
+  assert.ok(fillColors.includes('#edf4fc')&&strokeColors.includes('#2268b8'),'uses light themePalette working colors');
+
+  const hexBtns=view.element('graph-hexes').children;
+  const coreHex=hexBtns.find(n=>n.dataset.clusterId==='core-eng');
+  assert.ok(coreHex,'renders interactive hex overlay for core-eng');
+  assert.match(coreHex.title,/Core Engine, Bug Fixes & Worktrees/);
+  assert.match(coreHex.title,/Harden scheduler and worktrees/);
+
+  await view.element('export-gif').onclick();
+  assert.equal(gifCalls.length,1);
+  assert.deepEqual(gifCalls[0].threads,threads);
+  assert.deepEqual(gifCalls[0].channels,channels);
+
+  // Ring-2 layout with 9 clusters grows stage height dynamically above 490px
+  const ring2Threads=Array.from({length:8},(_,i)=>({id:'g-'+i,title:'Stream '+i,members:['w-'+i]}));
+  const ring2State={
+    id:'ring2',title:'Ring-2 Honeycomb',cwd:'fixture',phase:'working',turns:1,turnLimit:12,
+    threads:ring2Threads,
+    members:[
+      {name:'coordinator',role:'coordinator',status:'waiting'},
+      ...Array.from({length:8},(_,i)=>({name:'w-'+i,status:i%2===0?'done':'working'})),
+      {name:'unassigned',status:'done'},
+    ],
+    events:[],
+  };
+  const ring2View=await boardView(ring2State);
+  ring2View.element('tab-graph').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  const stageH=Number.parseInt(ring2View.element('graph-stage').style.height,10);
+  assert.ok(stageH>490,'expected Ring-2 stage height > 490px, got '+stageH);
+});
+
+test('Hive routed connectors draw curved outer edges, self-loops, arrowheads, and mid-replay Waiting on',async()=>{
+  const threads=[
+    {id:'nw',title:'North West',members:['a','a2']},
+    {id:'ne',title:'North East',members:['b']},
+    {id:'sw',title:'South West',members:['c']},
+    {id:'se',title:'South East',members:['d']},
+  ];
+  const state={
+    id:'team',title:'Routed Connectors',cwd:'fixture',phase:'working',turns:2,turnLimit:8,
+    threads,
+    members:[
+      {name:'coordinator',role:'coordinator',status:'waiting'},
+      {name:'a',status:'done'},
+      {name:'a2',status:'done'},
+      {name:'b',status:'working'},
+      {name:'c',status:'waiting',waitFor:['b']},
+      {name:'d',status:'working'},
+    ],
+    events:[
+      {seq:1,kind:'message',author:'a',targets:['a2'],text:'Intra-hex ping',time:'2026-11-22T10:00:00Z'},
+      {seq:2,kind:'message',author:'a',targets:['d'],text:'@d outer-to-outer curved msg',time:'2026-11-22T10:01:00Z'},
+    ],
+  };
+  const view=await boardView(state);
+  view.element('tab-graph').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+
+  // At head (seq 2): outer-to-outer diagonal nw -> se curves via quadraticCurveTo with arrowhead
+  const headOps=view.element('graph-canvas').canvasOps;
+  assert.ok(headOps.some(o=>o.op==='quadraticCurveTo'),'draws quadratic Bezier curve for outer-to-outer chord');
+  assert.ok(headOps.some(o=>o.op==='setLineDash'&&o.args[0]?.length>0),'draws dashed Waiting on connector at head');
+
+  // Step back to seq 1 (mid-replay): draws intra-hex self-loop (bezierCurveTo) AND mid-replay dashed Waiting on
+  view.element('first').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  const midOps=view.element('graph-canvas').canvasOps;
+  assert.ok(midOps.some(o=>o.op==='bezierCurveTo'),'draws cubic Bezier self-loop at seq 1');
+  assert.ok(midOps.some(o=>o.op==='setLineDash'&&o.args[0]?.length>0),'draws mid-replay dashed Waiting on at seq 1');
+});
+
+test('Hive bee widths fit narrow slots, hex/bee focus dims unrelated hexes, blockedReason pills render, and no 2.1.1 version',async()=>{
+  assert.doesNotMatch(read('board.js'),/'2\.1\.1'|"2\.1\.1"/,'no stale hardcoded 2.1.1 fallback version');
+
+  const threads=[
+    {id:'core',title:'Core Stream',members:['c1','c2']},
+    {id:'ui',title:'UI Stream',members:['u1']},
+  ];
+  const state={
+    id:'team',title:'Dense & Blocked',cwd:'fixture',phase:'working',turns:3,turnLimit:12,
+    threads,
+    members:[
+      {name:'coordinator',role:'coordinator',status:'waiting'},
+      {name:'c1',status:'done'},
+      {name:'c2',status:'working'},
+      {name:'u1',status:'queued',blockedReason:'shared-writer-active'},
+      {name:'o1',status:'queued',blockedReason:'concurrency-limit'},
+      {name:'o2',status:'waiting',blockedReason:'waiting-dependencies',waitFor:['u1']},
+      {name:'o3',status:'done'},
+      {name:'o4',status:'done'},
+      {name:'o5',status:'done'},
+    ],
+    events:[
+      {seq:1,kind:'message',author:'c1',targets:['u1'],text:'@u1 handoff',time:'2026-11-22T10:00:00Z'},
+    ],
+  };
+  const view=await boardView(state);
+
+  // Overview blockedReason pills
+  view.element('tab-overview').onclick();
+  const overviewPills=childrenOf(view.element('overview-members'))
+    .filter(n=>n.className?.includes('blocked-reason-pill'))
+    .map(n=>n.textContent);
+  assert.ok(overviewPills.includes('Waiting for shared writer'));
+  assert.ok(overviewPills.includes('Concurrency limit'));
+  assert.ok(overviewPills.includes('Waiting on deps'));
+
+  // Members tab blockedReason pills
+  view.element('tab-members').onclick();
+  const memberPills=childrenOf(view.element('rest-list'))
+    .filter(n=>n.className?.includes('blocked-reason-pill'))
+    .map(n=>n.textContent);
+  assert.ok(memberPills.includes('Waiting for shared writer'));
+  assert.ok(memberPills.includes('Concurrency limit'));
+  assert.ok(memberPills.includes('Waiting on deps'));
+
+  // Graph tab: narrow slotWidth (<46px) in dense Other 5-bee hex + Hive focus dimming
+  view.element('tab-graph').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  const beeNodes=view.element('graph-nodes').children;
+  const denseBee=beeNodes.find(n=>n.dataset.graphName==='o1');
+  const denseW=Number.parseFloat(denseBee.style.width);
+  assert.ok(denseW>=28&&denseW<46,'expected dense bee button width in [28, 46), got '+denseW);
+
+  // Clicking c1 bee highlights its hex ('core') + connected hex ('ui') and dims unrelated hex ('other') & bees ('o1'..'o5')
+  beeNodes.find(n=>n.dataset.graphName==='c1').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  const afterBeeClick=view.element('graph-nodes').children;
+  assert.equal(afterBeeClick.find(n=>n.dataset.graphName==='c1').dataset.dimmed,'false');
+  assert.equal(afterBeeClick.find(n=>n.dataset.graphName==='c2').dataset.dimmed,'false','same hex stays un-dimmed');
+  assert.equal(afterBeeClick.find(n=>n.dataset.graphName==='u1').dataset.dimmed,'false','connected hex stays un-dimmed');
+  assert.equal(afterBeeClick.find(n=>n.dataset.graphName==='o1').dataset.dimmed,'true','unrelated hex bee dims');
+  assert.equal(view.element('graph-hexes').children.find(n=>n.dataset.clusterId==='other').dataset.dimmed,'true');
+
+  // Clicking a hex highlights that hex + connected hexes and dims unrelated hexes/bees
+  view.element('graph-hexes').children.find(n=>n.dataset.clusterId==='other').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  const afterHexClick=view.element('graph-nodes').children;
+  assert.equal(afterHexClick.find(n=>n.dataset.graphName==='o1').dataset.dimmed,'false');
+  assert.equal(afterHexClick.find(n=>n.dataset.graphName==='u1').dataset.dimmed,'false','connected ui stays un-dimmed');
+  assert.equal(afterHexClick.find(n=>n.dataset.graphName==='c1').dataset.dimmed,'true','unrelated core bee dims');
+  assert.equal(view.element('graph-hexes').children.find(n=>n.dataset.clusterId==='core').dataset.dimmed,'true');
+
+  // Clear restores all
+  view.element('clear-node').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(view.element('graph-nodes').children.every(n=>n.dataset.dimmed==='false'));
+
+  // Non-standalone ui/initialize sends '' when version is absent
+  const elements=new Map();
+  const element=id=>(elements.has(id)?elements:elements.set(id,new ViewNode(id))).get(id);
+  element('theme').append(new ViewNode('span'));
+  const posted=[];
+  const parentWin={addEventListener(){},postMessage:(msg)=>posted.push(msg)};
+  const childWin={addEventListener(){}};
+  const iframeScreen={
+    window:childWin,parent:parentWin,location:{pathname:'/board/team',origin:'http://127.0.0.1:17943'},
+    document:{getElementById:element,documentElement:new ViewNode('html'),body:{append(){}},addEventListener(){},
+      createElement:tag=>new ViewNode(tag),createTextNode:text=>({textContent:text})},
+    Option:class{constructor(text,value){Object.assign(this,{text,value});}},
+    HiveBee:{sprite:()=>new ViewNode('svg')},
+    ResizeObserver:class{observe(){}},
+    URL,URLSearchParams,Intl,AbortController,clearTimeout,setTimeout,clearInterval,setInterval:()=>1,
+    matchMedia:()=>({matches:false,addEventListener(){}}),
+    requestAnimationFrame:cb=>{queueMicrotask(cb);return 1;},
+    addEventListener(){},
+  };
+  runInNewContext(read('hive-graph.js')+'\n'+read('board.js'),iframeScreen);
+  const initMsg=posted.find(m=>m.method==='ui/initialize');
+  assert.ok(initMsg);
+  assert.equal(initMsg.params.appInfo.version,'');
 });
