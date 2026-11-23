@@ -5,9 +5,9 @@
 
   <p>
     <a href="https://github.com/snowmiku601-cpu/hive-swarm/actions/workflows/ci.yml"><img src="https://github.com/snowmiku601-cpu/hive-swarm/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
-    <a href="https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.1.2"><img src="https://img.shields.io/badge/release-v2.1.2-f6bc55?style=flat-square" alt="GitHub Release v2.1.2" /></a>
-    <a href="https://www.npmjs.com/package/hive-swarm"><img src="https://img.shields.io/badge/npm-hive--swarm%402.1.2-f6bc55?style=flat-square" alt="npm hive-swarm 2.1.2" /></a>
-    <a href="https://www.npmjs.com/package/dsh-hive-swarm"><img src="https://img.shields.io/badge/DSH%20(next)-dsh--hive--swarm%402.1.2-9a7138?style=flat-square" alt="npm dsh-hive-swarm 2.1.2 next" /></a>
+    <a href="https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.2.0"><img src="https://img.shields.io/badge/release-v2.2.0-f6bc55?style=flat-square" alt="GitHub Release v2.2.0" /></a>
+    <a href="https://www.npmjs.com/package/hive-swarm"><img src="https://img.shields.io/badge/npm-hive--swarm%402.2.0-f6bc55?style=flat-square" alt="npm hive-swarm 2.2.0" /></a>
+    <a href="https://www.npmjs.com/package/dsh-hive-swarm"><img src="https://img.shields.io/badge/DSH%20(next)-dsh--hive--swarm%402.2.0-9a7138?style=flat-square" alt="npm dsh-hive-swarm 2.2.0 next" /></a>
     <img src="https://img.shields.io/badge/runtime-Node.js%2022.19%20%7C%2024.2%2B-75baef?style=flat-square" alt="Node.js 22.19 or 24.2 and newer" />
     <img src="https://img.shields.io/badge/core_runtime_dependencies-0-55cbb2?style=flat-square" alt="Zero core runtime dependencies" />
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-b3ce64?style=flat-square" alt="MIT license" /></a>
@@ -30,8 +30,8 @@ Hive Swarm is a lightweight **multi-agent coordination engine and UI** for AI co
 
 The coordination core (`engine.mjs`, `core.mjs`, `run-store.mjs`) is harness-agnostic:
 
-- **Codex Desktop & Codex CLI (`hive-swarm@2.1.2`, npm `latest`)** — full MCP server, attached child threads on Codex `0.171+` (`fork: "coordinator"`, graceful `0.169.1` fallback), native-compact Turn 2+ wake prompts, non-waking `wake: false` posts, owner `cancel_turn`, strict model locks, Antigravity-style inline MCP App, and standalone four-tab board UI with `Hive`/`Mentions` Graph, pure-JS GIF export, and passive npm update alerts.
-- **DeepSeek Harness Desktop `0.2.2-rc.5` (`dsh-hive-swarm@2.1.2`, npm `next`, experimental)** — hidden native DSH subagent workers (zero sidebar clutter), native-compact Turn 2+ wake prompts, structured error formatting, non-waking `wake: false` posts, `cancel_turn` controls, permission-scoped tools, bee-marked **Swarm** Start card, right-dock tab, and full React dashboard matching Antigravity Overview, Board, clickable Members & Dual-Mode Graph with built-in version & update alerts.
+- **Codex Desktop & Codex CLI (`hive-swarm@2.2.0`, npm `latest`)** — full MCP server, attached child threads on Codex `0.171+` (`fork: "coordinator"`, graceful `0.169.1` fallback), `AbortSignal -> turn/interrupt` cancellation, `parallelWriters` + `worktreeMode: "local"`, `read_board({seqs})` / `retire_member({dropDependency})`, Specialized Honeycomb Graph (Ring-2 threads/channels, routed chords, self-loops, focus dimming, `blockedReason` pills, GIF replay), and standalone four-tab board UI.
+- **DeepSeek Harness Desktop `0.2.2-rc.5` (`dsh-hive-swarm@2.2.0`, npm `next`, experimental)** — hidden native DSH subagent workers (zero sidebar clutter), parent `danger-full-access` inheritance on Windows, 900s `wait_for_board` with compact timeouts & `inputRequired` wakes, clean `RunStore.abandon()` cancellation settlement, Turn-1 subagent/fork hardening, bee-marked **Swarm** Start card, right-dock tab, and full React dashboard with Specialized Honeycomb Cells.
 
 The core runtime uses **Node.js ESM**, built-in `node:sqlite`, and **zero third-party runtime dependencies**. Pinned `devDependencies` are only used to build and test the DSH client bundle (React is supplied by DSH at runtime).
 
@@ -41,8 +41,8 @@ Requires **Node.js `^22.19.0 || >=24.2.0`** and either **Codex Desktop / Codex C
 
 | Host | Published package | Status | Worker & UI model |
 | --- | --- | --- | --- |
-| **Codex Desktop / CLI** | `hive-swarm@2.1.2` (`latest`) | Production adapter; attached threads on `0.171+` & qualified on `0.169.1` | Attached/per-member Codex threads, native-compact wakeups, `wake: false` / `cancel_turn`, inline MCP App & standalone 4-tab dashboard |
-| **DeepSeek Harness `0.2.2-rc.5`** | `dsh-hive-swarm@2.1.2` (`next`) | Experimental; native subagent swarms & fail-closed tool sandboxing | Hidden native DSH subagents, native-compact wakeups, `wake: false` / `cancel_turn`, Start card, right tab & Antigravity React dashboard |
+| **Codex Desktop / CLI** | `hive-swarm@2.2.0` (`latest`) | Production adapter; attached threads on `0.171+` & qualified on `0.169.1` | Attached/per-member Codex threads, `parallelWriters`, `worktreeMode: 'local'`, `turn/interrupt`, Specialized Honeycomb UI & MCP App |
+| **DeepSeek Harness `0.2.2-rc.5`** | `dsh-hive-swarm@2.2.0` (`next`) | Experimental; native subagent swarms & fail-closed tool sandboxing | Hidden native DSH subagents, parent `danger-full-access` inheritance, 900s `wait_for_board`, `RunStore.abandon()`, Start card & Specialized Honeycomb React UI |
 
 ### 1. Codex Desktop / CLI (via npm — recommended)
 
@@ -78,7 +78,7 @@ After installing or updating, open a **new Codex Desktop chat** so the fresh MCP
 DSH manages plugins through its own profile manager. Close DSH Desktop, then run:
 
 ```sh
-dsh plugin --profile desktop add dsh-hive-swarm@2.1.2
+dsh plugin --profile desktop add dsh-hive-swarm@2.2.0
 ```
 
 - `npx hive-swarm@latest install --host dsh` prints this command and never edits a DSH profile directly.
@@ -119,16 +119,16 @@ Pass `--test` to run the test suite first (`./install.sh --test`).
 
 ## See it in action
 
-See what is running, which outcome threads are blocked or done, and where each result came from. The captures below use representative local demo data exported as 2× Retina PNGs and an interactive walkthrough. Click **Light PNG / Dark PNG** for full-resolution captures, or watch the **HD MP4 demo video** on [GitHub Releases (`v2.1.2`)](https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.1.2).
+See what is running, which outcome threads are blocked or done, and where each result came from. The captures below use representative local demo data exported as 2× Retina PNGs and an interactive walkthrough. Click **Light PNG / Dark PNG** for full-resolution captures, or watch the **HD MP4 demo video** on [GitHub Releases (`v2.2.0`)](https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.2.0).
 
 <p align="center">
-  <a href="https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.1.2">
+  <a href="https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.2.0">
     <img src="./assets/hive-swarm-demo.gif" alt="Hive Swarm interactive walkthrough — Overview accordion, Screenshots lightbox, Board, Members, Journal, Hive Honeycomb, Mentions capsule ring, and Export GIF" width="100%" />
   </a>
 </p>
 
 <p align="center">
-  <sub>Animated walkthrough (Overview → Screenshots lightbox → Board → Members → Journal → Hive Honeycomb → Mentions ring → Export GIF) · <a href="https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.1.2">Download 1280×800 H.264 MP4 on GitHub Releases</a></sub>
+  <sub>Animated walkthrough (Overview → Screenshots lightbox → Board → Members → Journal → Hive Honeycomb → Mentions ring → Export GIF) · <a href="https://github.com/snowmiku601-cpu/hive-swarm/releases/tag/v2.2.0">Download 1280×800 H.264 MP4 on GitHub Releases</a></sub>
 </p>
 
 ### Inside the dashboard (Light & Dark)
@@ -249,7 +249,7 @@ The test suite uses mocked runners and makes **no paid API calls**. Opening view
 - **Windows sandbox process errors:** the installer and runtime strip inherited MSIX/session markers and set `features.prefer_mxc=false` on Windows so workers can run shell commands cleanly.
 - **Vitest `spawn EPERM` in Windows worker sandboxes:** pass `--configLoader native --pool threads` to avoid child-process pool restrictions.
 - **Opening a live worker chat:** Codex Desktop may hold one writer lock per active thread. Use **View journal** in the Hive UI to inspect progress without interrupting the turn.
-- **Windows DSH plugin CLI & newly published releases:** If `dsh` is not on your Windows `PATH`, invoke `<DSH_INSTALL>\resources\runtime\cli\bin\dsh.cmd` directly (e.g. `& 'D:\DSH\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add dsh-hive-swarm@2.1.2`). When upgrading within 24 hours of a new npm publish, DSH's `pnpm` supply-chain policy requires listing `dsh-hive-swarm@2.1.2` and `hive-swarm@2.1.2` under `minimumReleaseAgeExclude` in `<DSH_HOME>\profiles\desktop\pnpm-workspace.yaml`.
+- **Windows DSH plugin CLI & newly published releases:** If `dsh` is not on your Windows `PATH`, invoke `<DSH_INSTALL>\resources\runtime\cli\bin\dsh.cmd` directly (e.g. `& 'D:\DSH\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add dsh-hive-swarm@2.2.0`). When upgrading within 24 hours of a new npm publish, DSH's `pnpm` supply-chain policy requires listing `dsh-hive-swarm@2.2.0` and `hive-swarm@2.2.0` under `minimumReleaseAgeExclude` in `<DSH_HOME>\profiles\desktop\pnpm-workspace.yaml`.
 - **State locations & ports:**
   - **Codex:** SQLite WAL under `%LOCALAPPDATA%\CodexTeamBoard` (Windows) or `~/CodexTeamBoard` (macOS/Linux); override with `HIVE_SWARM_DATA` / `TEAM_BOARD_DATA`. Default loopback port: `17943` (`HIVE_SWARM_PORT` / `TEAM_BOARD_PORT`).
   - **DSH:** isolated under `<profileContext.dir>/.hive-swarm`.

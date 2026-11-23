@@ -409,13 +409,18 @@ test('2.1.2 host registers owner-only hive_swarm_cancel_turn and nullable wake:f
   assert.equal(afterSilent.events.at(-1).silent,true);
   assert.equal(afterSilent.members[0].inboxCount,undefined);
 
-  // Explicit cancel_turn aborts native worker, clears recoveryRequired & optional queued inbox
+  // Explicit cancel_turn aborts native worker, clears recoveryRequired & optional queued inbox, and settles runs.sqlite
+  for(let i=0;i<200&&!f.host.store.findSession('worker-session');i++)await delay(5);
+  assert.equal(f.host.store.findSession('worker-session')?.settled,false);
   await f.tools.get('hive_swarm_post_message').tool.execute({teamId:created.id,text:'@builder Stale queued',channel:null,wake:null},exec);
   const cancelled=await cancelEntry.tool.execute({teamId:created.id,member:'builder',clearInbox:true},exec);
   assert.equal(f.calls.includes('cancel'),true);
   assert.equal(cancelled.members[0].status,'failed');
   assert.equal(cancelled.members[0].recoveryRequired,false);
   assert.equal(cancelled.members[0].inboxCount,undefined);
+  assert.deepEqual(f.host.store.listPending(),[]);
+  assert.equal(f.host.store.findSession('worker-session')?.settled,true);
+  assert.equal(f.host.store.findSession('worker-session')?.status,'cancelled');
 });
 
 test('2.2.0 wait_for_board passes maxWaitTimeoutSec:900 and exposes 2.2.0 schemas with strict-mode normalization',async t=>{
@@ -588,4 +593,48 @@ test('2.2.0 Turn-1 subagent sees worker tools synchronously inside subagent/star
   releaseIdle();
   for(let i=0;i<200&&host.application.board.get(team.id).members[0].status==='working';i++)await delay(5);
   assert.equal(host.application.board.get(team.id).members[0].status,'done');
+});
+
+test('2.2.0 real host+core+RunStore integration settles runs on resolve_recovery(dismiss) and allows wait_for_board timeoutSec > 55',async t=>{
+  const f=await fixture(t);
+  let failWait=true,sessionSeq=0;
+  f.native.create=async()=>'worker-session-'+(++sessionSeq);
+  f.native.wait=async(id,signal)=>{
+    if(failWait)throw Error('synthetic host disconnect');
+    return new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));
+  };
+  const exec={signal:new AbortController().signal,agent:{id:'parent',current:true,session:{header:{cwd:f.root}}}};
+  const created=await f.tools.get('hive_swarm_start_team').tool.execute(args(f.root),exec);
+  for(let i=0;i<200;i++){
+    const m=f.host.application.board.get(created.id).members[0];
+    if(m.recoveryRequired&&m.status==='failed')break;
+    await delay(5);
+  }
+  assert.equal(f.host.application.board.get(created.id).members[0].recoveryRequired,true);
+  assert.equal(f.host.store.listPending().length,1);
+
+  const dismissed=await f.tools.get('hive_swarm_resolve_recovery').tool.execute({teamId:created.id,member:'builder',action:'dismiss'},exec);
+  assert.equal(dismissed.members[0].recoveryRequired,false);
+  assert.deepEqual(f.host.store.listPending(),[]);
+  const latestRun=f.host.store.findSession('worker-session-1');
+  assert.equal(latestRun?.settled,true);
+  assert.equal(latestRun?.status,'cancelled');
+
+  // Real host.mjs + core.mjs accepts wait_for_board timeoutSec > 55 (up to 900) on deepseek-harness
+  failWait=false;
+  const activeTeam=await f.tools.get('hive_swarm_start_team').tool.execute({
+    cwd:f.root,task:'Long wait integration',model:'p/m',effort:'max',
+    members:[{name:'watcher',brief:'Stay working while wait_for_board listens'}],
+  },exec);
+  const hist=await f.tools.get('hive_swarm_board_history').tool.execute({teamId:activeTeam.id,after:null,limit:1,channel:null},exec);
+  const waitPromise=f.tools.get('hive_swarm_wait_for_board').tool.execute({
+    teamId:activeTeam.id,since:hist.head,timeoutSec:900,channel:null,mentionsOnly:null,
+  },exec);
+  await delay(10);
+  await f.tools.get('hive_swarm_post_message').tool.execute({
+    teamId:activeTeam.id,text:'@coordinator Long-wait wakeup',channel:null,wake:false,
+  },exec);
+  const waited=await waitPromise;
+  assert.equal(waited.wokeBy,'post');
+  assert.ok(waited.posts.some(p=>p.text==='@coordinator Long-wait wakeup'));
 });
