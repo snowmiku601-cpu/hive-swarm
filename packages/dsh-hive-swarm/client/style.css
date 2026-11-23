@@ -11,8 +11,9 @@
   --hive-good-fill: light-dark(#4d9938, #5ec26a);
   --hive-working: light-dark(#2268b8, #63a4ff);
   --hive-wait: light-dark(#345299, #9fb5f0);
-  --hive-amber: light-dark(#b07014, #e8ad44);
-  --hive-pulse: light-dark(#7c5ce6, #a78bfa);
+  --hive-amber: light-dark(#d18d22, #e8ad44);
+  --hive-needs: light-dark(#cf483f, #ef766e);
+  --hive-pulse: light-dark(#8250df, #c297ff);
   --hive-danger: var(--dsw-alias-state-error-primary);
   --hive-gold-soft: color-mix(in oklab, var(--hive-gold) 13%, transparent);
   --hive-good-soft: color-mix(in oklab, var(--hive-good-fill) 13%, transparent);
@@ -533,6 +534,12 @@ details[open] > summary .dsh-hive-chevron { rotate: 180deg; }
   font-size: .78em; color: var(--hive-muted);
 }
 .dsh-hive-chip[data-tone="wait"] { color: var(--hive-wait); border-color: color-mix(in oklab, var(--hive-wait) 36%, var(--hive-border)); }
+.dsh-hive-chip[data-tone="blocked"] {
+  flex: none; white-space: nowrap; color: var(--hive-amber);
+  border-color: color-mix(in oklab, var(--hive-amber) 42%, var(--hive-border));
+  background: var(--hive-amber-soft);
+}
+.dsh-hive-inline-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 2px; }
 .dsh-hive-row-menu { position: relative; flex: none; }
 .dsh-hive .dsh-hive-row-menu-btn {
   min-height: 24px; min-width: 24px; padding: 0 5px; border: 0; background: transparent;
@@ -712,31 +719,35 @@ details[open] > summary .dsh-hive-chevron { rotate: 180deg; }
 .dsh-hive-graph > svg { display: block; position: absolute; inset: 0; pointer-events: none; }
 
 /* Hive Mode Honeycomb Hexes & Bee Slots */
+.dsh-hive-hex-cell { pointer-events: all; cursor: pointer; transition: opacity 150ms ease; }
+.dsh-hive-hex-cell[data-dimmed="true"] { opacity: .34; }
 .dsh-hive-hex-poly {
   fill: color-mix(in oklab, var(--hive-layer) 75%, var(--hive-surface));
-  stroke: var(--hive-border); stroke-width: 2.2; stroke-linejoin: round;
+  stroke: var(--hive-border); stroke-width: 2; stroke-linejoin: round;
 }
+.dsh-hive-hex-cell[data-focused="true"] .dsh-hive-hex-poly { stroke-width: 2.8; }
 .dsh-hive-hex-cell[data-tone="done"] .dsh-hive-hex-poly {
-  fill: color-mix(in oklab, var(--hive-good-fill) 7%, var(--hive-surface));
+  fill: light-dark(#edf7ed, #18281c);
   stroke: var(--hive-good-fill);
 }
 .dsh-hive-hex-cell[data-tone="working"] .dsh-hive-hex-poly {
-  fill: color-mix(in oklab, var(--hive-working) 7%, var(--hive-surface));
+  fill: light-dark(#edf4fc, #172336);
   stroke: var(--hive-working);
 }
 .dsh-hive-hex-cell[data-tone="waiting"] .dsh-hive-hex-poly {
-  fill: color-mix(in oklab, var(--hive-wait) 7%, var(--hive-surface));
-  stroke: var(--hive-wait);
-}
-.dsh-hive-hex-cell[data-tone="needs"] .dsh-hive-hex-poly {
-  fill: color-mix(in oklab, var(--hive-amber) 9%, var(--hive-surface));
+  fill: light-dark(#fdf6e7, #292113);
   stroke: var(--hive-amber);
 }
-.dsh-hive-hex-title { fill: var(--hive-ink); font-size: 11.5px; font-weight: 660; }
+.dsh-hive-hex-cell[data-tone="needs"] .dsh-hive-hex-poly {
+  fill: light-dark(#fdf0ef, #2d1919);
+  stroke: var(--hive-needs);
+}
+.dsh-hive-hex-title { fill: var(--hive-ink); font-size: 11.5px; font-weight: 640; }
 .dsh-hive-hex-count { fill: var(--hive-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-.dsh-hive-hex-connector { stroke: var(--hive-good-fill); stroke-width: 1.8; stroke-linecap: round; }
+.dsh-hive-hex-connector { fill: none; stroke: var(--hive-good-fill); stroke-width: 1.8; stroke-linecap: round; transition: opacity 150ms ease; }
 .dsh-hive-hex-connector[data-kind="message"] { stroke: var(--hive-pulse); stroke-width: 2.2; }
 .dsh-hive-hex-connector[data-kind="waiting"] { stroke: var(--hive-amber); stroke-width: 1.8; color: var(--hive-amber); }
+.dsh-hive-hex-connector[data-dimmed="true"] { opacity: .18; }
 
 .dsh-hive .dsh-hive-hex-bee-btn,
 .dsh-hive .dsh-hive-hex-coord-btn {
@@ -744,7 +755,10 @@ details[open] > summary .dsh-hive-chevron { rotate: 180deg; }
   display: grid; justify-items: center; gap: 2px;
   min-height: 24px; padding: 3px 1px; border-radius: 8px;
   border: 1px solid transparent; background: transparent;
+  transition: opacity 150ms ease, border-color 150ms ease, background-color 150ms ease;
 }
+.dsh-hive .dsh-hive-hex-bee-btn[data-dimmed="true"],
+.dsh-hive .dsh-hive-hex-coord-btn[data-dimmed="true"] { opacity: .34; }
 .dsh-hive .dsh-hive-hex-bee-btn:hover:not(:disabled),
 .dsh-hive .dsh-hive-hex-coord-btn:hover:not(:disabled) {
   background: color-mix(in oklab, var(--hive-surface) 72%, transparent);
@@ -755,7 +769,7 @@ details[open] > summary .dsh-hive-chevron { rotate: 180deg; }
   background: var(--hive-surface); border-color: var(--hive-gold);
 }
 .dsh-hive-hex-bee-name {
-  display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: block; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 9.5px; line-height: 1.35; color: var(--hive-muted);
 }
 
@@ -843,7 +857,7 @@ details[open] > summary .dsh-hive-chevron { rotate: 180deg; }
   .dsh-hive .dsh-hive-graph-pill[aria-pressed="true"],
   .dsh-hive .dsh-hive-hex-bee-btn[aria-pressed="true"],
   .dsh-hive-switch-track { border: 1px solid ButtonText; forced-color-adjust: auto; }
-  .dsh-hive-hex-poly { stroke: ButtonText; fill: Canvas; }
+  .dsh-hive-hex-cell[data-tone] .dsh-hive-hex-poly,.dsh-hive-hex-poly { stroke: ButtonText; fill: Canvas; }
   .dsh-hive-hex-connector, .dsh-hive-edge, .dsh-hive-edge[data-active="true"] { stroke: CanvasText; }
   .dsh-hive-edge-tip { fill: Highlight; }
 }

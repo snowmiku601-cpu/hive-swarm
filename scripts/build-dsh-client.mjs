@@ -57,7 +57,7 @@ export async function buildClient({write=true,toolingDirectory}={}) {
     external:['react','react/*','@deepseek-ai/*'],loader:{'.css':'text'},legalComments:'none',metafile:true,
     plugins:[{name:'hive-canonical-assets',setup(build){
       build.onResolve({filter:/^hive:(graph|bees|gif|icon)$/},args=>({path:args.path.slice(5),namespace:'hive'}));
-      build.onLoad({filter:/\.css$/},async args=>({contents:(await readFile(args.path,'utf8')).replaceAll('\r\n','\n'),loader:'text'}));
+      build.onLoad({filter:/\.css$/},async args=>({contents:esbuild.transformSync((await readFile(args.path,'utf8')).replaceAll('\r\n','\n'),{loader:'css',minify:true}).code,loader:'text'}));
       build.onLoad({filter:/.*/,namespace:'hive'},async args=>{
         if(args.path==='icon')return {contents:(await readFile(new URL('assets/hive-swarm-icon.svg',root),'utf8')).replaceAll('\r\n','\n'),loader:'text'};
         const source=await readFile(new URL('hive-'+args.path+'.js',root),'utf8');
