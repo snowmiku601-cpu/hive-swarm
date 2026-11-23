@@ -430,3 +430,45 @@ test('software canvas honors ctx.textAlign center/left/right and save/restore fo
   assert.ok(minX < 40 && maxX > 80 && maxX < 100,
     `centered text must span symmetrically around x=60 (got ${minX}..${maxX})`);
 });
+
+test('buildReplayFrames renders progressive Antigravity green ring sweep from 0/2 -> 1/2 -> 2/2 across GIF frames', () => {
+  const { buildReplayFrames } = globalThis.HiveGif;
+  const threads = [
+    { id: 'core', title: 'Core', members: ['a', 'b'] },
+  ];
+  const members = [
+    { name: 'coordinator', role: 'coordinator', status: 'waiting' },
+    { name: 'a', status: 'done' },
+    { name: 'b', status: 'done' },
+  ];
+  const posts = [
+    { seq: 1, kind: 'message', author: 'a', targets: ['coordinator'], text: '[done] A ready', time: '2026-11-22T00:00:00Z' },
+    { seq: 2, kind: 'message', author: 'b', targets: ['coordinator'], text: '[done] B ready', time: '2026-11-22T00:01:00Z' },
+  ];
+  const { frames } = buildReplayFrames({
+    mode: 'hive',
+    theme: 'light',
+    width: 360,
+    height: 360,
+    threads,
+    posts,
+    members,
+    graph: globalThis.HiveGraph,
+    bees: globalThis.HiveBee,
+  });
+  assert.equal(frames.length, 3); // cursor 0 (0/2), seq 1 (1/2), seq 2 (2/2)
+
+  // Count #4d9938 green stroke pixels (R=77, G=153, B=56) in each frame: 0/2 < 1/2 < 2/2
+  const countGreenRingPixels = rgba => {
+    let n = 0;
+    for (let i = 0; i < rgba.length; i += 4) {
+      if (Math.abs(rgba[i] - 77) <= 8 && Math.abs(rgba[i + 1] - 153) <= 8 && Math.abs(rgba[i + 2] - 56) <= 8) n++;
+    }
+    return n;
+  };
+  const g0 = countGreenRingPixels(frames[0].rgba);
+  const g1 = countGreenRingPixels(frames[1].rgba);
+  const g2 = countGreenRingPixels(frames[2].rgba);
+  assert.ok(g1 > g0, `1/2 frame draws green progress ring (${g1} > ${g0})`);
+  assert.ok(g2 > g1, `2/2 frame draws full green ring + connector (${g2} > ${g1})`);
+});

@@ -1206,7 +1206,10 @@ test('DSH Hive graph renders specialized work-group hexes, unified geometry, arr
     assert.ok(textOf(coreCell.findByType('title')).includes('Fix parallel writers'));
     assert.equal(coreCell.props['data-tone'],'done');
     assert.equal(coreCell.findByProps({className:'dsh-hive-hex-poly'}).props.fill,palette.doneFill);
-    assert.equal(coreCell.findByProps({className:'dsh-hive-hex-poly'}).props.stroke,palette.doneStroke);
+    assert.equal(coreCell.findByProps({className:'dsh-hive-hex-poly'}).props.stroke,palette.border);
+    const coreRing=coreCell.findByProps({className:'hive-hex-progress'});
+    assert.equal(coreRing.props.stroke,palette.doneStroke);
+    assert.equal(coreRing.props.strokeDasharray,undefined);
     assert.ok(coreCell.findAllByProps({className:'dsh-hive-hex-title'}).length>=2,'Long cluster title wraps into multiple lines');
     assert.equal(textOf(coreCell.findByProps({className:'dsh-hive-hex-count'})),'2/2');
 
@@ -1214,13 +1217,19 @@ test('DSH Hive graph renders specialized work-group hexes, unified geometry, arr
     const qaCell=cells.find(c=>c.props['data-tone']==='needs');
     const otherCell=cells.find(c=>!c.props['data-role']&&c.props['data-tone']==='waiting');
     assert.ok(uiCell&&qaCell&&otherCell);
-    assert.equal(uiCell.findByProps({className:'dsh-hive-hex-poly'}).props.fill,palette.workingFill);
+    assert.equal(uiCell.findByProps({className:'dsh-hive-hex-poly'}).props.fill,palette.surface);
+    assert.equal(uiCell.findByProps({className:'dsh-hive-hex-poly'}).props.stroke,palette.border);
+    assert.equal(uiCell.findAllByProps({className:'hive-hex-progress'}).length,0);
     assert.equal(qaCell.findByProps({className:'dsh-hive-hex-poly'}).props.fill,palette.needsFill);
-    assert.equal(otherCell.findByProps({className:'dsh-hive-hex-poly'}).props.fill,palette.waitingFill);
+    assert.equal(qaCell.findByProps({className:'dsh-hive-hex-poly'}).props.stroke,palette.needsStroke);
+    assert.equal(otherCell.findByProps({className:'dsh-hive-hex-poly'}).props.fill,palette.surface);
     assert.equal(textOf(otherCell.findByProps({className:'dsh-hive-hex-count'})),'0/1');
 
     const coordCell=cells.find(c=>c.props['data-role']==='coordinator');
     assert.equal(coordCell.props['data-tone'],'needs');
+    assert.equal(coordCell.findByProps({className:'dsh-hive-hex-poly'}).props.fill,palette.needsFill);
+    assert.equal(coordCell.findByProps({className:'dsh-hive-hex-poly'}).props.stroke,palette.needsStroke);
+    assert.ok(coordCell.findByProps({className:'hive-hex-progress'}).props.strokeDasharray,'Coordinator 2/5 renders partial progress ring');
     assert.equal(textOf(coordCell.findByProps({className:'dsh-hive-hex-count'})),'2 of 5 done');
     const coordBtn=view.root.findByProps({className:'dsh-hive-hex-coord-btn'});
     const coordBee=coordBtn.findByProps({className:'dsh-hive-bee'});
@@ -1299,7 +1308,7 @@ test('DSH Hive graph scales Ring-2 height dynamically, routes curved outer-to-ou
     assert.equal(beeBtn('w4').props['data-dimmed'],undefined,'Connected hex bee w4 stays bright');
     assert.equal(beeBtn('w2').props['data-dimmed'],'true','Unfocused hex bee w2 must dim');
     const cells=()=>view.root.findAllByProps({className:'dsh-hive-hex-cell'});
-    const cellByTitle=title=>cells().find(c=>c.findAllByType('title').some(t=>textOf(t)===title));
+    const cellByTitle=title=>cells().find(c=>c.findAllByType('title').some(t=>textOf(t)===title||textOf(t).startsWith(title+' · ')));
     assert.equal(cellByTitle('Group 1').props['data-focused'],'true');
     assert.equal(cellByTitle('Group 4').props['data-dimmed'],undefined);
     assert.equal(cellByTitle('Group 2').props['data-dimmed'],'true');
@@ -1318,7 +1327,7 @@ test('DSH Hive graph scales Ring-2 height dynamically, routes curved outer-to-ou
 test('DSH Overview and Members render blockedReason badges and client bundle stays under 250KB with minified CSS',async()=>{
   const {buildClient}=await import('../../scripts/build-dsh-client.mjs');
   const buildResult=await buildClient({write:false});
-  assert.ok(buildResult.bytes<205000,'Expected minified DSH client/dist.js < 205,000 B, got '+buildResult.bytes);
+  assert.ok(buildResult.bytes<215000,'Expected minified DSH client/dist.js < 215,000 B (< 250KB cap), got '+buildResult.bytes);
   assert.ok(!buildResult.code.includes('/* Underlined Tabs'), 'Expected CSS comments stripped by CSS minification');
 
   const {client,React,renderer}=await loadClient();
@@ -1346,4 +1355,97 @@ test('DSH Overview and Members render blockedReason badges and client bundle sta
     const memberBadges=view.root.findAllByProps({className:'dsh-hive-chip dsh-hive-blocked-badge'}).map(b=>textOf(b));
     assert.deepEqual(memberBadges.sort(),['Concurrency limit','Waiting for shared writer','Waiting on deps']);
   }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
+});
+
+test('DSH Hive graph renders SVG hive-hex-progress path with strokeDasharray, tooltips, and leaves status mode untouched',async()=>{
+  await import('../../hive-graph.js');
+  const Graph=globalThis.HiveGraph;
+  const palette=Graph.themePalette('light');
+  const {client,React,renderer}=await loadClient();
+  const threads=[
+    {id:'zero',title:'Zero Group',members:['z1','z2']},
+    {id:'partial',title:'Partial Group',goal:'Halfway',members:['p1','p2']},
+    {id:'full',title:'Full Group',members:['d1','d2']},
+    {id:'needs',title:'Needs Group',members:['n1','n2']},
+  ];
+  const ringTeam={
+    ...team('one',1),
+    threads,
+    members:[
+      {name:'coordinator',role:'coordinator',status:'waiting',brief:'Lead',model:'sol',writable:false},
+      {name:'z1',status:'working',brief:'Z1',model:'sol',writable:false},
+      {name:'z2',status:'waiting',brief:'Z2',model:'sol',writable:false},
+      {name:'p1',status:'done',brief:'P1',model:'sol',writable:false},
+      {name:'p2',status:'working',brief:'P2',model:'sol',writable:false},
+      {name:'d1',status:'done',brief:'D1',model:'sol',writable:false},
+      {name:'d2',status:'done',brief:'D2',model:'sol',writable:false},
+      {name:'n1',status:'done',brief:'N1',model:'sol',writable:false},
+      {name:'n2',status:'failed',brief:'N2',model:'sol',writable:false},
+    ],
+  };
+  const f=fakeContext({snapshot:({teamId})=>({teams:[ringTeam],team:teamId?ringTeam:null})});
+  client.apply(f.ctx);
+  const entry=f.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let view;
+  try{
+    await renderer.act(async()=>{view=renderer.create(React.createElement(entry.component,entry.options.inject('p-ring')));await tick();});
+    await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
+    await renderer.act(async()=>{view.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Graph')).props.onClick();await tick();});
+
+    const cells=view.root.findAllByProps({className:'dsh-hive-hex-cell'});
+    const byTitle=prefix=>cells.find(c=>c.findAllByType('title').some(t=>textOf(t).startsWith(prefix)));
+
+    const zeroCell=byTitle('Zero Group');
+    assert.equal(zeroCell.findByProps({className:'dsh-hive-hex-poly'}).props.fill,palette.surface);
+    assert.equal(zeroCell.findByProps({className:'dsh-hive-hex-poly'}).props.stroke,palette.border);
+    assert.equal(zeroCell.findByProps({className:'dsh-hive-hex-poly'}).props.strokeWidth,1.5);
+    assert.equal(zeroCell.findAllByProps({className:'hive-hex-progress'}).length,0);
+    assert.equal(textOf(zeroCell.findByType('title')),'Zero Group · 0/2 done · z1, z2');
+
+    const partialCell=byTitle('Partial Group');
+    assert.equal(partialCell.findByProps({className:'dsh-hive-hex-poly'}).props.fill,palette.surface);
+    assert.equal(partialCell.findByProps({className:'dsh-hive-hex-poly'}).props.stroke,palette.border);
+    assert.equal(textOf(partialCell.findByType('title')),'Partial Group · 1/2 done · p1, p2 — Halfway');
+    const partialRing=partialCell.findByProps({className:'hive-hex-progress'});
+    assert.equal(partialRing.type,'path');
+    assert.equal(partialRing.props.fill,'none');
+    assert.equal(partialRing.props.stroke,palette.doneStroke);
+    assert.equal(partialRing.props.strokeWidth,2.2);
+    assert.equal(partialRing.props.strokeLinecap,'round');
+    assert.equal(partialRing.props.strokeLinejoin,'round');
+    assert.ok(partialRing.props.strokeDasharray,'Partial 1/2 hex has strokeDasharray');
+    const [dashLen,gapLen]=partialRing.props.strokeDasharray.split(' ').map(Number);
+    assert.ok(dashLen>0&&gapLen>dashLen*2,'1/2 dash length is half of perimeter');
+
+    const fullCell=byTitle('Full Group');
+    assert.equal(fullCell.findByProps({className:'dsh-hive-hex-poly'}).props.fill,palette.doneFill);
+    const fullRing=fullCell.findByProps({className:'hive-hex-progress'});
+    assert.equal(fullRing.props.stroke,palette.doneStroke);
+    assert.equal(fullRing.props.strokeDasharray,undefined);
+
+    const needsCell=byTitle('Needs Group');
+    assert.equal(needsCell.findByProps({className:'dsh-hive-hex-poly'}).props.fill,palette.needsFill);
+    assert.equal(needsCell.findByProps({className:'dsh-hive-hex-poly'}).props.stroke,palette.needsStroke);
+    assert.equal(needsCell.findByProps({className:'dsh-hive-hex-poly'}).props.strokeWidth,1.6);
+    assert.ok(needsCell.findByProps({className:'hive-hex-progress'}).props.strokeDasharray,'Partial needs hex still draws green progress ring');
+  }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
+
+  // Status fallback mode (no threads/group/channels) leaves status cluster fills untouched
+  const statusTeam={
+    ...team('one',1),
+    members:[
+      {name:'coordinator',role:'coordinator',status:'waiting',brief:'Lead',model:'sol',writable:false},
+      {name:'w1',status:'working',brief:'Work',model:'sol',writable:false},
+    ],
+  };
+  const fs=fakeContext({snapshot:({teamId})=>({teams:[statusTeam],team:teamId?statusTeam:null})});
+  client.apply(fs.ctx);
+  const es=fs.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let vs;
+  try{
+    await renderer.act(async()=>{vs=renderer.create(React.createElement(es.component,es.options.inject('p-status')));await tick();});
+    await renderer.act(async()=>{await vs.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
+    await renderer.act(async()=>{vs.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Graph')).props.onClick();await tick();});
+    const workingStatusCell=vs.root.findAllByProps({className:'dsh-hive-hex-cell'}).find(c=>!c.props['data-role']&&c.props['data-tone']==='working');
+    assert.equal(workingStatusCell.findByProps({className:'dsh-hive-hex-poly'}).props.fill,palette.workingFill);
+    assert.equal(workingStatusCell.findAllByProps({className:'hive-hex-progress'}).length,0);
+  }finally{await renderer.act(async()=>vs?.unmount());fs.dispose();}
 });

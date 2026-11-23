@@ -1442,15 +1442,42 @@
   }
 
   function drawHexCell(ctx,cell,style,palette,lines,subtitle,focused,dimmed) {
+    const ring=cell.progressRing??null;
+    const rawTone=cell.tone??cell.model?.phase??'waiting';
+    const isNeeds=rawTone==='needs'||rawTone==='stalled'||rawTone==='blocked';
     ctx.globalAlpha=dimmed?0.28:1;
     ctx.beginPath();
     cell.vertices.forEach((pt,idx)=>idx===0?ctx.moveTo(pt.x,pt.y):ctx.lineTo(pt.x,pt.y));
     ctx.closePath();
-    ctx.fillStyle=style.fill;
-    ctx.fill();
-    ctx.lineWidth=focused?2.6:2;
-    ctx.strokeStyle=focused?(palette.accent??style.stroke):style.stroke;
-    ctx.stroke();
+    if (ring) {
+      const needs=!ring.fullDone&&isNeeds;
+      ctx.fillStyle=ring.fullDone?palette.doneFill:(needs?palette.needsFill:palette.surface);
+      ctx.fill();
+      const baseStroke=needs?palette.needsStroke:palette.border;
+      ctx.lineWidth=focused?2.6:(needs?1.6:1.5);
+      ctx.strokeStyle=focused?(palette.accent??baseStroke):baseStroke;
+      ctx.stroke();
+      if (ring.ratio>0&&ring.segments?.length>=2) {
+        ctx.save?.();
+        ctx.strokeStyle=palette.doneStroke;
+        ctx.lineWidth=2.2;
+        ctx.lineCap='round';
+        ctx.lineJoin='round';
+        ctx.setLineDash?.([]);
+        ctx.beginPath();
+        const pts=ring.fullDone?ring.segments.slice(0,6):ring.segments;
+        pts.forEach((pt,idx)=>idx===0?ctx.moveTo(pt[0],pt[1]):ctx.lineTo(pt[0],pt[1]));
+        if (ring.fullDone) ctx.closePath();
+        ctx.stroke();
+        ctx.restore?.();
+      }
+    } else {
+      ctx.fillStyle=style.fill;
+      ctx.fill();
+      ctx.lineWidth=focused?2.6:2;
+      ctx.strokeStyle=focused?(palette.accent??style.stroke):style.stroke;
+      ctx.stroke();
+    }
     ctx.textAlign='center';
     ctx.textBaseline='middle';
     const titleLines=lines?.length?lines:[String(cell.label??'')];
@@ -1744,7 +1771,7 @@
         btn.dataset.tone=cell.tone??(id==='coordinator'?(cell.model?.phase??'waiting'):'waiting');
         btn.dataset.dimmed=String(!isHexActive(id));
         btn.title=tooltip;
-        btn.setAttribute('aria-label',tooltip+(subtitle?' · '+subtitle:''));
+        btn.setAttribute('aria-label',cell.mode==='group'?tooltip:(tooltip+(subtitle?' · '+subtitle:'')));
         btn.setAttribute('aria-pressed',String(focusedCluster===id));
         btn.onclick=()=>{
           focusedNode=null;
@@ -1756,7 +1783,16 @@
       for (const cluster of hiveLayout.clusters) {
         const fullTitle=String(cluster.fullTitle??cluster.label??cluster.id??'');
         const goalText=String(cluster.goal??'').trim();
-        const tooltip=goalText&&goalText!==fullTitle?fullTitle+' — '+goalText:fullTitle;
+        const memberNames=(cluster.members??cluster.slots?.map(s=>s.member)??[]).map(m=>m.name).filter(Boolean).join(', ');
+        let tooltip;
+        if (cluster.mode==='group') {
+          const done=cluster.doneCount??0;
+          const total=cluster.totalCount??cluster.count??0;
+          const baseTip=`${fullTitle} · ${done}/${total} done${memberNames?' · '+memberNames:''}`;
+          tooltip=goalText&&goalText!==fullTitle?`${baseTip} — ${goalText}`:baseTip;
+        } else {
+          tooltip=goalText&&goalText!==fullTitle?fullTitle+' — '+goalText:fullTitle;
+        }
         hexButtons.push(makeHexButton(cluster,cluster.id,tooltip,cluster.subtitle??cluster.count));
       }
       if (hiveLayout.coordinator) {

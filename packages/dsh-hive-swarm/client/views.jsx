@@ -1066,6 +1066,26 @@ function FlowGraph({state,controller,onJournal,onJumpPost}) {
     return 'waiting';
   };
 
+  const renderHexShape=(cell,tone,isFocused)=>{
+    const ring=cell.progressRing??null;
+    const pts=cell.vertices.map(v=>v.x.toFixed(1)+','+v.y.toFixed(1)).join(' ');
+    if(!ring){
+      const s=Graph.toneStyle(tone,hivePalette);
+      return <polygon points={pts} className="dsh-hive-hex-poly" fill={s.fill} stroke={s.stroke}/>;
+    }
+    const needs=!ring.fullDone&&tone==='needs';
+    const fill=ring.fullDone?hivePalette.doneFill:(needs?hivePalette.needsFill:hivePalette.surface);
+    const stroke=needs?hivePalette.needsStroke:hivePalette.border;
+    const baseW=needs?1.6:1.5;
+    return <>
+      <polygon points={pts} className="dsh-hive-hex-poly" fill={fill} stroke={stroke} strokeWidth={baseW}
+        style={{fill,stroke,strokeWidth:isFocused?2.8:baseW}}/>
+      {ring.ratio>0?<path className="hive-hex-progress" d={ring.svgPath} fill="none"
+        stroke={hivePalette.doneStroke} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"
+        strokeDasharray={ring.strokeDasharray??undefined}/>:null}
+    </>;
+  };
+
   return <div ref={rootRef} className="dsh-hive-graph-view">
     <div className="dsh-hive-graph-controls">
       <div className="dsh-hive-replay-row1">
@@ -1121,17 +1141,20 @@ function FlowGraph({state,controller,onJournal,onJumpPost}) {
           </defs>
           {hiveLayout.clusters.map(cell=>{
             const cellTone=hiveTone(cell.tone);
-            const cellStyle=Graph.toneStyle(cellTone,hivePalette);
             const dimmed=Boolean(connectedHiveCells&&!connectedHiveCells.has(cell.id));
             const isFocused=activeHiveCellId===cell.id;
             const lines=cell.titleLines?.length?cell.titleLines:[cell.label];
-            const tooltip=cell.goal?`${cell.fullTitle??cell.label} — ${cell.goal}`:(cell.fullTitle??cell.label);
+            const fullTitle=cell.fullTitle??cell.label;
+            const goalText=String(cell.goal??'').trim();
+            const memberList=(cell.members??cell.slots?.map(s=>s.member)??[]).map(m=>m.name).filter(Boolean).join(', ');
+            const tooltip=cell.mode==='group'
+              ?`${fullTitle} · ${cell.doneCount??0}/${cell.totalCount??cell.count??0} done${memberList?' · '+memberList:''}${goalText&&goalText!==fullTitle?' — '+goalText:''}`
+              :(goalText&&goalText!==fullTitle?`${fullTitle} — ${goalText}`:fullTitle);
             return <g key={cell.id} className="dsh-hive-hex-cell" data-tone={cellTone}
               data-focused={isFocused?'true':undefined} data-dimmed={dimmed?'true':undefined}
               onClick={()=>{setFocus(null);setFocusedHex(prev=>prev===cell.id?null:cell.id);}}>
               <title>{tooltip}</title>
-              <polygon points={cell.vertices.map(v=>v.x.toFixed(1)+','+v.y.toFixed(1)).join(' ')}
-                className="dsh-hive-hex-poly" fill={cellStyle.fill} stroke={cellStyle.stroke}/>
+              {renderHexShape(cell,cellTone,isFocused)}
               {lines.map((line,idx)=><text key={idx} x={cell.x} y={cell.titleY+idx*cell.titleLineHeight}
                 textAnchor="middle" dominantBaseline="central" className="dsh-hive-hex-title"
                 style={{fontSize:cell.titleFontSize}}>{line}</text>)}
@@ -1144,15 +1167,13 @@ function FlowGraph({state,controller,onJournal,onJumpPost}) {
           {(()=>{
             const coord=hiveLayout.coordinator;
             const coordTone=hiveTone(coord.model?.phase??'waiting');
-            const coordStyle=Graph.toneStyle(coordTone,hivePalette);
             const coordDimmed=Boolean(connectedHiveCells&&!connectedHiveCells.has('coordinator'));
             const coordFocused=activeHiveCellId==='coordinator';
             return <g className="dsh-hive-hex-cell" data-role="coordinator" data-tone={coordTone}
               data-focused={coordFocused?'true':undefined} data-dimmed={coordDimmed?'true':undefined}
               onClick={()=>{setFocusedHex(null);setFocus(prev=>prev==='coordinator'?null:'coordinator');}}>
               <title>Coordinator</title>
-              <polygon points={coord.vertices.map(v=>v.x.toFixed(1)+','+v.y.toFixed(1)).join(' ')}
-                className="dsh-hive-hex-poly" fill={coordStyle.fill} stroke={coordStyle.stroke}/>
+              {renderHexShape(coord,coordTone,coordFocused)}
               <text x={coord.x} y={coord.titleY} textAnchor="middle" dominantBaseline="central"
                 className="dsh-hive-hex-title" style={{fontSize:coord.titleFontSize}}>Coordinator</text>
               <text x={coord.x} y={coord.subtitleY} textAnchor="middle" dominantBaseline="central"
