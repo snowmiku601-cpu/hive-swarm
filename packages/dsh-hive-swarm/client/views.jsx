@@ -17,7 +17,7 @@ export const BEE_URL='data:image/svg+xml,'+encodeURIComponent(beeSvg);
 export function BeeIcon({size=22,className}) {
   return <img src={BEE_URL} width={size} height={size} className={className} alt="" aria-hidden="true" data-dsh-panel-entry="dsh-hive-swarm"/>;
 }
-function Bee({name,status,coordinator=false,tint,muted=false,size='md'}) {
+function Bee({name,status,coordinator=false,tint,muted=false,size='md',style}) {
   const ref=useRef(null);
   const spriteStatus=muted&&!supportsMutedSprite?'working':status;
   useEffect(()=>{const canvas=ref.current;if(!canvas)return;
@@ -28,7 +28,7 @@ function Bee({name,status,coordinator=false,tint,muted=false,size='md'}) {
       if(sprite)context.drawImage(sprite,0,0);
     }
   },[name,spriteStatus,coordinator,tint,muted]);
-  return <canvas ref={ref} width="20" height="18" aria-hidden="true" className="dsh-hive-bee" data-size={size} data-muted={muted?'true':undefined}/>;
+  return <canvas ref={ref} width="20" height="18" aria-hidden="true" className="dsh-hive-bee" data-size={size} data-status={status} data-muted={muted?'true':undefined} style={style}/>;
 }
 
 const ignore=()=>{};
@@ -38,6 +38,12 @@ const phaseLabels={working:'Live',waiting:'Waiting',done:'Done',paused:'Paused',
 const memberLabels={working:'Working',waiting:'Waiting',done:'Done',paused:'Paused',budget:'Turn limit',
   stalled:'Needs you',quota:'Quota reached',retired:'Retired',failed:'Failed',queued:'Queued',blocked:'Blocked',active:'Active'};
 const executionModeLabels={subagent:'Subagent',attached:'Attached',session:'Session'};
+const blockedReasonLabels={'shared-writer-active':'Waiting for shared writer','concurrency-limit':'Concurrency limit',
+  'waiting-dependencies':'Waiting on deps','recovery-required':'Recovery required'};
+function BlockedBadge({reason}) {
+  if(!reason)return null;
+  return <span className="dsh-hive-chip dsh-hive-blocked-badge" data-tone="blocked" data-reason={reason}>{blockedReasonLabels[reason]??reason}</span>;
+}
 
 function Status({value,compactView=false}) {
   const labels=compactView?phaseLabels:memberLabels;
@@ -176,21 +182,7 @@ function compact(value,max=140) {
   const text=String(value??'').replace(/\s+/g,' ').trim();
   return text.length>max?text.slice(0,max-1).trimEnd()+'…':text;
 }
-function smartTaskLabel(member) {
-  if(typeof Graph.smartTaskLabel==='function')return Graph.smartTaskLabel(member);
-  const explicit=String(member?.taskLabel??'').trim();
-  if(explicit)return compact(explicit,64);
-  let text=String(member?.brief??'').replace(/[`*_#>\[\]]/g,' ').replace(/\s+/g,' ').trim();
-  text=text.replace(/^You are\s+(?:@[a-z0-9_-]+\s+)?(?:an?\s+|the\s+)?(?:Hive Swarm\s+)?(?:member|worker|agent|author|verifier|researcher|investigator|auditor|reviewer)?[^.:\n]*?(?:[.:]\s+|\s+—\s+|\s+-\s+)/i,'');
-  text=text.replace(/^(?:Your\s+)?(?:assignment|mission|role|task)(?:\s*\([^)]*\))?\s*[:\-–—]\s*/i,'');
-  text=text.replace(/^You\s+own\s+(?:the\s+)?/i,'');
-  const first=text.split(/(?<=[.!?])\s+|\s*;\s*|\r?\n/)[0]?.trim()??'';
-  let words=first.replace(/[.:,;!?]+$/,'').split(/\s+/).filter(Boolean);
-  if(words.length>10)words=words.slice(0,10);
-  while(words.length>2&&/^(?:for|in|on|with|to|of|from|by|at|and|or|the|a|an)$/i.test(words.at(-1)))words.pop();
-  const result=words.join(' ').trim();
-  return compact(result||member?.name||'Task',64);
-}
+const smartTaskLabel=Graph.smartTaskLabel;
 function beeTintStyle(name,coordinator=false,tint) {
   if(typeof Bees.tintStyle==='function')return Bees.tintStyle(name,coordinator,tint);
   const [base,highlight,shade]=Bees.colors(name,coordinator,tint);
@@ -242,7 +234,7 @@ function memberNow(member,activity,latest) {
   const done=/\[done\]\s*([^\r?\n]+)/i.exec(latest?.text??'');
   if (done) return compact(done[1]);
   if (member.status==='waiting') return 'Waiting for an @mention';
-  if (member.status==='queued') return 'Queued for the next turn';
+  if (member.status==='queued') return member.blockedReason?(blockedReasonLabels[member.blockedReason]??'Queued for the next turn'):'Queued for the next turn';
   return compact(latest?.text?.split(/\r?\n/)[0])||memberLabels[member.status]||member.status;
 }
 
@@ -390,6 +382,7 @@ function Overview({state,controller,onJournal,onJumpPost,onMention}) {
             <div className="dsh-hive-task-main">
               <div className="dsh-hive-task-title">{smartTaskLabel(member)}</div>
               <div className="dsh-hive-task-sub">{now}</div>
+              {member.blockedReason?<div className="dsh-hive-inline-chips"><BlockedBadge reason={member.blockedReason}/></div>:null}
               {member.recoveryRequired?<div className="dsh-hive-actions dsh-hive-inline-actions"><RecoveryButtons memberName={member.name} pending={state.pending||member.status==='working'} controller={controller}/></div>:null}
             </div>
             <BeePill member={member} muted={muted} title={ownedSession(member)?'Inspect @'+member.name+' Journal':'View @'+member.name}
@@ -445,6 +438,7 @@ function Overview({state,controller,onJournal,onJumpPost,onMention}) {
           {people.length?<ul className="dsh-hive-thread-rows">{people.map(member=><li key={member.name} className="dsh-hive-thread-task">
             <StateGlyph status={member.status} recovery={member.recoveryRequired}/>
             <span className="dsh-hive-thread-task-title">{smartTaskLabel(member)}</span>
+            <BlockedBadge reason={member.blockedReason}/>
             <BeePill member={member} muted={member.status==='retired'}
               ariaLabel={(ownedSession(member)?'Inspect journal for @':'Jump to @')+member.name}
               onClick={event=>inspectMember(member,event.currentTarget)}/>
@@ -730,7 +724,7 @@ function Members({state,controller,onJournal,onOpenSession,onMention}) {
   const tintByName=useMemo(()=>new Map(rosterWithCoordinator(state.team).map(m=>[m.name,m.tint])),[state.team]);
   const q=filter.trim().toLowerCase();
   const filtered=state.team.members.filter(member=>!q||[
-    member.name,member.group,member.model,member.taskLabel,member.brief,
+    member.name,member.group,member.model,member.taskLabel,member.brief,blockedReasonLabels[member.blockedReason]??member.blockedReason,
     ...(member.channels??[]),
   ].filter(Boolean).join(' ').toLowerCase().includes(q));
   const rank=m=>{
@@ -816,11 +810,12 @@ function Members({state,controller,onJournal,onOpenSession,onMention}) {
             </div>
           </div>
         </div>
-        {(member.workspace||member.group||member.channels?.length||member.pendingWaitFor?.length||member.fallbackModel)?
+        {(member.workspace||member.group||member.channels?.length||member.pendingWaitFor?.length||member.blockedReason||member.fallbackModel)?
           <div className="dsh-hive-member-chips">
             <MemberWorkspace workspace={member.workspace}/>
             {member.group?<span className="dsh-hive-chip">@{member.group}</span>:null}
             {member.channels?.length?<span className="dsh-hive-chip">{member.channels.map(ch=>'#'+ch).join(' ')}</span>:null}
+            <BlockedBadge reason={member.blockedReason}/>
             {member.pendingWaitFor?.length?<span className="dsh-hive-chip" data-tone="wait">Waiting on {member.pendingWaitFor.map(name=>'@'+name).join(', ')}</span>:null}
             {member.fallbackModel?<span className="dsh-hive-chip">Fallback: {member.fallbackModel}{member.fallbackEffort?' · '+member.fallbackEffort:''}</span>:null}
           </div>:null}
@@ -886,182 +881,22 @@ function chevronPoints(end,angle) {
   return pt(1,0)+' '+pt(-8,-3.8)+' '+pt(-6.1,0)+' '+pt(-8,3.8);
 }
 
-// Defensive fallbacks until graph-gif merges into release/2.1.0.
-function fallbackProjectHive(posts,members,cursor) {
-  const list=members??[];
-  const mergeUser=!list.some(m=>(m.role==='coordinator'||m.name==='coordinator')&&!m.external)&&!list.some(m=>m.name==='user');
-  const resolveActor=name=>(mergeUser&&name==='user')?'coordinator':name;
-  const filtered=posts.filter(p=>p.seq<=cursor&&Graph.isPost(p));
-  const lastPost=filtered.at(-1)??null;
-  const live=cursor>=(posts.at(-1)?.seq??0);
-  const coord=list.find(m=>m.role==='coordinator'||m.name==='coordinator')??{name:'coordinator',role:'coordinator',status:'waiting'};
-  const workers=list.filter(m=>m.role!=='coordinator'&&m.name!=='coordinator');
-  const latestSeqBy=new Map();
-  for(const p of filtered)latestSeqBy.set(resolveActor(p.author),p.seq);
-  const buckets=[
-    {id:'working',label:'Working',tone:'working',members:[]},
-    {id:'waiting',label:'Waiting',tone:'waiting',members:[]},
-    {id:'needs',label:'Needs you',tone:'needs',members:[]},
-    {id:'done',label:'Done',tone:'done',members:[]},
-  ];
-  const byId=new Map(buckets.map(b=>[b.id,b]));
-  for(const w of workers) {
-    const st=live?w.status:(latestSeqBy.has(w.name)?(w.status==='done'?'done':'waiting'):'waiting');
-    const bucketId=(w.recoveryRequired||['failed','quota'].includes(st))?'needs':
-      st==='working'?'working':
-      ['done','retired'].includes(st)?'done':'waiting';
-    byId.get(bucketId).members.push({
-      name:w.name,status:st,role:w.role??'worker',tint:w.tint,
-      muted:['done','retired'].includes(st),latestSeq:latestSeqBy.get(w.name)??0,pendingWaitFor:w.pendingWaitFor??[],
-    });
-  }
-  const clusters=buckets.filter(b=>b.members.length>0).map(b=>({...b,count:b.members.length}));
-  const doneCount=byId.get('done').members.length;
-  const phase=byId.get('needs').members.length?'stalled':byId.get('working').members.length?'working':(workers.length&&doneCount===workers.length)?'done':'waiting';
-  const connectors=[];
-  if(byId.get('done').members.length)connectors.push({from:'done',to:'coordinator',kind:'done',label:'Tasks done'});
-  if(lastPost) {
-    const authorName=resolveActor(lastPost.author);
-    const authorCluster=authorName==='coordinator'?'coordinator':clusters.find(c=>c.members.some(m=>m.name===authorName))?.id;
-    const targets=[...(lastPost.targets??[]).map(resolveActor),...(lastPost.coordinatorMention?['coordinator']:[])];
-    for(const t of targets) {
-      const targetCluster=t==='coordinator'?'coordinator':clusters.find(c=>c.members.some(m=>m.name===t))?.id;
-      if(authorCluster&&targetCluster&&authorCluster!==targetCluster) {
-        connectors.push({from:authorCluster,to:targetCluster,kind:'message',label:'Message just sent',seq:lastPost.seq});
-        break;
-      }
-    }
-  }
-  for(const c of clusters) {
-    for(const m of c.members) {
-      for(const dep of m.pendingWaitFor??[]) {
-        const depCluster=clusters.find(cl=>cl.members.some(x=>x.name===dep))?.id;
-        if(depCluster&&depCluster!==c.id&&!connectors.some(k=>k.kind==='waiting'&&k.from===c.id&&k.to===depCluster)) {
-          connectors.push({from:c.id,to:depCluster,kind:'waiting',label:'Waiting on'});
-        }
-      }
-    }
-  }
-  return {
-    currentSeq:lastPost?.seq??0,lastPost,
-    coordinator:{name:'coordinator',status:coord.status,role:'coordinator',doneCount,totalWorkers:workers.length,phase,latestSeq:latestSeqBy.get('coordinator')??0,tint:0},
-    clusters,connectors,
-  };
-}
-
-function hexVertices(cx,cy,r) {
-  return Array.from({length:6},(_,i)=>({x:cx+r*Math.cos(i*Math.PI/3),y:cy+r*Math.sin(i*Math.PI/3)}));
-}
-function hexSlotGrid(cx,cy,radius,members) {
-  if(!members.length)return [];
-  const count=members.length;
-  const cols=count<=2?count:count<=6?3:4;
-  const rows=Math.ceil(count/cols);
-  const availW=radius*1.48;
-  const slotWidth=Math.min(72,Math.max(46,availW/cols));
-  const rowGap=rows===1?0:rows===2?46:38;
-  const startY=cy-(rows-1)*rowGap/2+14;
-  return members.map((member,idx)=>{
-    const row=Math.floor(idx/cols);
-    const inRow=Math.min(cols,count-row*cols);
-    const col=idx%cols;
-    const x=cx+(col-(inRow-1)/2)*slotWidth;
-    const y=startY+row*rowGap;
-    return {member,x,y,slotWidth,beeScale:rows>=3?0.9:1};
-  });
-}
-function fallbackLayoutHive(hiveModel,width,height) {
-  const clusters=hiveModel.clusters??[];
-  const gap=18;
-  const cellsById=new Map();
-  let radius,coordCenter;
-  const laidClusters=[];
-  if(!clusters.length) {
-    radius=Math.max(76,Math.min(118,width*0.24,height*0.32));
-    coordCenter={x:width/2,y:height/2};
-  } else if(clusters.length===1) {
-    radius=Math.max(76,Math.min(120,width*0.24,(height-36)/(2*Math.sqrt(3)+0.35)));
-    const apothem=radius*Math.sqrt(3)/2;
-    const midY=height/2;
-    const offset=apothem+gap/2;
-    const cl=clusters[0];
-    const clPos={x:width/2,y:midY-offset};
-    coordCenter={x:width/2,y:midY+offset};
-    const cell={...cl,x:clPos.x,y:clPos.y,radius,vertices:hexVertices(clPos.x,clPos.y,radius),slots:hexSlotGrid(clPos.x,clPos.y,radius,cl.members)};
-    laidClusters.push(cell);
-    cellsById.set(cl.id,cell);
-  } else {
-    coordCenter={x:width/2,y:height*0.70};
-    const span=clusters.length===2?Math.PI*0.44:clusters.length===3?Math.PI*0.64:Math.PI*0.74;
-    const delta=span/(clusters.length-1);
-    const ringR=Math.max(110,Math.min(width*0.34,coordCenter.y-82));
-    const minSpacing=Math.min(ringR,2*ringR*Math.sin(delta/2));
-    const maxApothem=Math.max(46,(minSpacing-gap)/2);
-    radius=Math.max(54,Math.min(92,maxApothem/(Math.sqrt(3)/2)));
-    clusters.forEach((cl,i)=>{
-      const angle=-Math.PI/2-span/2+i*delta;
-      const cx=coordCenter.x+Math.cos(angle)*ringR;
-      const cy=coordCenter.y+Math.sin(angle)*ringR;
-      const cell={...cl,x:cx,y:cy,radius,vertices:hexVertices(cx,cy,radius),slots:hexSlotGrid(cx,cy,radius,cl.members)};
-      laidClusters.push(cell);
-      cellsById.set(cl.id,cell);
-    });
-  }
-  const coordinator={id:'coordinator',x:coordCenter.x,y:coordCenter.y,radius,vertices:hexVertices(coordCenter.x,coordCenter.y,radius),model:hiveModel.coordinator};
-  cellsById.set('coordinator',coordinator);
-  return {width,height,radius,coordinator,clusters:laidClusters,cellsById};
-}
-function hexBoundaryDist(radius,angle) {
-  const apothem=radius*Math.sqrt(3)/2;
-  let dist=Infinity;
-  for(const k of [Math.PI/6,Math.PI/2,5*Math.PI/6,-Math.PI/6,-Math.PI/2,-5*Math.PI/6]) {
-    const c=Math.cos(angle-k);
-    if(c>1e-4)dist=Math.min(dist,apothem/c);
-  }
-  return dist;
-}
-
-function fallbackLayoutMentions(nodes,width,height) {
-  const result=new Map();
-  if(!nodes.length)return result;
-  if(nodes.length>12||width<300)return Graph.layout(nodes,width,height);
-  const coordIdx=nodes.findIndex(n=>n.role==='coordinator'||n.name==='coordinator');
-  const ordered=coordIdx>=0?[nodes[coordIdx],...nodes.filter((_,i)=>i!==coordIdx)]:nodes;
-  const topPad=42,bottomPad=42,sidePad=Math.min(92,Math.max(58,width*0.14));
-  const cx=width/2,cy=(topPad+(height-bottomPad))/2;
-  const rx=Math.max(56,Math.min(width*0.38,width/2-sidePad));
-  const ry=Math.max(46,(height-topPad-bottomPad)/2);
-  if(ordered.length===1){result.set(ordered[0].name,{x:cx,y:cy});return result;}
-  ordered.forEach((node,i)=>{
-    const angle=-Math.PI/2+i*(Math.PI*2/ordered.length);
-    result.set(node.name,{x:cx+Math.cos(angle)*rx,y:cy+Math.sin(angle)*ry});
-  });
-  return result;
-}
-function pillBox(node,narrow) {
-  if(typeof Graph.nodeBox==='function') {
-    const candidate=Graph.nodeBox(node,{variant:'pill',narrow});
-    if(candidate&&candidate.radius>=candidate.halfH-1)return candidate;
-  }
-  const name=String(node?.name??'');
-  const halfH=narrow?14:16;
-  const halfW=Math.max(44,Math.min(96,24+name.length*4.1));
-  return {halfW,halfH,offsetX:0,offsetY:0,radius:halfH};
-}
-
 function FlowGraph({state,controller,onJournal,onJumpPost}) {
   const [graphMode,setGraphMode]=useState(readGraphMode);
   const [replay,setReplay]=useState(null),[playing,setPlaying]=useState(false),[pacing,setPacing]=useState('even'),[speed,setSpeed]=useState(1);
-  const [hideInactive,setHideInactive]=useState(false),[expandBroadcast,setExpandBroadcast]=useState(false),[focus,setFocus]=useState(null);
+  const [hideInactive,setHideInactive]=useState(false),[expandBroadcast,setExpandBroadcast]=useState(false),[focus,setFocus]=useState(null),[focusedHex,setFocusedHex]=useState(null);
   const [hoveredEdge,setHoveredEdge]=useState(null),[measuredBoxes,setMeasuredBoxes]=useState(null);
   const [gifStatus,setGifStatus]=useState({busy:false,message:'',error:false});
   const rootRef=useRef(null),ref=useRef(null),nodeRefs=useRef(new Map()),[width,setWidth]=useState(480);
+  const [theme,setTheme]=useState(()=>detectTheme(null));
   const arrow=useId().replaceAll(':','');
 
+  useEffect(()=>{setTheme(detectTheme(rootRef.current));},[]);
   useEffect(()=>{const node=ref.current;if(!node||typeof ResizeObserver==='undefined')return;
     const observer=new ResizeObserver(entries=>setWidth(Math.max(280,entries[0].contentRect.width)));observer.observe(node);return()=>observer.disconnect();},[]);
 
   const roster=useMemo(()=>rosterWithCoordinator(state.team),[state.team]);
+  const memberByName=useMemo(()=>new Map(roster.map(m=>[m.name,m])),[roster]);
   const posts=useMemo(()=>state.history.filter(Graph.isPost),[state.history]);
   const index=replay===null?posts.length:Math.max(0,Math.min(posts.length,posts.findIndex(e=>e.seq>replay)===-1?posts.length:posts.findIndex(e=>e.seq>replay)));
   const current=posts[index-1];
@@ -1085,36 +920,33 @@ function FlowGraph({state,controller,onJournal,onJumpPost}) {
   };
   const selectMode=next=>{
     if(next===graphMode)return;
-    setGraphMode(next);writeGraphMode(next);setFocus(null);setHoveredEdge(null);
+    setGraphMode(next);writeGraphMode(next);setFocus(null);setFocusedHex(null);setHoveredEdge(null);
   };
 
   const narrow=width<440;
   const elapsed=Graph.elapsedSpan(posts.slice(0,index),{live:replay===null&&['working','queued'].includes(state.team.phase)});
+  const hivePalette=useMemo(()=>Graph.themePalette(theme),[theme]);
 
   // Hive mode projection & geometry
   const hiveModel=useMemo(()=>{
     if(graphMode!=='hive')return null;
-    return typeof Graph.projectHive==='function'?Graph.projectHive(posts,roster,cursor):fallbackProjectHive(posts,roster,cursor);
-  },[graphMode,posts,roster,cursor]);
+    return Graph.projectHive(posts,roster,cursor,{threads:state.team?.threads,channels:state.team?.channels});
+  },[graphMode,posts,roster,cursor,state.team?.threads,state.team?.channels]);
   const hiveHeight=useMemo(()=>{
     if(graphMode!=='hive'||!hiveModel)return 420;
-    const minH=typeof Graph.hiveMinimumHeight==='function'?Graph.hiveMinimumHeight(hiveModel.clusters.length,width):((hiveModel.clusters.length<=1?400:440));
-    return Math.max(380,minH);
+    return Graph.hiveMinimumHeight(hiveModel.clusters.length,width);
   },[graphMode,hiveModel,width]);
   const hiveLayout=useMemo(()=>{
     if(graphMode!=='hive'||!hiveModel)return null;
-    return typeof Graph.layoutHive==='function'?Graph.layoutHive(hiveModel,width,hiveHeight):fallbackLayoutHive(hiveModel,width,hiveHeight);
+    return Graph.layoutHive(hiveModel,width,hiveHeight);
   },[graphMode,hiveModel,width,hiveHeight]);
 
   // Mentions mode projection & capsule pill layout
   const projection=useMemo(()=>Graph.project(posts,roster,cursor,{hideInactive,expandBroadcast}),[posts,roster,cursor,hideInactive,expandBroadcast]);
-  const mentionsHeight=useMemo(()=>{
-    if(typeof Graph.mentionsMinimumHeight==='function')return Math.max(380,Graph.mentionsMinimumHeight(projection.nodes.length,width));
-    return Math.max(380,Graph.minimumHeight(projection.nodes.length,width));
-  },[projection.nodes.length,width]);
+  const mentionsHeight=useMemo(()=>Math.max(380,Graph.mentionsMinimumHeight(projection.nodes.length,width)),[projection.nodes.length,width]);
   const points=useMemo(()=>{
     if(graphMode!=='mentions')return new Map();
-    return typeof Graph.layoutMentions==='function'?Graph.layoutMentions(projection.nodes,width,mentionsHeight):fallbackLayoutMentions(projection.nodes,width,mentionsHeight);
+    return Graph.layoutMentions(projection.nodes,width,mentionsHeight);
   },[graphMode,projection.nodes,width,mentionsHeight]);
 
   useSafeLayoutEffect(()=>{
@@ -1138,7 +970,7 @@ function FlowGraph({state,controller,onJournal,onJumpPost}) {
     if(graphMode!=='mentions')return null;
     if(measuredBoxes&&measuredBoxes.size===projection.nodes.length)return measuredBoxes;
     const map=new Map();
-    for(const node of projection.nodes)map.set(node.name,measuredBoxes?.get(node.name)??pillBox(node,narrow));
+    for(const node of projection.nodes)map.set(node.name,measuredBoxes?.get(node.name)??Graph.nodeBox(node,{variant:'pill',narrow}));
     return map;
   },[graphMode,projection.nodes,measuredBoxes,narrow]);
 
@@ -1161,11 +993,30 @@ function FlowGraph({state,controller,onJournal,onJumpPost}) {
     return set;
   },[focus,hoveredEdge,projection.links]);
 
+  const activeHiveCellId=useMemo(()=>{
+    if(graphMode!=='hive'||!hiveLayout)return null;
+    if(focusedHex)return hiveLayout.clusters.some(c=>c.id===focusedHex)?focusedHex:null;
+    if(!focus)return null;
+    if(focus==='coordinator')return 'coordinator';
+    return hiveLayout.clusters.find(c=>c.slots.some(s=>s.member.name===focus))?.id??null;
+  },[graphMode,hiveLayout,focusedHex,focus]);
+
+  const connectedHiveCells=useMemo(()=>{
+    if(!activeHiveCellId||!hiveModel)return null;
+    const set=new Set([activeHiveCellId]);
+    for(const conn of hiveModel.connectors??[]){
+      if(conn.from===activeHiveCellId)set.add(conn.to);
+      if(conn.to===activeHiveCellId)set.add(conn.from);
+    }
+    return set;
+  },[activeHiveCellId,hiveModel]);
+
   const stageHeight=graphMode==='hive'?hiveHeight:mentionsHeight;
-  const focusedMember=focus?roster.find(m=>m.name===focus):null;
-  const mergeUser=typeof Graph.shouldMergeUserToCoordinator==='function'
-    ?Graph.shouldMergeUserToCoordinator(roster)
-    :(!roster.some(m=>(m.role==='coordinator'||m.name==='coordinator')&&!m.external)&&!roster.some(m=>m.name==='user'));
+  const focusedMember=focus?memberByName.get(focus):null;
+  const focusedCluster=(graphMode==='hive'&&focusedHex&&hiveLayout)
+    ?(hiveLayout.clusters.find(c=>c.id===focusedHex)??null)
+    :null;
+  const mergeUser=Graph.shouldMergeUserToCoordinator(roster);
   const graphLabel=name=>name==='user'?'You':name==='system'?'System':name;
   const mentionLabel=name=>name==='user'?'You':name==='system'?'System':'@'+name;
   const effectiveCurrentAuthor=(mergeUser&&current?.author==='user')?'coordinator':current?.author;
@@ -1179,10 +1030,13 @@ function FlowGraph({state,controller,onJournal,onJumpPost}) {
     }
     setGifStatus({busy:true,message:'Rendering GIF replay…',error:false});
     try {
-      const theme=detectTheme(rootRef.current);
+      const liveTheme=detectTheme(rootRef.current);
+      if(liveTheme!==theme)setTheme(liveTheme);
       const result=await Promise.resolve(gifApi.exportGraphReplayGif({
-        mode:graphMode,posts,members:roster,phase:state.team.phase,
-        pacing,speed,hideInactive,expandBroadcast,focus,theme,
+        mode:graphMode,posts,members:roster,
+        threads:state.team?.threads,channels:state.team?.channels,
+        phase:state.team.phase,
+        pacing,speed,hideInactive,expandBroadcast,focus,theme:liveTheme,
         width:Math.max(480,Math.round(width)),height:Math.max(360,Math.round(stageHeight)),
         graph:Graph,bees:Bees,
       }));
@@ -1265,55 +1119,109 @@ function FlowGraph({state,controller,onJournal,onJumpPost}) {
               <path d="M0.5 1.2L9.5 5L0.5 8.8L2.4 5Z" fill="context-stroke"/>
             </marker>
           </defs>
-          {hiveLayout.clusters.map(cell=><g key={cell.id} className="dsh-hive-hex-cell" data-tone={hiveTone(cell.tone)}>
-            <polygon points={cell.vertices.map(v=>v.x.toFixed(1)+','+v.y.toFixed(1)).join(' ')} className="dsh-hive-hex-poly"/>
-            <text x={cell.x} y={cell.y-cell.radius*0.56} textAnchor="middle" className="dsh-hive-hex-title">{cell.label}</text>
-            <text x={cell.x} y={cell.y-cell.radius*0.41} textAnchor="middle" className="dsh-hive-hex-count">{cell.count}</text>
-          </g>)}
-          <g className="dsh-hive-hex-cell" data-role="coordinator" data-tone={hiveTone(hiveLayout.coordinator.model.phase==='done'?'done':hiveLayout.coordinator.model.phase==='stalled'?'needs':'working')}>
-            <polygon points={hiveLayout.coordinator.vertices.map(v=>v.x.toFixed(1)+','+v.y.toFixed(1)).join(' ')} className="dsh-hive-hex-poly"/>
-            <text x={hiveLayout.coordinator.x} y={hiveLayout.coordinator.y+hiveLayout.coordinator.radius*0.34} textAnchor="middle" className="dsh-hive-hex-title">Coordinator</text>
-            <text x={hiveLayout.coordinator.x} y={hiveLayout.coordinator.y+hiveLayout.coordinator.radius*0.50} textAnchor="middle" className="dsh-hive-hex-count">
-              {hiveLayout.coordinator.model.doneCount} of {hiveLayout.coordinator.model.totalWorkers} done
-            </text>
-          </g>
+          {hiveLayout.clusters.map(cell=>{
+            const cellTone=hiveTone(cell.tone);
+            const cellStyle=Graph.toneStyle(cellTone,hivePalette);
+            const dimmed=Boolean(connectedHiveCells&&!connectedHiveCells.has(cell.id));
+            const isFocused=activeHiveCellId===cell.id;
+            const lines=cell.titleLines?.length?cell.titleLines:[cell.label];
+            const tooltip=cell.goal?`${cell.fullTitle??cell.label} — ${cell.goal}`:(cell.fullTitle??cell.label);
+            return <g key={cell.id} className="dsh-hive-hex-cell" data-tone={cellTone}
+              data-focused={isFocused?'true':undefined} data-dimmed={dimmed?'true':undefined}
+              onClick={()=>{setFocus(null);setFocusedHex(prev=>prev===cell.id?null:cell.id);}}>
+              <title>{tooltip}</title>
+              <polygon points={cell.vertices.map(v=>v.x.toFixed(1)+','+v.y.toFixed(1)).join(' ')}
+                className="dsh-hive-hex-poly" fill={cellStyle.fill} stroke={cellStyle.stroke}/>
+              {lines.map((line,idx)=><text key={idx} x={cell.x} y={cell.titleY+idx*cell.titleLineHeight}
+                textAnchor="middle" dominantBaseline="central" className="dsh-hive-hex-title"
+                style={{fontSize:cell.titleFontSize}}>{line}</text>)}
+              <text x={cell.x} y={cell.subtitleY} textAnchor="middle" dominantBaseline="central"
+                className="dsh-hive-hex-count" style={{fontSize:cell.subtitleFontSize}}>
+                {cell.subtitle??cell.count}
+              </text>
+            </g>;
+          })}
+          {(()=>{
+            const coord=hiveLayout.coordinator;
+            const coordTone=hiveTone(coord.model?.phase??'waiting');
+            const coordStyle=Graph.toneStyle(coordTone,hivePalette);
+            const coordDimmed=Boolean(connectedHiveCells&&!connectedHiveCells.has('coordinator'));
+            const coordFocused=activeHiveCellId==='coordinator';
+            return <g className="dsh-hive-hex-cell" data-role="coordinator" data-tone={coordTone}
+              data-focused={coordFocused?'true':undefined} data-dimmed={coordDimmed?'true':undefined}
+              onClick={()=>{setFocusedHex(null);setFocus(prev=>prev==='coordinator'?null:'coordinator');}}>
+              <title>Coordinator</title>
+              <polygon points={coord.vertices.map(v=>v.x.toFixed(1)+','+v.y.toFixed(1)).join(' ')}
+                className="dsh-hive-hex-poly" fill={coordStyle.fill} stroke={coordStyle.stroke}/>
+              <text x={coord.x} y={coord.titleY} textAnchor="middle" dominantBaseline="central"
+                className="dsh-hive-hex-title" style={{fontSize:coord.titleFontSize}}>Coordinator</text>
+              <text x={coord.x} y={coord.subtitleY} textAnchor="middle" dominantBaseline="central"
+                className="dsh-hive-hex-count" style={{fontSize:coord.subtitleFontSize}}>
+                {coord.subtitle??`${coord.model.doneCount} of ${coord.model.totalWorkers} done`}
+              </text>
+            </g>;
+          })()}
           {(hiveModel?.connectors??[]).map((conn,i)=>{
-            const lookup=id=>hiveLayout.cellsById?.get?.(id)??hiveLayout.cellsById?.[id]??(id==='coordinator'?hiveLayout.coordinator:hiveLayout.clusters.find(c=>c.id===id));
-            const fromCell=lookup(conn.from),toCell=lookup(conn.to);
-            if(!fromCell||!toCell||fromCell===toCell)return null;
-            const dx=toCell.x-fromCell.x,dy=toCell.y-fromCell.y,dist=Math.hypot(dx,dy);
-            if(dist<2)return null;
-            const angle=Math.atan2(dy,dx);
-            const shift=conn.kind==='message'?8:conn.kind==='waiting'?-8:0;
-            const pad=shift?6:3;
-            const dFrom=hexBoundaryDist(fromCell.radius,angle)+pad;
-            const dTo=hexBoundaryDist(toCell.radius,angle+Math.PI)+pad;
-            if(dFrom+dTo>=dist)return null;
-            const nx=-Math.sin(angle),ny=Math.cos(angle);
-            const x1=fromCell.x+Math.cos(angle)*dFrom+nx*shift,y1=fromCell.y+Math.sin(angle)*dFrom+ny*shift;
-            const x2=toCell.x-Math.cos(angle)*dTo+nx*shift,y2=toCell.y-Math.sin(angle)*dTo+ny*shift;
-            return <line key={conn.from+'>'+conn.to+':'+conn.kind+':'+i} x1={x1.toFixed(1)} y1={y1.toFixed(1)} x2={x2.toFixed(1)} y2={y2.toFixed(1)}
-              className="dsh-hive-hex-connector" data-kind={conn.kind}
-              strokeDasharray={conn.kind==='waiting'?'4 4':undefined}
-              markerEnd={conn.kind==='waiting'?'url(#'+arrow+')':undefined}/>;
+            const route=Graph.routeHiveConnector(conn,hiveLayout);
+            if(!route)return null;
+            const stroke=conn.kind==='message'?(hivePalette.messageStroke??hivePalette.pulse)
+              :conn.kind==='waiting'?(hivePalette.waitingConnector??hivePalette.waitingStroke)
+                :(hivePalette.doneConnector??hivePalette.doneStroke);
+            const dimmed=Boolean(activeHiveCellId&&conn.from!==activeHiveCellId&&conn.to!==activeHiveCellId);
+            const props={
+              className:'dsh-hive-hex-connector',
+              'data-kind':conn.kind,
+              'data-curved':route.curved?'true':undefined,
+              'data-self-loop':route.isSelfLoop?'true':undefined,
+              'data-dimmed':dimmed?'true':undefined,
+              stroke,
+              strokeDasharray:conn.kind==='waiting'?'4 4':undefined,
+              markerEnd:conn.kind!=='done'?'url(#'+arrow+')':undefined,
+            };
+            const key=conn.from+'>'+conn.to+':'+conn.kind+':'+i;
+            if(!route.curved&&!route.isSelfLoop){
+              return <line key={key} {...props} x1={route.start.x.toFixed(1)} y1={route.start.y.toFixed(1)}
+                x2={route.end.x.toFixed(1)} y2={route.end.y.toFixed(1)}/>;
+            }
+            return <path key={key} {...props} d={route.path} fill="none"/>;
           })}
         </svg>
-        {hiveLayout.clusters.flatMap(cell=>cell.slots.map(slot=>{
-          const m=slot.member;
-          const active=focus===m.name;
-          return <button key={m.name} type="button" className="dsh-hive-hex-bee-btn" data-status={m.status} aria-pressed={active}
-            style={{left:slot.x/width*100+'%',top:slot.y,maxWidth:slot.slotWidth}}
-            title={'@'+m.name+' · '+(memberLabels[m.status]??m.status)} aria-label={'Inspect @'+m.name+' ('+(memberLabels[m.status]??m.status)+')'}
-            onClick={()=>setFocus(active?null:m.name)}>
-            <Bee name={m.name} status={m.status} tint={m.tint} muted={m.muted} size="hive"/>
-            <span className="dsh-hive-hex-bee-name">{m.name}</span>
+        {hiveLayout.clusters.flatMap(cell=>{
+          const cellDimmed=Boolean(connectedHiveCells&&!connectedHiveCells.has(cell.id));
+          return cell.slots.map(slot=>{
+            const m=slot.member;
+            const active=focus===m.name;
+            const beeScale=slot.beeScale??1;
+            const beeStyle=beeScale<0.95?{width:Math.max(18,Math.round(32*beeScale)),height:Math.max(16,Math.round(29*beeScale))}:undefined;
+            const blockedReason=memberByName.get(m.name)?.blockedReason;
+            const blockedText=blockedReason?(blockedReasonLabels[blockedReason]??blockedReason):'';
+            const tip='@'+m.name+' · '+(memberLabels[m.status]??m.status)+(blockedText?' · '+blockedText:'');
+            return <button key={m.name} type="button" className="dsh-hive-hex-bee-btn" data-status={m.status}
+              aria-pressed={active} data-dimmed={cellDimmed?'true':undefined}
+              style={{left:slot.x/width*100+'%',top:slot.y,maxWidth:Math.max(26,slot.slotWidth)}}
+              title={tip} aria-label={'Inspect @'+m.name+' ('+(memberLabels[m.status]??m.status)+')'}
+              onClick={()=>{setFocusedHex(null);setFocus(active?null:m.name);}}>
+              <Bee name={m.name} status={m.status} tint={m.tint} muted={m.muted} size="hive" style={beeStyle}/>
+              <span className="dsh-hive-hex-bee-name">{m.name}</span>
+            </button>;
+          });
+        })}
+        {(()=>{
+          const coord=hiveLayout.coordinator;
+          const coordSlot=coord.slots?.[0];
+          const coordStatus=coord.model?.status??'waiting';
+          const coordScale=coordSlot?.beeScale??1.6;
+          const coordDimmed=Boolean(connectedHiveCells&&!connectedHiveCells.has('coordinator'));
+          const coordBeeStyle={width:Math.round(20*coordScale),height:Math.round(18*coordScale)};
+          return <button type="button" className="dsh-hive-hex-coord-btn" aria-pressed={focus==='coordinator'}
+            data-status={coordStatus} data-dimmed={coordDimmed?'true':undefined}
+            style={{left:(coordSlot?.x??coord.x)/width*100+'%',top:coordSlot?.y??(coord.y-coord.radius*0.14)}}
+            title={'Coordinator · '+(memberLabels[coordStatus]??coordStatus)}
+            aria-label="Inspect Coordinator"
+            onClick={()=>{setFocusedHex(null);setFocus(focus==='coordinator'?null:'coordinator');}}>
+            <Bee name="coordinator" status={coordStatus} coordinator size="lg" style={coordBeeStyle}/>
           </button>;
-        }))}
-        <button type="button" className="dsh-hive-hex-coord-btn" aria-pressed={focus==='coordinator'}
-          style={{left:hiveLayout.coordinator.x/width*100+'%',top:hiveLayout.coordinator.y-hiveLayout.coordinator.radius*0.14}}
-          aria-label="Inspect Coordinator" onClick={()=>setFocus(focus==='coordinator'?null:'coordinator')}>
-          <Bee name="coordinator" status={hiveLayout.coordinator.model.phase==='working'?'working':'active'} coordinator size="lg"/>
-        </button>
+        })()}
       </div>
       <div className="dsh-hive-graph-legend">
         <span className="dsh-hive-legend-item" data-legend="done">Tasks done</span>
@@ -1380,6 +1288,21 @@ function FlowGraph({state,controller,onJournal,onJumpPost}) {
         <span className="dsh-hive-legend-item" data-legend="all-badge"><span className="dsh-hive-all-badge">@all {projection.broadcasts}</span>@all posts, drawn by Expand @all</span>
       </div>
     </>}
+
+    {focusedCluster?<section className="dsh-hive-selected-post" aria-label="Selected work group">
+      <div className="dsh-hive-line">
+        <strong>{focusedCluster.fullTitle}</strong>
+        <span className="dsh-hive-secondary dsh-hive-mono">{focusedCluster.subtitle}</span>
+        <div className="dsh-hive-pill-group">
+          <button type="button" className="dsh-hive-ghost-btn" onClick={()=>setFocusedHex(null)}>Clear</button>
+        </div>
+      </div>
+      {focusedCluster.goal?<p className="dsh-hive-secondary">{focusedCluster.goal}</p>:null}
+      <div className="dsh-hive-member-chips">
+        {focusedCluster.slots.map(s=><BeePill key={s.member.name} member={s.member} muted={s.member.muted}
+          onClick={()=>{setFocusedHex(null);setFocus(s.member.name);}}/>)}
+      </div>
+    </section>:null}
 
     {focus&&focusedMember?<section className="dsh-hive-selected-post">
       <div className="dsh-hive-line">

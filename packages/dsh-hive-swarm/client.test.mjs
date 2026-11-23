@@ -1156,3 +1156,194 @@ test('DSH Members overflow menu exposes Cancel turn only for working members and
     assert.equal(sessions.length,0,'Clicking Cancel turn must not navigate to member session');
   }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
 });
+
+test('DSH Hive graph renders specialized work-group hexes, unified geometry, arrows/self-loops, themePalette colors, real coordinator status, and forwards threads/channels to GIF export',async()=>{
+  await import('../../hive-graph.js');
+  const Graph=globalThis.HiveGraph;
+  const palette=Graph.themePalette('light');
+  const exportCalls=[];
+  const mockGif={
+    exportGraphReplayGif(opts){
+      exportCalls.push(opts);
+      return {bytes:new Uint8Array([0x47,0x49,0x46,0x38,0x39,0x61,0x3b]),frameCount:4,width:opts.width,height:opts.height};
+    },
+  };
+  const {client,React,renderer}=await loadClient({HiveGif:mockGif});
+  const specializedTeam={
+    ...team('one',3),
+    channels:[{name:'main'}],
+    threads:[
+      {id:'core',title:'Core Engine & Worktree Isolation',goal:'Fix parallel writers',members:['alpha','alpha-2']},
+      {id:'ui',title:'UI Polish',goal:'Wire hex cells',members:['beta']},
+      {id:'qa',title:'QA Verification',members:['gamma']},
+    ],
+    members:[
+      {name:'coordinator',role:'coordinator',status:'waiting',brief:'Lead swarm',model:'sol',writable:false},
+      {name:'alpha',status:'done',brief:'Core A',model:'sol',writable:true},
+      {name:'alpha-2',status:'done',brief:'Core B',model:'sol',writable:false},
+      {name:'beta',status:'working',brief:'UI',model:'sol',writable:true,waitFor:['alpha']},
+      {name:'gamma',status:'failed',brief:'QA',model:'sol',writable:false},
+      {name:'helper',status:'waiting',brief:'Extra',model:'sol',writable:false},
+    ],
+    events:[
+      {seq:1,kind:'message',author:'alpha',targets:['alpha-2'],text:'Intra-hex sync'},
+      {seq:2,kind:'message',author:'alpha',targets:['coordinator'],text:'[done] Core A ready'},
+      {seq:3,kind:'message',author:'alpha',targets:['alpha-2'],text:'Follow-up intra-hex ping'},
+    ],
+  };
+  const f=fakeContext({snapshot:({teamId})=>({teams:[specializedTeam],team:teamId?specializedTeam:null})});
+  client.apply(f.ctx);
+  const entry=f.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let view;
+  try{
+    await renderer.act(async()=>{view=renderer.create(React.createElement(entry.component,entry.options.inject('p-hive')));await tick();});
+    await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
+    await renderer.act(async()=>{view.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Graph')).props.onClick();await tick();});
+
+    const cells=view.root.findAllByProps({className:'dsh-hive-hex-cell'});
+    assert.equal(cells.length,5,'4 cluster hexes (core, ui, qa, Other) + Coordinator hex');
+    const coreCell=cells.find(c=>c.findAllByType('title').some(t=>textOf(t).includes('Core Engine & Worktree Isolation')));
+    assert.ok(coreCell,'Expected Core cluster hex with <title> tooltip');
+    assert.ok(textOf(coreCell.findByType('title')).includes('Fix parallel writers'));
+    assert.equal(coreCell.props['data-tone'],'done');
+    assert.equal(coreCell.findByProps({className:'dsh-hive-hex-poly'}).props.fill,palette.doneFill);
+    assert.equal(coreCell.findByProps({className:'dsh-hive-hex-poly'}).props.stroke,palette.doneStroke);
+    assert.ok(coreCell.findAllByProps({className:'dsh-hive-hex-title'}).length>=2,'Long cluster title wraps into multiple lines');
+    assert.equal(textOf(coreCell.findByProps({className:'dsh-hive-hex-count'})),'2/2');
+
+    const uiCell=cells.find(c=>c.props['data-tone']==='working');
+    const qaCell=cells.find(c=>c.props['data-tone']==='needs');
+    const otherCell=cells.find(c=>!c.props['data-role']&&c.props['data-tone']==='waiting');
+    assert.ok(uiCell&&qaCell&&otherCell);
+    assert.equal(uiCell.findByProps({className:'dsh-hive-hex-poly'}).props.fill,palette.workingFill);
+    assert.equal(qaCell.findByProps({className:'dsh-hive-hex-poly'}).props.fill,palette.needsFill);
+    assert.equal(otherCell.findByProps({className:'dsh-hive-hex-poly'}).props.fill,palette.waitingFill);
+    assert.equal(textOf(otherCell.findByProps({className:'dsh-hive-hex-count'})),'0/1');
+
+    const coordCell=cells.find(c=>c.props['data-role']==='coordinator');
+    assert.equal(coordCell.props['data-tone'],'needs');
+    assert.equal(textOf(coordCell.findByProps({className:'dsh-hive-hex-count'})),'2 of 5 done');
+    const coordBtn=view.root.findByProps({className:'dsh-hive-hex-coord-btn'});
+    const coordBee=coordBtn.findByProps({className:'dsh-hive-bee'});
+    assert.equal(coordBee.props['data-status'],'waiting','Coordinator bee must reflect real waiting status, not active');
+
+    const connectors=view.root.findAllByProps({className:'dsh-hive-hex-connector'});
+    const doneConn=connectors.find(c=>c.props['data-kind']==='done');
+    const msgConn=connectors.find(c=>c.props['data-kind']==='message');
+    const waitConn=connectors.find(c=>c.props['data-kind']==='waiting');
+    assert.ok(doneConn&&msgConn&&waitConn);
+    assert.equal(doneConn.props.stroke,palette.doneConnector);
+    assert.equal(doneConn.props.markerEnd,undefined);
+    assert.equal(msgConn.type,'path');
+    assert.equal(msgConn.props['data-self-loop'],'true');
+    assert.match(msgConn.props.d,/^M[-\d.]+ [-\d.]+ C/);
+    assert.equal(msgConn.props.stroke,palette.messageStroke);
+    assert.ok(msgConn.props.markerEnd,'Message connector must render arrowhead markerEnd');
+    assert.equal(waitConn.props.stroke,palette.waitingConnector);
+    assert.equal(waitConn.props.strokeDasharray,'4 4');
+    assert.ok(waitConn.props.markerEnd,'Waiting connector must render arrowhead markerEnd');
+
+    // Mid-replay at seq 1 retains Waiting on connector while alpha is not yet done
+    const prevBtn=view.root.findByProps({'aria-label':'Previous post'});
+    await renderer.act(async()=>{prevBtn.props.onClick();});
+    await renderer.act(async()=>{prevBtn.props.onClick();});
+    const midConnectors=view.root.findAllByProps({className:'dsh-hive-hex-connector'});
+    assert.ok(midConnectors.some(c=>c.props['data-kind']==='waiting'),'Waiting connector must appear mid-replay');
+    assert.ok(midConnectors.some(c=>c.props['data-kind']==='message'&&c.props['data-self-loop']==='true'));
+
+    // GIF export forwards threads and channels
+    await renderer.act(async()=>{await view.root.findByProps({className:'dsh-hive-export-gif'}).props.onClick();await tick();});
+    assert.equal(exportCalls.length,1);
+    assert.deepEqual(exportCalls[0].threads,specializedTeam.threads);
+    assert.deepEqual(exportCalls[0].channels,specializedTeam.channels);
+  }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
+});
+
+test('DSH Hive graph scales Ring-2 height dynamically, routes curved outer-to-outer connectors, and applies Hive focus dimming',async()=>{
+  await import('../../hive-graph.js');
+  const Graph=globalThis.HiveGraph;
+  const {client,React,renderer}=await loadClient();
+  const threads=Array.from({length:8},(_,i)=>({id:'t'+(i+1),title:'Group '+(i+1),members:['w'+(i+1)]}));
+  const members=[
+    {name:'coordinator',role:'coordinator',status:'working',brief:'Lead',model:'sol',writable:false},
+    ...Array.from({length:9},(_,i)=>({
+      name:'w'+(i+1),
+      status:i===0?'done':i===3?'waiting':'working',
+      brief:'Task '+(i+1),
+      model:'sol',
+      writable:false,
+      waitFor:i===3?['w1']:[],
+    })),
+  ];
+  const ring2Team={...team('one',1),threads,members,events:[{seq:1,kind:'message',author:'w1',targets:['coordinator'],text:'[done] w1 done'}]};
+  const f=fakeContext({snapshot:({teamId})=>({teams:[ring2Team],team:teamId?ring2Team:null})});
+  client.apply(f.ctx);
+  const entry=f.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let view;
+  try{
+    await renderer.act(async()=>{view=renderer.create(React.createElement(entry.component,entry.options.inject('p-ring2')));await tick();});
+    await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
+    await renderer.act(async()=>{view.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Graph')).props.onClick();await tick();});
+
+    const stage=view.root.findByProps({'aria-label':'Hive cluster graph'});
+    const svg=stage.findByType('svg');
+    assert.equal(svg.props.height,Graph.hiveMinimumHeight(9,480),'Ring-2 SVG height must use dynamic hiveMinimumHeight');
+    assert.ok(svg.props.height>=540);
+
+    const curvedWait=view.root.findAllByProps({className:'dsh-hive-hex-connector'}).find(c=>c.props['data-kind']==='waiting'&&c.props['data-curved']==='true');
+    assert.ok(curvedWait,'Outer-to-outer waiting connector across Coordinator must be curved');
+    assert.match(curvedWait.props.d,/^M[-\d.]+ [-\d.]+ Q/);
+
+    // Focus bee w1 (hex t1, connected to coordinator + t4): unrelated hex t2 & bee w2 must dim
+    const beeBtn=name=>view.root.findAllByProps({className:'dsh-hive-hex-bee-btn'}).find(b=>b.findByProps({className:'dsh-hive-hex-bee-name'}).children.join('')===name);
+    await renderer.act(async()=>{beeBtn('w1').props.onClick();});
+    assert.equal(beeBtn('w1').props['aria-pressed'],true);
+    assert.equal(beeBtn('w4').props['data-dimmed'],undefined,'Connected hex bee w4 stays bright');
+    assert.equal(beeBtn('w2').props['data-dimmed'],'true','Unfocused hex bee w2 must dim');
+    const cells=()=>view.root.findAllByProps({className:'dsh-hive-hex-cell'});
+    const cellByTitle=title=>cells().find(c=>c.findAllByType('title').some(t=>textOf(t)===title));
+    assert.equal(cellByTitle('Group 1').props['data-focused'],'true');
+    assert.equal(cellByTitle('Group 4').props['data-dimmed'],undefined);
+    assert.equal(cellByTitle('Group 2').props['data-dimmed'],'true');
+    assert.equal(cellByTitle('Group 2').findByProps({className:'dsh-hive-hex-poly'}).props.fill.length>0,true);
+
+    // Clicking bee w1 again clears focus; clicking hex Group 2 directly focuses Group 2 and dims Group 1
+    await renderer.act(async()=>{beeBtn('w1').props.onClick();});
+    assert.equal(beeBtn('w2').props['data-dimmed'],undefined);
+    await renderer.act(async()=>{cellByTitle('Group 2').props.onClick();});
+    assert.equal(cellByTitle('Group 2').props['data-focused'],'true');
+    assert.equal(cellByTitle('Group 1').props['data-dimmed'],'true');
+    assert.equal(beeBtn('w1').props['data-dimmed'],'true');
+  }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
+});
+
+test('DSH Overview and Members render blockedReason badges and client bundle stays under 250KB with minified CSS',async()=>{
+  const {buildClient}=await import('../../scripts/build-dsh-client.mjs');
+  const buildResult=await buildClient({write:false});
+  assert.ok(buildResult.bytes<205000,'Expected minified DSH client/dist.js < 205,000 B, got '+buildResult.bytes);
+  assert.ok(!buildResult.code.includes('/* Underlined Tabs'), 'Expected CSS comments stripped by CSS minification');
+
+  const {client,React,renderer}=await loadClient();
+  const blockedTeam={
+    ...team(),
+    threads:[{id:'writers',title:'Parallel edits',goal:'Check blocked badges',members:['alpha','beta','gamma']}],
+    members:[
+      {name:'alpha',status:'queued',blockedReason:'shared-writer-active',brief:'Edit views',model:'sol',writable:true},
+      {name:'beta',status:'queued',blockedReason:'concurrency-limit',brief:'Edit tests',model:'sol',writable:false},
+      {name:'gamma',status:'queued',blockedReason:'waiting-dependencies',brief:'Verify build',model:'sol',writable:false,waitFor:['alpha']},
+    ],
+  };
+  const f=fakeContext({snapshot:({teamId})=>({teams:[blockedTeam],team:teamId?blockedTeam:null})});
+  client.apply(f.ctx);
+  const entry=f.slots.get('sidebar.right.pane.tab:dsh-hive-swarm');let view;
+  try{
+    await renderer.act(async()=>{view=renderer.create(React.createElement(entry.component,entry.options.inject('p-blocked')));await tick();});
+    await renderer.act(async()=>{await view.root.findByProps({'aria-label':'Team'}).props.onChange({target:{value:'one'}});await tick();});
+    const overviewText=textOf(view.toJSON());
+    assert.ok(overviewText.includes('Waiting for shared writer'));
+    assert.ok(overviewText.includes('Concurrency limit'));
+    assert.ok(overviewText.includes('Waiting on deps'));
+
+    await renderer.act(async()=>{view.root.findAllByProps({role:'tab'}).find(t=>t.children.includes('Members')).props.onClick();await tick();});
+    const memberBadges=view.root.findAllByProps({className:'dsh-hive-chip dsh-hive-blocked-badge'}).map(b=>textOf(b));
+    assert.deepEqual(memberBadges.sort(),['Concurrency limit','Waiting for shared writer','Waiting on deps']);
+  }finally{await renderer.act(async()=>view?.unmount());f.dispose();}
+});
