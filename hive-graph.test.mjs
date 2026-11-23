@@ -796,3 +796,143 @@ test('renderGraphFrame renders specialized threads, wrapped titles, and mid-repl
   assert.ok(texts.includes('0 of 3 done'), 'renders coordinator X of Y done');
   assert.ok(dashCalls.some(arr => Array.isArray(arr) && arr.length > 0), 'renders mid-replay dashed Waiting on connector');
 });
+
+test('hexProgressRing computes clockwise top-left v4 perimeter geometry and layoutHive attaches progressRing cleanly', () => {
+  const { hexProgressRing, projectHive, layoutHive, renderGraphFrame, themePalette } = globalThis.HiveGraph;
+  assert.equal(typeof hexProgressRing, 'function');
+
+  // Construct synthetic layout geometry for 0/2, 1/2, 17/18, 2/2, Coordinator 20/21, and status fallback
+  const r = 60;
+  const cx = 200;
+  const cy = 200;
+  const verts = Array.from({ length: 6 }, (_, i) => {
+    const a = (i * Math.PI) / 3;
+    return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
+  });
+  const v4 = [verts[4].x, verts[4].y]; // top-left
+  const v5 = [verts[5].x, verts[5].y]; // top-right
+  const v0 = [verts[0].x, verts[0].y]; // right
+  const v1 = [verts[1].x, verts[1].y]; // bottom-right
+  const v3 = [verts[3].x, verts[3].y]; // left
+
+  // 0/2 -> ratio 0, empty segments, non-null strokeDasharray
+  const ring0 = hexProgressRing({ id: 'g0', mode: 'group', doneCount: 0, totalCount: 2, vertices: verts });
+  assert.ok(ring0);
+  assert.equal(ring0.ratio, 0);
+  assert.equal(ring0.fullDone, false);
+  assert.deepEqual(ring0.segments, []);
+  assert.ok(Math.abs(ring0.perimeter - 6 * r) < 1e-6);
+  assert.ok(ring0.svgPath.startsWith(`M ${v4[0].toFixed(1)} ${v4[1].toFixed(1)} L ${v5[0].toFixed(1)} ${v5[1].toFixed(1)}`));
+  assert.ok(ring0.svgPath.endsWith(' Z'));
+  assert.equal(ring0.strokeDasharray, `0.0 ${(ring0.perimeter + 1).toFixed(1)}`);
+
+  // 1/2 -> ratio 0.5, starts at v4, sweeps clockwise across v5, v0, ends at v1
+  const ringHalf = hexProgressRing({ id: 'g1', mode: 'group', doneCount: 1, totalCount: 2, vertices: verts });
+  assert.equal(ringHalf.ratio, 0.5);
+  assert.equal(ringHalf.fullDone, false);
+  assert.equal(ringHalf.segments.length, 4);
+  assert.ok(Math.hypot(ringHalf.segments[0][0] - v4[0], ringHalf.segments[0][1] - v4[1]) < 1e-6);
+  assert.ok(Math.hypot(ringHalf.segments[1][0] - v5[0], ringHalf.segments[1][1] - v5[1]) < 1e-6);
+  assert.ok(Math.hypot(ringHalf.segments[2][0] - v0[0], ringHalf.segments[2][1] - v0[1]) < 1e-6);
+  assert.ok(Math.hypot(ringHalf.segments[3][0] - v1[0], ringHalf.segments[3][1] - v1[1]) < 1e-6);
+  assert.equal(ringHalf.strokeDasharray, `${(3 * r).toFixed(1)} ${(6 * r + 1).toFixed(1)}`);
+
+  // 17/18 -> sweeps 5 full edges + 2/3 of final edge v3->v4, leaving 1/3 edge gap right before v4
+  const ring17 = hexProgressRing({ id: 'g17', mode: 'group', doneCount: 17, totalCount: 18, vertices: verts });
+  assert.ok(Math.abs(ring17.ratio - 17 / 18) < 1e-9);
+  assert.equal(ring17.fullDone, false);
+  assert.equal(ring17.segments.length, 7);
+  const end17 = ring17.segments[6];
+  const expected17X = v3[0] + (v4[0] - v3[0]) * (2 / 3);
+  const expected17Y = v3[1] + (v4[1] - v3[1]) * (2 / 3);
+  assert.ok(Math.hypot(end17[0] - expected17X, end17[1] - expected17Y) < 1e-6, '17/18 gap sits on top-left edge right before v4');
+
+  // 2/2 -> fullDone, 7-point closed loop, strokeDasharray null
+  const ringFull = hexProgressRing({ id: 'g2', mode: 'group', doneCount: 2, totalCount: 2, vertices: verts });
+  assert.equal(ringFull.ratio, 1);
+  assert.equal(ringFull.fullDone, true);
+  assert.equal(ringFull.segments.length, 7);
+  assert.ok(Math.hypot(ringFull.segments[6][0] - v4[0], ringFull.segments[6][1] - v4[1]) < 1e-6);
+  assert.equal(ringFull.strokeDasharray, null);
+
+  // Coordinator 20/21 -> reads model.doneCount / model.totalWorkers
+  const coordRing = hexProgressRing({ id: 'coordinator', vertices: verts, model: { doneCount: 20, totalWorkers: 21 } });
+  assert.ok(coordRing);
+  assert.ok(Math.abs(coordRing.ratio - 20 / 21) < 1e-9);
+  assert.equal(coordRing.fullDone, false);
+  assert.equal(coordRing.segments.length, 7);
+  const end20 = coordRing.segments[6];
+  const frac20 = (6 * 20) / 21 - 5; // 5/7 of edge v3 -> v4
+  assert.ok(Math.hypot(end20[0] - (v3[0] + (v4[0] - v3[0]) * frac20), end20[1] - (v3[1] + (v4[1] - v3[1]) * frac20)) < 1e-6);
+
+  // Legacy mode === 'status' returns null
+  assert.equal(hexProgressRing({ id: 'working', mode: 'status', count: 3, totalCount: 3, doneCount: 0, vertices: verts }), null);
+
+  // layoutHive sets progressRing on coordinator + group clusters, null on status clusters
+  const statusLay = layoutHive(projectHive([], [
+    { name: 'coordinator', role: 'coordinator', status: 'waiting' },
+    { name: 'w1', status: 'working' },
+    { name: 'w2', status: 'done' },
+  ], 0), 680, 460);
+  assert.ok(statusLay.coordinator.progressRing);
+  assert.equal(statusLay.coordinator.progressRing.done, 1);
+  assert.equal(statusLay.coordinator.progressRing.total, 2);
+  assert.ok(statusLay.clusters.every(cl => cl.progressRing === null));
+
+  const threads = [
+    { id: 'zero', title: 'Zero Done', members: ['z1', 'z2'] },
+    { id: 'half', title: 'Half Done', members: ['h1', 'h2'] },
+    { id: 'full', title: 'All Done', members: ['d1', 'd2'] },
+    { id: 'needs', title: 'Needs Fix', members: ['n1'] },
+  ];
+  const groupMembers = [
+    { name: 'coordinator', role: 'coordinator', status: 'waiting' },
+    { name: 'z1', status: 'working' },
+    { name: 'z2', status: 'waiting' },
+    { name: 'h1', status: 'done' },
+    { name: 'h2', status: 'working' },
+    { name: 'd1', status: 'done' },
+    { name: 'd2', status: 'done' },
+    { name: 'n1', status: 'failed' },
+  ];
+  const groupLay = layoutHive(projectHive([], groupMembers, null, { threads }), 680, 480);
+  assert.equal(groupLay.cellsById.get('zero').progressRing.ratio, 0);
+  assert.equal(groupLay.cellsById.get('half').progressRing.ratio, 0.5);
+  assert.equal(groupLay.cellsById.get('full').progressRing.fullDone, true);
+  assert.equal(groupLay.coordinator.progressRing.done, 3);
+  assert.equal(groupLay.coordinator.progressRing.total, 7);
+
+  // renderGraphFrame paints neutral surface/border for partial hexes and overlays 2.2px round green progress ring
+  const palette = themePalette('light');
+  const recorded = [];
+  const state = { fillStyle: '', strokeStyle: '', lineWidth: 1, lineCap: 'butt', lineJoin: 'miter', globalAlpha: 1, font: '', textAlign: '', textBaseline: '' };
+  const ctx = new Proxy(state, {
+    set(t, k, v) { t[k] = v; return true; },
+    get(t, k) {
+      if (k in t) return t[k];
+      if (k === 'stroke') return () => recorded.push({ op: 'stroke', strokeStyle: t.strokeStyle, lineWidth: t.lineWidth, lineCap: t.lineCap, lineJoin: t.lineJoin });
+      if (k === 'fill') return () => recorded.push({ op: 'fill', fillStyle: t.fillStyle });
+      if (k === 'moveTo') return (x, y) => recorded.push({ op: 'moveTo', x, y });
+      if (k === 'lineTo') return (x, y) => recorded.push({ op: 'lineTo', x, y });
+      return () => {};
+    },
+  });
+  renderGraphFrame(ctx, { mode: 'hive', theme: 'light', posts: [], members: groupMembers, threads, width: 680, height: 480, bees: globalThis.HiveBee });
+
+  const fills = recorded.filter(r => r.op === 'fill').map(r => r.fillStyle);
+  const strokes = recorded.filter(r => r.op === 'stroke');
+  assert.ok(fills.includes(palette.surface), '0/2 and 1/2 hexes fill with neutral palette.surface');
+  assert.ok(fills.includes(palette.doneFill), '2/2 fullDone hex fills with palette.doneFill');
+  assert.ok(fills.includes(palette.needsFill), 'needs hex fills with palette.needsFill');
+  assert.ok(!fills.includes(palette.workingFill), 'group-mode working hex does not use workingFill');
+  assert.ok(strokes.some(s => s.strokeStyle === palette.border && s.lineWidth === 1.5), 'neutral track border uses palette.border 1.5px');
+  assert.ok(strokes.some(s => s.strokeStyle === palette.needsStroke && s.lineWidth === 1.6), 'needs track border uses palette.needsStroke 1.6px');
+  assert.ok(strokes.some(s => s.strokeStyle === palette.doneStroke && s.lineWidth === 2.2 && s.lineCap === 'round' && s.lineJoin === 'round'),
+    'green progress ring overlay draws in doneStroke 2.2px round');
+
+  // Verify partial 1/2 green ring traces exact segments starting at halfCell.progressRing.segments[0]
+  const halfRing = groupLay.cellsById.get('half').progressRing;
+  const halfStart = halfRing.segments[0];
+  assert.ok(recorded.some(r => r.op === 'moveTo' && Math.hypot(r.x - halfStart[0], r.y - halfStart[1]) < 0.2),
+    'partial ring starts moveTo at top-left v4');
+});

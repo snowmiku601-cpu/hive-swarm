@@ -1017,12 +1017,12 @@ test('specialized honeycomb wires threads/channels, Ring-2 height, wrapped title
   const fillColors=ops.filter(o=>o.op==='set:fillStyle').map(o=>o.args[0]);
   const strokeColors=ops.filter(o=>o.op==='set:strokeStyle').map(o=>o.args[0]);
   assert.ok(fillColors.includes('#edf7ed')&&strokeColors.includes('#4d9938'),'uses light themePalette done colors');
-  assert.ok(fillColors.includes('#edf4fc')&&strokeColors.includes('#2268b8'),'uses light themePalette working colors');
+  assert.ok(fillColors.includes('#ffffff')&&strokeColors.includes('#d0d7de'),'uses light themePalette neutral surface/border for 0/1 group hex');
 
   const hexBtns=view.element('graph-hexes').children;
   const coreHex=hexBtns.find(n=>n.dataset.clusterId==='core-eng');
   assert.ok(coreHex,'renders interactive hex overlay for core-eng');
-  assert.match(coreHex.title,/Core Engine, Bug Fixes & Worktrees/);
+  assert.match(coreHex.title,/Core Engine, Bug Fixes & Worktrees · 2\/2 done · alpha, alpha-2/);
   assert.match(coreHex.title,/Harden scheduler and worktrees/);
 
   await view.element('export-gif').onclick();
@@ -1189,4 +1189,73 @@ test('Hive bee widths fit narrow slots, hex/bee focus dims unrelated hexes, bloc
   const initMsg=posted.find(m=>m.method==='ui/initialize');
   assert.ok(initMsg);
   assert.equal(initMsg.params.appInfo.version,'');
+});
+
+test('Codex board Hive canvas draws Antigravity progress-ring overlays, neutral surface fills, enhanced tooltips, and preserves status mode',async()=>{
+  const threads=[
+    {id:'zero',title:'Zero Stream',goal:'Start soon',members:['z1','z2']},
+    {id:'partial',title:'Partial Stream',goal:'Finish build',members:['p1','p2']},
+    {id:'done',title:'Done Stream',members:['d1','d2']},
+    {id:'needs',title:'Needs Stream',members:['n1']},
+  ];
+  const groupState={
+    id:'team',title:'Progress Ring Board',cwd:'fixture',phase:'working',turns:3,turnLimit:12,
+    threads,
+    members:[
+      {name:'coordinator',role:'coordinator',status:'waiting'},
+      {name:'z1',status:'working'},
+      {name:'z2',status:'waiting'},
+      {name:'p1',status:'done'},
+      {name:'p2',status:'working'},
+      {name:'d1',status:'done'},
+      {name:'d2',status:'done'},
+      {name:'n1',status:'failed'},
+    ],
+    events:[],
+  };
+  const view=await boardView(groupState,{darkMatches:false});
+  view.element('tab-graph').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+
+  const ops=view.element('graph-canvas').canvasOps;
+  const fills=ops.filter(o=>o.op==='set:fillStyle').map(o=>o.args[0]);
+  assert.ok(fills.includes('#ffffff'),'partial/0% group hex fills with neutral palette.surface');
+  assert.ok(fills.includes('#edf7ed'),'100% done group hex fills with palette.doneFill');
+  assert.ok(fills.includes('#fdf0ef'),'needs hex fills with palette.needsFill');
+  assert.ok(!fills.includes('#edf4fc'),'group mode omits workingFill');
+
+  const strokeRecords=[];
+  const cur={strokeStyle:'',lineWidth:1,lineCap:'butt',lineJoin:'miter'};
+  for (const item of ops) {
+    if (item.op==='set:strokeStyle') cur.strokeStyle=item.args[0];
+    else if (item.op==='set:lineWidth') cur.lineWidth=item.args[0];
+    else if (item.op==='set:lineCap') cur.lineCap=item.args[0];
+    else if (item.op==='set:lineJoin') cur.lineJoin=item.args[0];
+    else if (item.op==='stroke') strokeRecords.push({...cur});
+  }
+  assert.ok(strokeRecords.some(s=>s.strokeStyle==='#d0d7de'&&s.lineWidth===1.5),'draws neutral 1.5px border track');
+  assert.ok(strokeRecords.some(s=>s.strokeStyle==='#cf483f'&&s.lineWidth===1.6),'draws needs 1.6px border track');
+  assert.ok(strokeRecords.some(s=>s.strokeStyle==='#4d9938'&&s.lineWidth===2.2&&s.lineCap==='round'&&s.lineJoin==='round'),
+    'draws 2.2px round green progress-ring perimeter overlay');
+
+  const hexBtns=view.element('graph-hexes').children;
+  const partialBtn=hexBtns.find(b=>b.dataset.clusterId==='partial');
+  assert.equal(partialBtn.title,'Partial Stream · 1/2 done · p1, p2 — Finish build');
+  const doneBtn=hexBtns.find(b=>b.dataset.clusterId==='done');
+  assert.equal(doneBtn.title,'Done Stream · 2/2 done · d1, d2');
+
+  // Legacy status mode (no threads/group/channels) keeps workingFill & workingStroke untouched
+  const statusState={
+    id:'legacy',title:'Legacy Status',cwd:'fixture',phase:'working',turns:1,turnLimit:4,
+    members:[
+      {name:'coordinator',role:'coordinator',status:'waiting'},
+      {name:'w1',status:'working'},
+    ],
+    events:[],
+  };
+  const legacyView=await boardView(statusState,{darkMatches:false});
+  legacyView.element('tab-graph').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  const legacyFills=legacyView.element('graph-canvas').canvasOps.filter(o=>o.op==='set:fillStyle').map(o=>o.args[0]);
+  assert.ok(legacyFills.includes('#edf4fc'),'status mode working cluster still uses workingFill');
 });

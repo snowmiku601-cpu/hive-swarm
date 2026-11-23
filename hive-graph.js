@@ -1006,6 +1006,81 @@
     return vertices;
   }
 
+  /**
+   * Compute clockwise top-left (v4) hexagonal progress ring geometry for Coordinator or group-mode cells.
+   */
+  function hexProgressRing(cell) {
+    if (!cell || typeof cell !== 'object') return null;
+    const isCoord = cell.id === 'coordinator' || cell.role === 'coordinator';
+    if (!isCoord && cell.mode !== 'group') return null;
+
+    const rawVerts = Array.isArray(cell.vertices) && cell.vertices.length >= 6
+      ? cell.vertices
+      : (Number.isFinite(cell.x) && Number.isFinite(cell.y) && Number.isFinite(cell.radius) && cell.radius > 0
+        ? hexVertices(cell.x, cell.y, cell.radius)
+        : null);
+    if (!rawVerts) return null;
+
+    const rawDone = isCoord ? (cell.model?.doneCount ?? 0) : (cell.doneCount ?? 0);
+    const rawTotal = isCoord ? (cell.model?.totalWorkers ?? 0) : (cell.totalCount ?? cell.count ?? 0);
+    const done = Math.max(0, Number(rawDone) || 0);
+    const total = Math.max(0, Number(rawTotal) || 0);
+    const ratio = total > 0 ? Math.max(0, Math.min(1, done / total)) : 0;
+    const fullDone = total > 0 && done >= total;
+
+    const toPt = v => (Array.isArray(v) ? [Number(v[0]), Number(v[1])] : [Number(v.x), Number(v.y)]);
+    // Start clockwise at top-left vertex v4: [v4, v5, v0, v1, v2, v3] -> closing back to v4.
+    const cw = [toPt(rawVerts[4]), toPt(rawVerts[5]), toPt(rawVerts[0]), toPt(rawVerts[1]), toPt(rawVerts[2]), toPt(rawVerts[3])];
+
+    const edgeLengths = [];
+    let perimeter = 0;
+    for (let i = 0; i < 6; i++) {
+      const a = cw[i];
+      const b = cw[(i + 1) % 6];
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      edgeLengths.push(len);
+      perimeter += len;
+    }
+
+    const progressLength = perimeter * ratio;
+    let segments = [];
+    if (fullDone) {
+      segments = [...cw.map(p => [p[0], p[1]]), [cw[0][0], cw[0][1]]];
+    } else if (ratio > 0 && perimeter > 0) {
+      segments = [[cw[0][0], cw[0][1]]];
+      let remaining = progressLength;
+      for (let i = 0; i < 6 && remaining > 1e-6; i++) {
+        const a = cw[i];
+        const b = cw[(i + 1) % 6];
+        const len = edgeLengths[i];
+        if (len <= 1e-6) continue;
+        if (remaining >= len - 1e-6) {
+          segments.push([b[0], b[1]]);
+          remaining -= len;
+        } else {
+          const t = remaining / len;
+          segments.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+          remaining = 0;
+        }
+      }
+    }
+
+    const svgPath = 'M ' + cw.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' L ') + ' Z';
+    const strokeDasharray = fullDone ? null : progressLength.toFixed(1) + ' ' + (perimeter + 1).toFixed(1);
+
+    return {
+      done,
+      total,
+      ratio,
+      fullDone,
+      perimeter,
+      progressLength,
+      segments,
+      svgPath,
+      strokeDasharray,
+    };
+  }
+
   function hiveSlotRows(count) {
     if (count <= 0) return [];
     if (count <= 3) return [count];
@@ -1194,7 +1269,7 @@
       cy: (beeBoxTop + beeBoxBottom) / 2,
     };
     const slots = computeClusterSlots(cx, cy, radius, cl.members ?? [], { topY: beeBoxTop, bottomY: beeBoxBottom });
-    return {
+    const cell = {
       id: cl.id,
       label: cl.label,
       fullTitle: rawTitle,
@@ -1207,6 +1282,7 @@
       workingCount: cl.workingCount ?? 0,
       needsCount: cl.needsCount ?? 0,
       subtitle: cl.subtitle ?? String(cl.count ?? 0),
+      members: cl.members ?? [],
       x: cx,
       y: cy,
       radius,
@@ -1222,6 +1298,8 @@
       beeBox,
       slots,
     };
+    cell.progressRing = hexProgressRing(cell);
+    return cell;
   }
 
   function buildCoordLayoutCell(coordModel, cx, cy, radius) {
@@ -1247,7 +1325,7 @@
       cy: coordBeeY,
     };
     const member = coordModel ?? { name: 'coordinator', role: 'coordinator', status: 'waiting' };
-    return {
+    const cell = {
       id: 'coordinator',
       label: 'Coordinator',
       fullTitle: 'Coordinator',
@@ -1267,6 +1345,8 @@
       slots: [{ member, x: cx, y: coordBeeY, slotWidth: radius * 1.1, beeScale: coordScale }],
       model: coordModel,
     };
+    cell.progressRing = hexProgressRing(cell);
+    return cell;
   }
 
   function layoutHive(hiveModel, width = 680, height = 460) {
@@ -1830,6 +1910,44 @@
     ctx.closePath();
   }
 
+  /**
+   * Paint a Hive hex cell with Antigravity progress-ring track + green perimeter sweep when progressRing is present.
+   */
+  function drawHiveHexCell(ctx, cell, tone, palette) {
+    const ring = cell.progressRing ?? null;
+    const isNeeds = tone === 'needs' || tone === 'stalled' || tone === 'blocked';
+    drawHexPolygon(ctx, cell.vertices);
+    if (ring) {
+      const needs = !ring.fullDone && isNeeds;
+      ctx.fillStyle = ring.fullDone ? palette.doneFill : (needs ? palette.needsFill : palette.surface);
+      ctx.fill();
+      ctx.lineWidth = needs ? 1.6 : 1.5;
+      ctx.strokeStyle = needs ? palette.needsStroke : palette.border;
+      ctx.stroke();
+      if (ring.ratio > 0 && ring.segments?.length >= 2) {
+        ctx.save?.();
+        ctx.strokeStyle = palette.doneStroke;
+        ctx.lineWidth = 2.2;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.setLineDash?.([]);
+        ctx.beginPath();
+        const pts = ring.fullDone ? ring.segments.slice(0, 6) : ring.segments;
+        pts.forEach((pt, idx) => (idx === 0 ? ctx.moveTo(pt[0], pt[1]) : ctx.lineTo(pt[0], pt[1])));
+        if (ring.fullDone) ctx.closePath();
+        ctx.stroke();
+        ctx.restore?.();
+      }
+      return;
+    }
+    const style = toneStyle(tone, palette);
+    ctx.fillStyle = style.fill;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = style.stroke;
+    ctx.stroke();
+  }
+
   function renderHiveFrame(ctx, opts = {}, paletteArg, beesArg) {
     const {
       posts = [], members = [], cursor = null, threads = null, channels = null,
@@ -1885,16 +2003,10 @@
 
     // Draw state/group cluster hexagons.
     for (const cluster of hiveLayout.clusters) {
-      const style = toneStyle(cluster.tone, palette);
       const hasFocus = Boolean(focus);
       const clusterFocused = !hasFocus || cluster.slots.some(s => s.member.name === focus);
       ctx.globalAlpha = clusterFocused ? 1 : 0.38;
-      drawHexPolygon(ctx, cluster.vertices);
-      ctx.fillStyle = style.fill;
-      ctx.fill();
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = style.stroke;
-      ctx.stroke();
+      drawHiveHexCell(ctx, cluster, cluster.tone, palette);
 
       ctx.fillStyle = palette.ink;
       ctx.font = `600 ${cluster.titleFontSize}px "Segoe UI", system-ui, sans-serif`;
@@ -1936,14 +2048,8 @@
     // Draw Coordinator hexagon.
     const coord = hiveLayout.coordinator;
     if (coord) {
-      const coordTone = toneStyle(coord.model?.phase ?? 'waiting', palette);
       ctx.globalAlpha = !focus || focus === 'coordinator' ? 1 : 0.45;
-      drawHexPolygon(ctx, coord.vertices);
-      ctx.fillStyle = coordTone.fill;
-      ctx.fill();
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = coordTone.stroke;
-      ctx.stroke();
+      drawHiveHexCell(ctx, coord, coord.model?.phase ?? 'waiting', palette);
 
       const coordSlot = coord.slots?.[0];
       const coordScale = coordSlot?.beeScale ?? Math.max(1.1, Math.min(2.1, coord.radius / 48));
@@ -2197,5 +2303,6 @@
     smartTaskLabel, mentionsMinimumHeight, layoutMentions,
     projectHive, hiveMinimumHeight, layoutHive, renderHiveFrame, renderGraphFrame,
     hexRayExit, wrapHexTitle, routeHiveConnector, themePalette, toneStyle,
+    hexProgressRing,
   });
 })();
