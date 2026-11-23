@@ -431,3 +431,134 @@ test('2.1.2 cancel_turn is owner-only, exposes inboxCount while working, and pos
   assert.equal(Object.hasOwn(afterSilent.members[0],'inboxCount'),false);
   assert.equal(afterSilent.members[0].status,'failed');
 });
+
+test('2.2.0 core projections: parallelWriters, worktreeMode, blockedReason, addedBy, waitForBoard 900s + compact timeout, onRunSettled, seqs, dropDependency, and refreshed worktreeSource', async t => {
+  const {mkdirSync, writeFileSync, readFileSync, existsSync} = await import('node:fs');
+  const {execFileSync} = await import('node:child_process');
+  const settledCalls = [];
+  const root = mkdtempSync(join(tmpdir(), 'hive-core-220-'));
+  const repo = join(root, 'repo');
+  mkdirSync(repo);
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], {stdio: 'pipe', windowsHide: true});
+  git('init', '-q');
+  git('config', 'core.autocrlf', 'false');
+  writeFileSync(join(repo, 'v.txt'), 'v1\n');
+  git('add', '.');
+  git('-c', 'user.name=Hive', '-c', 'user.email=hive@example.test', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'v1');
+
+  const gates = new Map();
+  const app = createSwarmApplication({
+    dataDirectory: join(root, 'state'),
+    host: 'deepseek-harness',
+    workspaceAllowed: async () => true,
+    runner: {
+      listModels: async () => [{id: 'fixture/model', label: 'Fixture', efforts: ['max'], defaultEffort: 'max'}],
+      run: request => new Promise((resolve, reject) => {
+        gates.set(request.member.name, {request, resolve, reject});
+        request.signal.addEventListener('abort', () => reject(request.signal.reason), {once: true});
+      }),
+      onRunSettled: async payload => { settledCalls.push(payload); },
+      close: async () => {},
+    },
+  });
+  t.after(async () => {
+    for (const g of gates.values()) g.resolve({state: 'done', message: 'cleanup', notify: [], waitFor: []});
+    await app.close();
+    rmSync(root, {recursive: true, force: true});
+  });
+
+  // 1. blockedReason: shared-writer-active, concurrency-limit, waiting-dependencies, recovery-required + addedBy projection
+  const team = await app.command('start_team', {
+    cwd: repo,
+    task: 'Blocked reasons & worktree refresh',
+    worktreeMode: 'local',
+    concurrency: 2,
+    threads: [{id: 'eng', title: 'Engineering', members: ['w1']}],
+    members: [
+      {name: 'w1', brief: 'Write 1', writable: true},
+      {name: 'w2', brief: 'Write 2', writable: true},
+      {name: 'r1', brief: 'Read 1'},
+      {name: 'r2', brief: 'Read 2'},
+      {name: 'dep', brief: 'Waiter', waitFor: ['w1']},
+    ],
+  });
+  assert.equal(team.parallelWriters, false);
+  assert.equal(team.worktreeMode, 'local');
+  for (let i = 0; i < 100 && (!gates.has('w1') || !gates.has('r1')); i++) await delay(10);
+  const status = await app.command('board_status', {teamId: team.id});
+  const byName = Object.fromEntries(status.members.map(m => [m.name, m]));
+  assert.equal(byName.w1.blockedReason, undefined);
+  assert.equal(byName.r2.blockedReason, 'concurrency-limit');
+  assert.equal(byName.dep.blockedReason, 'waiting-dependencies');
+
+  // Finish r1 so concurrency slot frees up; w2 is still blocked by shared-writer-active!
+  gates.get('r1').resolve({state: 'done', message: '[done] r1 ok', notify: [], waitFor: []});
+  for (let i = 0; i < 100 && !gates.has('r2'); i++) await delay(10);
+  const status2 = await app.command('board_status', {teamId: team.id});
+  assert.equal(status2.members.find(m => m.name === 'w2').blockedReason, 'shared-writer-active');
+
+  // DSH wait_for_board supports timeoutSec > 55 (up to 900) and emits compact status on timeout
+  const head = status2.events.at(-1).seq;
+  const waitedTimeout = await app.command('wait_for_board', {teamId: team.id, since: head, timeoutSec: 1});
+  assert.equal(waitedTimeout.wokeBy, 'timeout');
+  assert.deepEqual(waitedTimeout.status.events, []);
+  assert.equal(Object.hasOwn(waitedTimeout.status.members[0], 'brief'), false);
+  // Confirm 600s is accepted (abort via signal immediately after starting)
+  const ac = new AbortController();
+  const longWait = app.command('wait_for_board', {teamId: team.id, since: head, timeoutSec: 600}, {signal: ac.signal});
+  ac.abort();
+  await assert.rejects(longWait, {name: 'AbortError'});
+
+  // cancel_turn invokes runner.onRunSettled
+  await app.command('cancel_turn', {teamId: team.id, member: 'w1', clearInbox: true});
+  assert.deepEqual(settledCalls.at(-1), {teamId: team.id, member: 'w1', turn: 1, reason: 'Worker turn cancelled.', state: 'cancelled'});
+
+  // recovery-required blockedReason + resolve_recovery(dismiss) invokes runner.onRunSettled
+  const saved = app.board.get(team.id);
+  saved.members.find(m => m.name === 'w1').recoveryRequired = true;
+  saved.members.find(m => m.name === 'w1').pendingRun = {turn: 1, requestId: 'rec-1'};
+  app.board.save(saved);
+  assert.equal((await app.command('board_status', {teamId: team.id})).members.find(m => m.name === 'w1').blockedReason, 'recovery-required');
+  await app.command('resolve_recovery', {teamId: team.id, member: 'w1', action: 'dismiss'});
+  assert.equal(settledCalls.length, 2);
+  assert.equal(settledCalls.at(-1).state, 'cancelled');
+
+  // Worker adds helper -> addedBy projected & thread inherited; read_board({seqs}) works
+  const r2Turn = gates.get('r2').request.member.lastTurn;
+  const helperAdded = await app.command('add_member', {
+    teamId: team.id,
+    member: {name: 'r2-helper', brief: 'Read helper'},
+  }, {actor: {teamId: team.id, member: 'r2', turn: r2Turn}});
+  assert.equal(helperAdded.members.find(m => m.name === 'r2-helper').addedBy, 'r2');
+  const seqsRes = await app.command('read_board', {teamId: team.id, seqs: [1]}, {actor: {teamId: team.id, member: 'r2', turn: r2Turn}});
+  assert.deepEqual(seqsRes.posts.map(p => p.seq), [1]);
+
+  // retire_member({dropDependency: true}) drops w1 from dep.waitFor
+  await app.command('retire_member', {teamId: team.id, member: 'w1', dropDependency: true});
+  assert.equal(app.board.get(team.id).members.find(m => m.name === 'dep').waitFor.length, 0);
+
+  // Finish w2, r2, r2-helper, and dep so concurrency slots open for late-wt
+  gates.get('w2').resolve({state: 'done', message: '[done] w2 ok', notify: [], waitFor: []});
+  gates.get('r2').resolve({state: 'done', message: '[done] r2 ok', notify: [], waitFor: []});
+  for (let i = 0; i < 100 && (!gates.has('r2-helper') || !gates.has('dep')); i++) await delay(10);
+  gates.get('r2-helper').resolve({state: 'done', message: '[done] h ok', notify: [], waitFor: []});
+  gates.get('dep').resolve({state: 'done', message: '[done] dep ok', notify: [], waitFor: []});
+  for (let i = 0; i < 100 && app.board.get(team.id).members.some(m => m.status === 'working'); i++) await delay(10);
+
+  // Advance repo HEAD to v2, then add_member({worktree: true}) refreshes worktreeSource & uses local mode!
+  writeFileSync(join(repo, 'v.txt'), 'v2\n');
+  git('add', '.');
+  git('-c', 'user.name=Hive', '-c', 'user.email=hive@example.test', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'v2');
+  await app.command('add_member', {
+    teamId: team.id,
+    member: {name: 'late-wt', brief: 'Late worktree', worktree: true, writable: true, thread: 'Engineering'},
+  });
+  for (let i = 0; i < 100 && !gates.has('late-wt'); i++) await delay(10);
+  const wtReq = gates.get('late-wt').request;
+  assert.equal(readFileSync(join(wtReq.member.workspace.cwd, 'v.txt'), 'utf8'), 'v2\n');
+  assert.ok(wtReq.member.workspace.path.includes('.hive-swarm-worktrees'));
+  gates.get('late-wt').resolve({state: 'done', message: '[done] late ok', notify: [], waitFor: []});
+  for (let i = 0; i < 100 && (await app.command('board_status', {teamId: team.id})).phase !== 'done'; i++) await delay(10);
+  await app.command('remove_worktree', {teamId: team.id, member: 'late-wt'});
+  assert.equal(existsSync(wtReq.member.workspace.path), false);
+});

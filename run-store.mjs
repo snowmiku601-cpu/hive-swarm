@@ -1,10 +1,29 @@
 import { DatabaseSync } from 'node:sqlite';
 
 const states = new Set(['done', 'waiting', 'failed', 'quota']);
+const abandonStates = new Set(['cancelled', 'failed', 'quota']);
 const sequences = ['acceptedSeq', 'claimSeq', 'turnEndSeq'];
 const evidenceFields = new Set([...sequences, 'hostIdle']);
 const stepLimit = 10;
 const journalLimit = 30;
+const runsTableSql = name => `CREATE TABLE IF NOT EXISTS ${name} (
+  request_id TEXT PRIMARY KEY NOT NULL,
+  team_id TEXT NOT NULL,
+  member TEXT NOT NULL,
+  turn INTEGER NOT NULL CHECK (turn > 0),
+  session_id TEXT NOT NULL,
+  workspace TEXT NOT NULL,
+  accepted_seq INTEGER NOT NULL DEFAULT 0 CHECK (accepted_seq >= 0),
+  claim_seq INTEGER NOT NULL DEFAULT 0 CHECK (claim_seq >= 0),
+  turn_end_seq INTEGER NOT NULL DEFAULT 0 CHECK (turn_end_seq >= 0),
+  host_idle INTEGER NOT NULL DEFAULT 0 CHECK (host_idle IN (0, 1)),
+  outcome TEXT,
+  steps TEXT NOT NULL DEFAULT '[]',
+  settled INTEGER NOT NULL DEFAULT 0 CHECK (settled IN (0, 1)),
+  UNIQUE (team_id, member, turn),
+  FOREIGN KEY (session_id, team_id, member) REFERENCES run_sessions (session_id, team_id, member),
+  CHECK (settled = 0 OR (outcome IS NOT NULL AND ((claim_seq > 0 AND turn_end_seq >= claim_seq AND host_idle = 1) OR json_extract(outcome, '$.state') IN ('cancelled', 'failed', 'quota'))))
+) STRICT`;
 
 function record(value, name) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -69,26 +88,36 @@ export class RunStore {
           member TEXT NOT NULL,
           UNIQUE (session_id, team_id, member)
         ) STRICT;
-        CREATE TABLE IF NOT EXISTS runs (
-          request_id TEXT PRIMARY KEY NOT NULL,
-          team_id TEXT NOT NULL,
-          member TEXT NOT NULL,
-          turn INTEGER NOT NULL CHECK (turn > 0),
-          session_id TEXT NOT NULL,
-          workspace TEXT NOT NULL,
-          accepted_seq INTEGER NOT NULL DEFAULT 0 CHECK (accepted_seq >= 0),
-          claim_seq INTEGER NOT NULL DEFAULT 0 CHECK (claim_seq >= 0),
-          turn_end_seq INTEGER NOT NULL DEFAULT 0 CHECK (turn_end_seq >= 0),
-          host_idle INTEGER NOT NULL DEFAULT 0 CHECK (host_idle IN (0, 1)),
-          outcome TEXT,
-          steps TEXT NOT NULL DEFAULT '[]',
-          settled INTEGER NOT NULL DEFAULT 0 CHECK (settled IN (0, 1)),
-          UNIQUE (team_id, member, turn),
-          FOREIGN KEY (session_id, team_id, member) REFERENCES run_sessions (session_id, team_id, member),
-          CHECK (settled = 0 OR (outcome IS NOT NULL AND claim_seq > 0 AND turn_end_seq >= claim_seq AND host_idle = 1))
-        ) STRICT;
+        ${runsTableSql('runs')};
         CREATE INDEX IF NOT EXISTS runs_session_turn ON runs (session_id, turn);
       `);
+      const schema = this.#db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runs'").get();
+      if (schema?.sql && !schema.sql.includes("'cancelled'")) {
+        this.#db.exec('PRAGMA foreign_keys = OFF');
+        try {
+          this.#transaction(() => {
+            const current = this.#db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runs'").get();
+            if (!current?.sql || current.sql.includes("'cancelled'")) return;
+            this.#db.exec(`
+              DROP TABLE IF EXISTS runs_v2;
+              ${runsTableSql('runs_v2')};
+              INSERT INTO runs_v2 (
+                request_id, team_id, member, turn, session_id, workspace,
+                accepted_seq, claim_seq, turn_end_seq, host_idle, outcome, steps, settled
+              )
+              SELECT
+                request_id, team_id, member, turn, session_id, workspace,
+                accepted_seq, claim_seq, turn_end_seq, host_idle, outcome, steps, settled
+              FROM runs;
+              DROP TABLE runs;
+              ALTER TABLE runs_v2 RENAME TO runs;
+              CREATE INDEX IF NOT EXISTS runs_session_turn ON runs (session_id, turn);
+            `);
+          });
+        } finally {
+          this.#db.exec('PRAGMA foreign_keys = ON');
+        }
+      }
       const prepare = sql => this.#db.prepare(sql);
       this.#sql = {
         run: prepare('SELECT * FROM runs WHERE team_id = ? AND member = ? AND turn = ? AND request_id = ?'),
@@ -98,10 +127,12 @@ export class RunStore {
         admitRun: prepare('INSERT INTO runs (team_id, member, turn, request_id, session_id, workspace) VALUES (?, ?, ?, ?, ?, ?)'),
         latest: prepare('SELECT * FROM runs WHERE session_id = ? ORDER BY turn DESC LIMIT 1'),
         pending: prepare('SELECT * FROM runs WHERE settled = 0 ORDER BY rowid'),
+        pendingForMember: prepare('SELECT * FROM runs WHERE team_id = ? AND member = ? AND settled = 0 ORDER BY rowid'),
         evidence: prepare('UPDATE runs SET accepted_seq = ?, claim_seq = ?, turn_end_seq = ?, host_idle = ? WHERE request_id = ?'),
         outcome: prepare('UPDATE runs SET outcome = ? WHERE request_id = ?'),
         steps: prepare('UPDATE runs SET steps = ? WHERE request_id = ?'),
         finish: prepare('UPDATE runs SET settled = 1 WHERE request_id = ? AND settled = 0'),
+        abandon: prepare('UPDATE runs SET outcome = ?, host_idle = 1, settled = 1 WHERE request_id = ? AND settled = 0'),
         journal: prepare('SELECT turn, settled, outcome, steps FROM runs WHERE session_id = ? ORDER BY turn DESC LIMIT ?'),
       };
     } catch (error) {
@@ -241,6 +272,36 @@ export class RunStore {
       this.#sql.finish.run(run.requestId);
       return {settled: true, run: {...run, settled: true, status: run.outcome.state}};
     }, {allowSettled: true});
+  }
+
+  /** Settle an interrupted, failed, or quota-blocked run without waiting for turn_end_seq. */
+  abandon(identity, {state = 'cancelled', message = 'Cancelled.'} = {}) {
+    if (!abandonStates.has(state)) throw new Error('Abandon state must be cancelled, failed, or quota.');
+    const outcome = {state, message: text(message, 'Outcome message', 6000), notify: [], waitFor: []};
+    const encoded = JSON.stringify(outcome);
+    return this.#change(identity, run => {
+      if (run.settled) return {settled: false, run};
+      this.#sql.abandon.run(encoded, run.requestId);
+      return {settled: true, run: {...run, outcome, hostIdle: true, settled: true, status: state}};
+    }, {allowSettled: true});
+  }
+
+  /** Settle all unsettled runs belonging to a team member (e.g. on cancel or dismiss recovery). */
+  abandonPendingForMember(teamId, member, {state = 'cancelled', message = 'Resolved.'} = {}) {
+    const cleanTeam = text(teamId, 'Team ID', 256);
+    const cleanMember = text(member, 'Member', 120);
+    if (!abandonStates.has(state)) throw new Error('Abandon state must be cancelled, failed, or quota.');
+    const outcome = {state, message: text(message, 'Outcome message', 6000), notify: [], waitFor: []};
+    const encoded = JSON.stringify(outcome);
+    return this.#transaction(() => {
+      const rows = this.#sql.pendingForMember.all(cleanTeam, cleanMember);
+      if (!rows.length) return [];
+      return rows.map(row => {
+        const run = toRun(row);
+        this.#sql.abandon.run(encoded, run.requestId);
+        return {...run, outcome, hostIdle: true, settled: true, status: state};
+      });
+    });
   }
 
   readJournal(sessionId, {limit = journalLimit} = {}) {

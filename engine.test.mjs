@@ -1457,3 +1457,250 @@ test('2.1.2 silent wake:false posts, Goal-mode @lead coordination, and dismiss r
   assert.equal(dismissed.members[0].recoveryRequired,undefined);
   assert.equal(dismissed.members[0].inbox.length,0);
 });
+
+test('2.2.0 parallelWriters, concurrency up to 8, and worktreeMode configuration', async t => {
+  const active = new Set();
+  let maxActive = 0;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const board = new TeamBoard(':memory:', async ({member}) => {
+    active.add(member.name);
+    maxActive = Math.max(maxActive, active.size);
+    await gate;
+    active.delete(member.name);
+    return report('Done ' + member.name);
+  });
+  t.after(() => { release(); board.close(); });
+
+  assert.throws(() => board.create({cwd: process.cwd(), task: 'Too many concurrent', concurrency: 9, members: [{name: 'a', brief: 'Go'}]}), /between 1 and 8/i);
+  assert.throws(() => board.create({cwd: process.cwd(), task: 'Bad worktreeMode', worktreeMode: 'invalid', members: [{name: 'a', brief: 'Go'}]}), /worktree mode/i);
+  assert.throws(() => board.create({cwd: process.cwd(), task: 'Bad parallelWriters', parallelWriters: 'yes', members: [{name: 'a', brief: 'Go'}]}), /parallelWriters/i);
+
+  const members = Array.from({length: 6}, (_, i) => ({name: 'w-' + i, brief: 'Write slice ' + i, writable: true}));
+  const team = board.create({cwd: process.cwd(), task: 'Parallel writers up to 6', concurrency: 6, parallelWriters: true, worktreeMode: 'local', members});
+  assert.equal(team.parallelWriters, true);
+  assert.equal(team.worktreeMode, 'local');
+  assert.equal(team.concurrency, 6);
+  await until(() => maxActive === 6);
+  assert.equal(maxActive, 6);
+  release();
+  await until(() => board.get(team.id).members.every(m => m.status === 'done'));
+});
+
+test('2.2.0 host-configurable boardWaitTimeout, status filtering, inputRequired wakeup, and compact timeout status', async t => {
+  assert.equal(engine.boardWaitTimeout(undefined), 45);
+  assert.equal(engine.boardWaitTimeout(55), 55);
+  assert.throws(() => engine.boardWaitTimeout(56), /between 1 and 55/);
+  assert.equal(engine.boardWaitTimeout(900, 900), 900);
+  assert.throws(() => engine.boardWaitTimeout(901, 900), /between 1 and 900/);
+
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const board = new TeamBoard(':memory:', async ({remember}) => {
+    await gate;
+    return report('[done] Done.');
+  }, {host: 'deepseek-harness'});
+  t.after(() => { release(); board.close(); });
+  assert.equal(board.maxWaitTimeoutSec, 900);
+
+  const team = board.create({
+    cwd: process.cwd(), task: 'Wait ergonomics', coordinator: true,
+    members: [{name: 'builder', brief: 'Very long brief text for builder'}],
+  });
+  // Wait from after initial brief (seq 2): @builder started turn 1 (status) must NOT wake waitForBoard!
+  const briefSeq = team.events.find(e => e.kind === 'brief').seq;
+  let woke = false;
+  const waiting = board.waitForBoard(team.id, {since: briefSeq, timeoutSec: 1}).then(res => { woke = true; return res; });
+  await until(() => board.get(team.id).members[0].status === 'working');
+  const timedOut = await waiting;
+  assert.equal(woke, true);
+  assert.equal(timedOut.wokeBy, 'timeout');
+  assert.deepEqual(timedOut.status.events, []);
+  assert.equal(Object.hasOwn(timedOut.status.members[0], 'brief'), false);
+
+  // inputRequired wakes waitForBoard immediately with wokeBy: 'input'.
+  const inputWait = board.waitForBoard(team.id, {since: timedOut.head, mentionsOnly: true, timeoutSec: 60});
+  const current = board.get(team.id);
+  current.members[0].inputRequired = true;
+  board.save(current);
+  const inputWoke = await inputWait;
+  assert.equal(inputWoke.wokeBy, 'input');
+
+  // Calling waitForBoard when inputRequired is already true wakes immediately too.
+  const immediateInput = await board.waitForBoard(team.id, {since: timedOut.head, timeoutSec: 60});
+  assert.equal(immediateInput.wokeBy, 'input');
+  release();
+});
+
+test('2.2.0 threads optional goal, spec.thread auto-attach, replaces/helper thread updates, addMember group waitFor, seqs lookup, and retireMember fixes', async t => {
+  const board = new TeamBoard(':memory:', async () => new Promise(() => {}));
+  t.after(() => board.close());
+
+  const team = board.create({
+    cwd: process.cwd(), task: 'Thread ergonomics',
+    threads: [{id: 'core', title: 'Core Engine', members: ['lead']}],
+    members: [
+      {name: 'lead', brief: 'Lead'},
+      {name: 'api', brief: 'API', thread: 'core engine'},
+      {name: 'ui', brief: 'UI', thread: 'Dashboard UI'},
+      {name: 'shards', brief: 'Shard base', tasks: ['A', 'B'], thread: 'Sharded Work'},
+    ],
+  });
+  assert.deepEqual(team.threads, [
+    {id: 'core', title: 'Core Engine', goal: '', members: ['lead', 'api']},
+    {id: 'dashboard-ui', title: 'Dashboard UI', goal: '', members: ['ui']},
+    {id: 'sharded-work', title: 'Sharded Work', goal: '', members: ['shards-1', 'shards-2']},
+  ]);
+
+  // Simulate lead working so it can add a helper and inherit thread 'core'.
+  const workingTeam = board.get(team.id);
+  workingTeam.members[0].status = 'working';
+  workingTeam.members[0].lastTurn = 1;
+  board.save(workingTeam);
+
+  const afterHelper = board.addMember(team.id, {name: 'helper', brief: 'Help lead', waitFor: ['shards']}, {actor: 'lead'});
+  assert.deepEqual(afterHelper.members.at(-1).waitFor, ['shards-1', 'shards-2']);
+  assert.ok(afterHelper.threads[0].members.includes('helper'));
+
+  // Replacing 'ui' updates threads membership automatically.
+  const afterReplace = board.addMember(team.id, {name: 'ui-v2', brief: 'New UI'}, {replaces: 'ui'});
+  assert.deepEqual(afterReplace.threads.find(x => x.id === 'dashboard-ui').members, ['ui-v2']);
+
+  // readPosts({seqs}) validates bounds, preserves channel visibility, and returns matching posts.
+  board.manageChannel(team.id, {op: 'create', channel: 'secret'});
+  const secretTeam = board.post(team.id, 'Secret post', 'secret');
+  const mainPost = board.post(team.id, 'Public post', 'main').events.at(-1);
+  const secretSeq = secretTeam.events.at(-1).seq;
+  assert.throws(() => board.readPosts(team.id, {seqs: []}), /1 to 20/);
+  assert.throws(() => board.readPosts(team.id, {seqs: [0]}), /Post seq/);
+  assert.deepEqual(board.readPosts(team.id, {seqs: [secretSeq, mainPost.seq]}).posts.map(p => p.seq), [secretSeq, mainPost.seq]);
+  assert.deepEqual(board.readPosts(team.id, {actor: 'lead', seqs: [secretSeq, mainPost.seq]}).posts.map(p => p.seq), [mainPost.seq]);
+
+  // retireMember handles intra-group dependencies without self-block, and dropDependency unblocks downstream waiters (owner/coordinator only).
+  const grpTeam = board.create({
+    cwd: process.cwd(), task: 'Retire fixes',
+    members: [
+      {name: 'grp', brief: 'Base', tasks: ['Part 1', 'Part 2']},
+      {name: 'solo', brief: 'Solo'},
+      {name: 'downstream', brief: 'Wait', waitFor: ['solo']},
+    ],
+  });
+  board.pause(grpTeam.id);
+  const s = board.get(grpTeam.id);
+  s.members.find(m => m.name === 'grp-2').waitFor = ['grp-1'];
+  board.save(s);
+  const retiredGrp = board.retireMember(grpTeam.id, 'grp');
+  assert.ok(retiredGrp.members.filter(m => m.group === 'grp').every(m => m.status === 'retired'));
+
+  // Worker cannot dropDependency; owner can dropDependency and unblock downstream.
+  const workState = board.get(grpTeam.id);
+  workState.members.find(m => m.name === 'solo').status = 'working';
+  workState.members.find(m => m.name === 'solo').lastTurn = 1;
+  board.save(workState);
+  assert.throws(() => board.retireMember(grpTeam.id, 'solo', {actor: 'solo', dropDependency: true}), /coordinator/i);
+  const dropped = board.retireMember(grpTeam.id, 'solo', {dropDependency: true});
+  const down = dropped.members.find(m => m.name === 'downstream');
+  assert.deepEqual(down.waitFor, []);
+  assert.equal(down.status, 'queued');
+});
+
+test('2.2.0 latent bug sweep: sharded brief length, retireAfterTurn+recovery, remember race, mention parser, failed broadcast guard, DSH fork+worktree', async t => {
+  // 1. expandMember allows base brief <= 4000 + each task <= 2000 (rejects task > 2000).
+  const board = new TeamBoard(':memory:', async () => new Promise(() => {}));
+  t.after(() => board.close());
+  const sharded = board.create({
+    cwd: process.cwd(), task: 'Sharded length',
+    members: [{name: 'sh', brief: 'b'.repeat(4000), tasks: ['s'.repeat(2000), 't'.repeat(2000)]}],
+  });
+  assert.equal(sharded.members[0].brief.length, 4000 + '\n\nAssigned slice: '.length + 2000);
+  assert.throws(() => board.create({
+    cwd: process.cwd(), task: 'Too long slice',
+    members: [{name: 'sh2', brief: 'b'.repeat(10), tasks: ['s'.repeat(2001), 't'.repeat(10)]}],
+  }), /Assigned slice.*2000/);
+
+  // 2. retireAfterTurn + recoveryRequired deadlock resolves cleanly.
+  const rec = board.create({cwd: process.cwd(), task: 'Retire+recovery', members: [{name: 'worker', brief: 'Go'}]});
+  await until(() => board.get(rec.id).members[0].status === 'working');
+  board.retireMember(rec.id, 'worker');
+  const recState = board.get(rec.id);
+  recState.members[0].status = 'failed';
+  recState.members[0].recoveryRequired = true;
+  recState.members[0].pendingRun = {turn: 1, requestId: 'req-rec'};
+  board.save(recState);
+  const dismissed = board.resolveRecovery(rec.id, 'worker', {action: 'dismiss'});
+  assert.equal(dismissed.members[0].status, 'retired');
+  assert.equal(dismissed.members[0].recoveryRequired, undefined);
+  assert.equal(dismissed.members[0].retireAfterTurn, undefined);
+
+  // 3. @mention parser ignores fenced code blocks, inline code, emails, and @scope/pkg.
+  const mTeam = board.create({
+    cwd: process.cwd(), task: 'Mention parser',
+    members: [
+      {name: 'builder', brief: 'Build', group: 'dev'},
+      {name: 'qa', brief: 'QA'},
+    ],
+  });
+  board.pause(mTeam.id);
+  const noisy = board.post(mTeam.id, [
+    'Ignore ` @all ` and ``@builder``.',
+    '```js',
+    'const s = "@all @qa";',
+    '```',
+    'Email a.b@builder.dev and foo@qa.com and package @qa/core or @builder/pkg.',
+    'Only ping @qa.',
+  ].join('\n'));
+  assert.deepEqual(noisy.events.at(-1).targets, ['qa']);
+  assert.equal(noisy.events.at(-1).broadcast, undefined);
+
+  // 4. status === 'failed' is protected from unaddressed @all/@group/@#channel broadcasts.
+  const fTeam = board.get(mTeam.id);
+  fTeam.members[0].status = 'failed';
+  fTeam.members[1].status = 'done';
+  board.save(fTeam);
+  const afterBroadcast = board.post(mTeam.id, '@all @dev Broadcast notice');
+  assert.equal(afterBroadcast.members[0].status, 'failed');
+  assert.equal(afterBroadcast.members[0].inbox.length, 1);
+  const afterDirect = board.post(mTeam.id, '@builder Direct retry');
+  assert.equal(afterDirect.members[0].status, 'queued');
+
+  // 5. DSH rejects fork + worktree: true upfront at admission.
+  const dshBoard = new TeamBoard(':memory:', () => new Promise(() => {}), {host: 'deepseek-harness'});
+  t.after(() => dshBoard.close());
+  assert.throws(() => dshBoard.create({
+    cwd: process.cwd(), task: 'DSH fork+worktree',
+    members: [{name: 'w', brief: 'Go', fork: 'coordinator', worktree: true}],
+  }, {root: process.cwd(), directory: process.cwd(), commit: 'abc', offset: ''}, {parentSessionId: 'p1'}), /fork.*worktree|worktree.*fork/i);
+  const cleanDsh = dshBoard.create({cwd: process.cwd(), task: 'DSH addMember check', members: [{name: 'base', brief: 'Go'}]},
+    {root: process.cwd(), directory: process.cwd(), commit: 'abc', offset: ''}, {parentSessionId: 'p1'});
+  assert.throws(() => dshBoard.addMember(cleanDsh.id, {name: 'w2', brief: 'Go', worktree: true}, {fork: 'coordinator'}), /fork.*worktree|worktree.*fork/i);
+});
+
+test('2.2.0 remember() ignores stale updates from non-active turns', async t => {
+  let rememberTurn1, releaseTurn1;
+  let turn = 0;
+  const board = new TeamBoard(':memory:', async ({remember}) => {
+    turn++;
+    if (turn === 1) {
+      rememberTurn1 = remember;
+      return new Promise((_, reject) => { releaseTurn1 = reject; });
+    }
+    remember({threadId: 'fresh-turn-2'});
+    return report('Turn 2 done.');
+  });
+  t.after(() => board.close());
+
+  const team = board.create({cwd: process.cwd(), task: 'Remember race', members: [{name: 'builder', brief: 'Work'}]});
+  await until(() => Boolean(rememberTurn1));
+  const cancelP = board.cancelTurn(team.id, 'builder');
+  releaseTurn1(Error('aborted'));
+  await cancelP;
+  // Calling stale turn-1 remember after turn 1 settled must be a no-op.
+  rememberTurn1({threadId: 'stale-turn-1'});
+  assert.equal(board.get(team.id).members[0].threadId, null);
+
+  board.post(team.id, '@builder Run turn 2');
+  await until(() => board.get(team.id).members[0].status === 'done');
+  assert.equal(board.get(team.id).members[0].threadId, 'fresh-turn-2');
+  rememberTurn1({threadId: 'stale-turn-1-after-turn-2'});
+  assert.equal(board.get(team.id).members[0].threadId, 'fresh-turn-2');
+});

@@ -56,8 +56,8 @@ export function childEnvironment(base = process.env) {
   return env;
 }
 
-export function boardWaitTimeout(value) {
-  return integer(value??45,1,55,'Wait timeout');
+export function boardWaitTimeout(value, max = 55) {
+  return integer(value ?? 45, 1, max, 'Wait timeout');
 }
 
 function reasoningEffort(value) {
@@ -120,10 +120,39 @@ function forkTarget(value) {
   return target;
 }
 
-function addressesIn(body,names) {
-  const mentions = [...body.matchAll(/(?:^|[^a-z0-9_])@(#?[a-z][a-z0-9_-]*)/gi)].map(match=>match[1].toLowerCase());
+function addressesIn(body, names) {
+  const scrubbed = String(body ?? '')
+    .replace(/(`{3,})[\s\S]*?\1/g, ' ')
+    .replace(/(`+)[^\r\n]*?\1/g, ' ');
+  const mentions = [...scrubbed.matchAll(/(?:^|(?<=[^a-z0-9_./+-]))@(#?[a-z][a-z0-9_-]*)(?![a-z0-9_-]|\/[a-z0-9_.-]|\.[a-z0-9_])/gi)]
+    .map(match => match[1].toLowerCase());
   const listed = (names ?? []).map(normalizeTarget).filter(Boolean);
-  return new Set([...listed,...mentions]);
+  return new Set([...listed, ...mentions]);
+}
+
+function assignMemberThread(threads, memberNames, rawThread) {
+  const title = optionalText(rawThread, 'Member thread', 80);
+  if (!title) return;
+  const needle = title.toLowerCase();
+  let thread = threads.find(entry => entry.id.toLowerCase() === needle || entry.title.toLowerCase() === needle);
+  if (!thread) {
+    if (threads.length >= 8) return;
+    let base = needle.replace(/[^a-z0-9_-]+/g, '-').replace(/^[^a-z]+/, '').replace(/[-_]+$/, '');
+    if (!base) base = 'thread';
+    base = base.slice(0, 40);
+    const used = new Set(threads.map(entry => entry.id));
+    let id = base;
+    let suffix = 2;
+    while (used.has(id)) {
+      const tag = '-' + suffix++;
+      id = base.slice(0, 40 - tag.length) + tag;
+    }
+    thread = {id, title, goal: '', members: []};
+    threads.push(thread);
+  }
+  for (const name of memberNames) {
+    if (!thread.members.includes(name)) thread.members.push(name);
+  }
 }
 
 function normalizeThreads(threads, members) {
@@ -151,7 +180,7 @@ function normalizeThreads(threads, members) {
     return {
       id,
       title: text(entry.title, 'Thread title', 80),
-      goal: text(entry.goal, 'Thread goal', 240),
+      goal: optionalText(entry.goal, 'Thread goal', 240) ?? '',
       members: validMembers,
     };
   });
@@ -172,12 +201,12 @@ function expandMember(spec, replaces) {
   if (spec.tasks !== undefined) {
     if (!Array.isArray(spec.tasks)) throw Error('Shard tasks must be an array.');
     integer(spec.tasks.length,2,8,'Shard tasks');
-    notes=spec.tasks.map(task=>'\n\nAssigned slice: '+text(task,'Assigned slice',4000));
+    notes=spec.tasks.map(task=>'\n\nAssigned slice: '+text(task,'Assigned slice',2000));
   } else notes=Array(integer(spec.n,2,8,'Shard count')).fill('');
-  return notes.map((note,index)=>newMember({...spec,name:name+'-'+(index+1),group:name,brief:brief+note}));
+  return notes.map((note,index)=>newMember({...spec,name:name+'-'+(index+1),group:name,brief:brief+note}, 6018));
 }
 
-function newMember(spec) {
+function newMember(spec, maxBrief = 4000) {
   if (!spec || typeof spec !== 'object') throw Error('Member details are required.');
   const waitFor = spec.waitFor ?? [];
   if (!Array.isArray(waitFor)) throw Error('waitFor must be a list of member names.');
@@ -185,7 +214,7 @@ function newMember(spec) {
   return {
     name: memberLabel(spec.name, 'Member name'),
     group: spec.group == null ? undefined : memberLabel(spec.group, 'Group name'),
-    brief: text(spec.brief, 'Member brief', 4000),
+    brief: text(spec.brief, 'Member brief', maxBrief),
     ...(taskLabel ? {taskLabel} : {}),
     model: spec.model == null ? undefined : text(spec.model, 'Model', 100),
     effort: reasoningEffort(spec.effort),
@@ -378,6 +407,8 @@ export function readSafeScreenshot(board, dataDirectory, teamId, seq, index) {
 function restore(team) {
   numberPosts(team);
   team.host ??= 'codex';
+  team.parallelWriters = team.parallelWriters === true;
+  team.worktreeMode = team.worktreeMode === 'local' ? 'local' : 'external';
   team.channels ??= [{...main}];
   for (const member of team.members) {
     member.channels ??= [];
@@ -438,7 +469,23 @@ function hasCoordinatorSummary(team, coordinator, workers) {
   return lastSummarySeq >= lastWorkerSeq;
 }
 
+const precomputedStatus = new WeakMap();
+
+function compactTimeoutStatus(team) {
+  const phase = teamPhase(team);
+  const attention = teamAttention(team);
+  const compact = {
+    ...team,
+    events: [],
+    members: team.members.map(({brief, ...rest}) => rest),
+  };
+  precomputedStatus.set(compact, {phase, attention});
+  return compact;
+}
+
 export function teamPhase(team) {
+  const cached = precomputedStatus.get(team);
+  if (cached) return cached.phase;
   if (team.paused) return 'paused';
   const members = team.members.filter(member => member.status !== 'retired');
   if (!members.length && team.members.length) return 'retired';
@@ -455,6 +502,46 @@ export function teamPhase(team) {
   if (team.turns >= team.turnLimit) return 'budget';
   if (members.some(member => member.status === 'queued') || (summaryPending && coordinatorCanSummarize)) return 'queued';
   return 'stalled';
+}
+
+export function teamAttention(team) {
+  const cached = precomputedStatus.get(team);
+  if (cached) return cached.attention;
+  const phase = teamPhase(team);
+  const issues = stallIssues(team);
+  const blockers = issues.filter(issue => ['quota', 'failed', 'cycle'].includes(issue.kind) ||
+    (issue.kind === 'dependency' && !team.members.some(member => member.name === issue.member && ['working', 'queued'].includes(member.status))));
+  const recovery = team.members.filter(m => m.recoveryRequired).map(m => ({
+    kind: 'recovery',
+    member: m.name,
+    text: '@' + m.name + ' outcome unconfirmed. Inspect the owned session before continuing.',
+  }));
+  const input = team.members.filter(m => m.inputRequired).map(m => ({
+    kind: 'input',
+    member: m.name,
+    text: '@' + m.name + ' needs your permission or input in its owned DSH session.',
+  }));
+  return [...input, ...recovery, ...(phase === 'stalled' ? issues : phase === 'budget'
+    ? [{kind: 'budget', text: 'Turn limit reached (' + team.turns + '/' + team.turnLimit + '). Add 8 turns to continue.'}, ...blockers]
+    : blockers)];
+}
+
+export function memberBlockedReason(team, member) {
+  if (!member || member.status === 'working' || member.status === 'done' || member.status === 'retired') {
+    return undefined;
+  }
+  if (member.recoveryRequired) return 'recovery-required';
+  if ((member.status === 'waiting' || member.status === 'queued') && pendingWaitFor(team, member).length > 0) {
+    return 'waiting-dependencies';
+  }
+  if (member.status !== 'queued') return undefined;
+  const active = (team.members ?? []).filter(entry => entry.status === 'working');
+  const sharedWriterActive = team.parallelWriters !== true && active.some(entry => entry.writable && !entry.worktree);
+  if (team.parallelWriters !== true && member.writable && !member.worktree && sharedWriterActive) {
+    return 'shared-writer-active';
+  }
+  if (active.length >= (team.concurrency ?? 2)) return 'concurrency-limit';
+  return undefined;
 }
 
 // Board diagnostics are derived from saved facts, never from another model turn.
@@ -563,11 +650,12 @@ export function stallIssues(team) {
 }
 
 export class TeamBoard {
-  constructor(filename, runTurn, {host = 'codex', recovery = host === 'codex' ? 'legacy' : 'preserve'} = {}) {
+  constructor(filename, runTurn, {host = 'codex', recovery = host === 'codex' ? 'legacy' : 'preserve', maxWaitTimeoutSec} = {}) {
     if (!['codex', 'deepseek-harness'].includes(host)) throw Error('Unrecognized worker host.');
     if (!['legacy', 'preserve'].includes(recovery)) throw Error('Unrecognized recovery policy.');
     this.host = host;
     this.recovery = recovery;
+    this.maxWaitTimeoutSec = integer(maxWaitTimeoutSec ?? (host === 'deepseek-harness' ? 900 : 55), 1, 3600, 'Max wait timeout');
     this.db = new DatabaseSync(filename);
     this.db.exec(`
       PRAGMA journal_mode = WAL;
@@ -581,11 +669,13 @@ export class TeamBoard {
     this.readPost = this.db.prepare('SELECT value FROM posts WHERE team_id = ? AND seq = ?');
     this.writePost = this.db.prepare('INSERT INTO posts VALUES (?, ?, ?) ON CONFLICT(team_id,seq) DO NOTHING');
     this.bounds = this.db.prepare('SELECT coalesce(min(seq),0) AS earliest, coalesce(max(seq),0) AS head FROM posts WHERE team_id = ?');
-    const filter = " AND (? IS NULL OR COALESCE(json_extract(posts.value,'$.channel'),'main') IN (SELECT value FROM json_each(?)))" +
+    const channelFilter = " AND (? IS NULL OR COALESCE(json_extract(posts.value,'$.channel'),'main') IN (SELECT value FROM json_each(?)))";
+    const filter = channelFilter +
       " AND (?=0 OR json_extract(posts.value,'$.coordinatorMention')=1 OR json_extract(posts.value,'$.broadcast')=1" +
       " OR EXISTS(SELECT 1 FROM json_each(posts.value,'$.targets') WHERE value='coordinator'))";
     this.postPage = this.db.prepare('SELECT value FROM posts WHERE team_id = ? AND seq > ?'+filter+' ORDER BY seq LIMIT ?');
     this.postTail = this.db.prepare('SELECT value FROM posts WHERE team_id = ?'+filter+' ORDER BY seq DESC LIMIT ?');
+    this.postBySeqs = this.db.prepare('SELECT value FROM posts WHERE team_id = ? AND seq IN (SELECT value FROM json_each(?))'+channelFilter+' ORDER BY seq');
     this.runTurn = runTurn;
     this.pending = new Set();
     this.removingWorktrees = new Set();
@@ -639,20 +729,33 @@ export class TeamBoard {
   create(input, worktreeSource, {parentSessionId} = {}) {
     if (input.host != null && input.host !== this.host) throw Error('A team cannot change its worker host.');
     if (Object.hasOwn(input, 'parentSessionId')) throw Error('Parent session must be supplied by the host.');
+    if (input.parallelWriters !== undefined && typeof input.parallelWriters !== 'boolean') {
+      throw Error('parallelWriters must be a boolean.');
+    }
+    const worktreeMode = input.worktreeMode ?? 'external';
+    if (worktreeMode !== 'external' && worktreeMode !== 'local') {
+      throw Error('Worktree mode must be external or local.');
+    }
     const parent = parentSessionId == null ? undefined : sessionId(parentSessionId, 'Parent session');
     const cwd = realpathSync(text(input.cwd, 'Workspace', 1024));
     if (!statSync(cwd).isDirectory()) throw Error('Workspace must be a directory.');
     if (!Array.isArray(input.members) || input.members.length < 1 || input.members.length > workerLimit) {
       throw Error('Choose between 1 and '+workerLimit+' workers.');
     }
+    const memberThreads = [];
     const members = input.members.flatMap(spec=>{
       const added = expandMember(spec);
+      const requestedThread = optionalText(spec?.thread, 'Member thread', 80);
       const source = forkTarget(spec?.fork);
       if (source) {
         if (source !== 'coordinator') throw Error('Initial members can only fork from "coordinator".');
         if (!parent) throw Error('Forking from the coordinator requires an active parent session.');
+        if (this.host === 'deepseek-harness' && added.some(entry => entry.worktree)) {
+          throw Error('Cannot combine fork with worktree: true on deepseek-harness because native history forks cannot change workspace.');
+        }
         for (const entry of added) entry.forkSource = 'coordinator';
       }
+      if (requestedThread) memberThreads.push({thread: requestedThread, names: added.map(entry => entry.name)});
       return added;
     });
     if (members.length > workerLimit) throw Error('A team can have up to '+workerLimit+' active workers.');
@@ -662,7 +765,8 @@ export class TeamBoard {
 
     const task = text(input.task, 'Task', 8000);
     const goalLine = optionalText(input.goalLine, 'Goal line', 140);
-    const threads = normalizeThreads(input.threads, members);
+    const threads = normalizeThreads(input.threads, members) ?? [];
+    for (const item of memberThreads) assignMemberThread(threads, item.names, item.thread);
     const team = {
       id: randomUUID(), host: this.host, cwd, task, title: text(input.title ?? task.slice(0, 95), 'Title', 95),
       ...(goalLine ? {goalLine} : {}),
@@ -671,8 +775,10 @@ export class TeamBoard {
       effort: reasoningEffort(input.effort),
       ...(input.fallbackModel ? {fallbackModel: text(input.fallbackModel, 'Fallback model', 100)} : {}),
       ...(input.fallbackEffort !== undefined ? {fallbackEffort: input.fallbackEffort === null ? null : reasoningEffort(input.fallbackEffort)} : {}),
-      ...(threads?.length ? {threads} : {}),
-      concurrency: integer(input.concurrency ?? 2, 1, 4, 'Concurrency'),
+      ...(threads.length ? {threads} : {}),
+      parallelWriters: input.parallelWriters === true,
+      worktreeMode,
+      concurrency: integer(input.concurrency ?? 2, 1, 8, 'Concurrency'),
       turns: 0, turnLimit: integer(input.turnLimit ?? 24, 1, 100, 'Turn limit'),
       paused: false, members, channels:[{...main}], events: [], worktreeSource,
     };
@@ -733,6 +839,7 @@ export class TeamBoard {
     if (previous?.status === 'working') throw Error('Wait for @' + replaces + ' to finish its current turn before replacing it.');
     const added = expandMember(spec,replaces);
     const member = added[0];
+    const requestedThread = optionalText(spec.thread, 'Member thread', 80);
     const channels = spec.channels==null ? (peer?.channels??[]) : subscriptions(team,spec.channels);
     if (peer) {
       if (peer.role !== 'coordinator' && !peer.writable && member.writable) {
@@ -747,6 +854,9 @@ export class TeamBoard {
     }
     const requestedFork = topFork ?? specFork;
     if (requestedFork) {
+      if (this.host === 'deepseek-harness' && added.some(entry => entry.worktree)) {
+        throw Error('Cannot combine fork with worktree: true on deepseek-harness because native history forks cannot change workspace.');
+      }
       if (requestedFork === 'coordinator') {
         if (peer && peer.role !== 'coordinator') {
           throw Error('Only the coordinator can fork from the coordinator conversation.');
@@ -775,12 +885,13 @@ export class TeamBoard {
     const live = team.members.filter(activeMember);
     const workers = live.filter(entry => isWorker(entry) && entry !== previous);
     if (workers.length+added.length > workerLimit) throw Error('A team can have up to '+workerLimit+' active workers.');
-    const eligible = new Set(live.filter(entry => entry !== previous).map(entry => entry.name));
-    if (member.waitFor.some(name => !eligible.has(name))) throw Error('New dependencies must refer to active teammates.');
+    const activeTargets = live.filter(entry => entry !== previous);
+    const eligible = new Set(activeTargets.flatMap(entry => entry.group ? [entry.name, entry.group] : [entry.name]));
+    if (added.some(entry => entry.waitFor.some(name => !eligible.has(name)))) throw Error('New dependencies must refer to active teammates.');
     team.members.push(...added);
     for (const entry of added) entry.channels=[...channels];
     validateRoster(team.members);
-    team.worktreeSource ??= worktreeSource;
+    if (worktreeSource) team.worktreeSource = worktreeSource;
     if (member.worktree && !team.worktreeSource) throw Error('A Git workspace is required for worktrees.');
     if (previous) {
       for (const waiting of live.filter(entry => pendingDependency(entry, previous))) {
@@ -792,6 +903,29 @@ export class TeamBoard {
         (previous.workspace ? ' Previous worktree: ' + previous.workspace.cwd : ''), [member.name]);
       enqueue(member, handoff);
     }
+    if (previous && team.threads?.length) {
+      for (const thread of team.threads) {
+        if (!thread.members.includes(replaces)) continue;
+        thread.members = requestedThread
+          ? thread.members.filter(entry => entry !== replaces)
+          : [...new Set(thread.members.map(entry => entry === replaces ? member.name : entry))];
+      }
+    }
+    if (requestedThread) {
+      team.threads ??= [];
+      assignMemberThread(team.threads, added.map(entry => entry.name), requestedThread);
+      if (!team.threads.length) delete team.threads;
+    } else if (peer && isWorker(peer) && team.threads?.length) {
+      const placed = added.every(entry => team.threads.some(thread => thread.members.includes(entry.name)));
+      if (!placed) {
+        const inviterThread = team.threads.find(thread => thread.members.includes(peer.name));
+        if (inviterThread) {
+          for (const entry of added) {
+            if (!inviterThread.members.includes(entry.name)) inviterThread.members.push(entry.name);
+          }
+        }
+      }
+    }
     validateDependencies(team.members, added);
     for (const entry of added) {
       this.record(team, actor ?? 'coordinator', entry.brief, [entry.name], 'brief', postingChannel(team,entry));
@@ -802,17 +936,36 @@ export class TeamBoard {
     return team;
   }
 
-  retireMember(id, name, {actor} = {}) {
+  retireMember(id, name, {actor, dropDependency = false} = {}) {
+    if (dropDependency !== undefined && typeof dropDependency !== 'boolean') {
+      throw Error('dropDependency must be a boolean.');
+    }
     const team = this.get(id);
     const live = team.members.filter(activeMember);
     const targets = live.filter(member=>member.name===name||member.group===name);
     if (!targets.length) throw Error('Active member or group not found: @'+name);
     const peer = actor && this.peerMember(team, actor);
     for (const target of targets) authorizeMemberChange(peer,target);
-    const waiting = live.filter(entry=>targets.some(target=>pendingDependency(entry,target)));
+    if (dropDependency === true && peer && peer.role !== 'coordinator') {
+      throw Error('Only the user or coordinator can drop downstream dependencies when retiring.');
+    }
+    const waiting = live.filter(entry => !targets.includes(entry) && targets.some(target => pendingDependency(entry, target)));
     if (waiting.length) {
-      throw Error(waiting.map(entry => '@' + entry.name).join(', ') +
-        ' still need a report. Wait for the report or add a replacement.');
+      if (dropDependency !== true) {
+        throw Error(waiting.map(entry => '@' + entry.name).join(', ') +
+          ' still need a report. Wait for the report or add a replacement.');
+      }
+      const targetNames = new Set(targets.map(target => target.name));
+      for (const entry of waiting) {
+        entry.waitFor = entry.waitFor.filter(dep => !targetNames.has(dep));
+        if (entry.waitAfter) {
+          for (const targetName of targetNames) delete entry.waitAfter[targetName];
+        }
+        if (entry.status === 'waiting' && !entry.waitFor.length) {
+          entry.status = 'queued';
+          enqueue(entry, this.record(team, actor ?? 'coordinator', 'Removed retired dependencies: ' + [...targetNames].join(', '), [entry.name]));
+        }
+      }
     }
     for (const member of targets) {
       if (member.status==='working') member.retireAfterTurn=true;
@@ -820,6 +973,7 @@ export class TeamBoard {
       this.record(team,actor??'coordinator','@'+member.name+
         (member.retireAfterTurn?' will retire after current turn.':' retired from the team.'),[member.name]);
     }
+    this.unblockDependencies(team);
     this.save(team);
     this.schedule(id);
     return team;
@@ -888,7 +1042,9 @@ export class TeamBoard {
   resolveRecovery(id, name, {action = 'dismiss'} = {}) {
     if (!['dismiss', 'retry'].includes(action)) throw Error('Choose dismiss or retry to resolve an unconfirmed outcome.');
     const team = this.get(id);
-    const member = this.liveMember(team, name);
+    const member = team.members.find(entry => entry.name === name &&
+      (activeMember(entry) || (entry.status !== 'retired' && entry.recoveryRequired === true)));
+    if (!member) throw Error('Active member not found: @' + name);
     if (!member.recoveryRequired && !member.pendingRun) {
       throw Error('@' + name + ' has no unconfirmed outcome to resolve.');
     }
@@ -903,12 +1059,18 @@ export class TeamBoard {
     delete member.declaredOutcome;
     delete member.inputRequired;
     delete team.monitorPhase;
-    member.status = action === 'retry' ? 'queued' : (member.completed ?? 0) > 0 ? 'done' : 'failed';
-    const note = action === 'retry'
-      ? 'Resolved unconfirmed outcome for @' + name + ' and queued a fresh retry.'
-      : member.status === 'done'
-        ? 'Dismissed unconfirmed outcome for @' + name + ' and restored completed state.'
-        : 'Dismissed unconfirmed outcome for @' + name + '. Mention @' + name + ' when ready to continue.';
+    let note;
+    if (action === 'dismiss' && member.retireAfterTurn) {
+      retire(member);
+      note = 'Dismissed unconfirmed outcome for @' + name + ' and finalized pending retirement.';
+    } else {
+      member.status = action === 'retry' ? 'queued' : (member.completed ?? 0) > 0 ? 'done' : 'failed';
+      note = action === 'retry'
+        ? 'Resolved unconfirmed outcome for @' + name + ' and queued a fresh retry.'
+        : member.status === 'done'
+          ? 'Dismissed unconfirmed outcome for @' + name + ' and restored completed state.'
+          : 'Dismissed unconfirmed outcome for @' + name + '. Mention @' + name + ' when ready to continue.';
+    }
     this.record(team, 'system', note, [name]);
     this.save(team);
     this.schedule(id);
@@ -994,7 +1156,25 @@ export class TeamBoard {
     }
   }
 
-  readPosts(id, {after, limit = 10, channel, actor, mentionsOnly = false} = {}) {
+  readPosts(id, {after, limit = 10, channel, actor, mentionsOnly = false, seqs} = {}) {
+    if (seqs !== undefined) {
+      if (!Array.isArray(seqs) || seqs.length < 1 || seqs.length > 20) {
+        throw Error('Post seqs must be a list of 1 to 20 post numbers.');
+      }
+      const uniqueSeqs = [...new Set(seqs.map(seq => integer(seq, 1, Number.MAX_SAFE_INTEGER, 'Post seq')))];
+      const team = this.get(id);
+      const selected = channel === '*' ? null : channel != null && channel !== '' ? [channelName(channel)] :
+        actor ? visibleChannels(this.peerMember(team, actor, false)) : null;
+      const filter = selected ? JSON.stringify(selected) : null;
+      const {earliest, head} = this.bounds.get(id);
+      const rows = this.postBySeqs.all(id, JSON.stringify(uniqueSeqs), filter, filter);
+      const posts = rows.map(row => {
+        const post = JSON.parse(row.value);
+        post.channel ??= 'main';
+        return post;
+      });
+      return {posts, head, earliest, hasMore: false};
+    }
     integer(limit, 1, 20, 'Post limit');
     return this.readHistory(id,{after,limit,channel,actor,mentionsOnly});
   }
@@ -1026,17 +1206,24 @@ export class TeamBoard {
   async waitForBoard(id, {since,mentionsOnly=false,channel,timeoutSec} = {}, signal) {
     signal?.throwIfAborted();
     const initial=this.get(id);
-    const duration=boardWaitTimeout(timeoutSec)*1000;
+    const duration=boardWaitTimeout(timeoutSec, this.maxWaitTimeoutSec)*1000;
     const after=since??this.bounds.get(id).head;
-    const page=()=>this.readHistory(id,{after,channel,mentionsOnly,limit:200});
-    const result=(wokeBy,data,status)=>({wokeBy,posts:data.posts,head:data.head,phase:teamPhase(status),status,
+    const page=()=>{
+      const res=this.readHistory(id,{after,channel,mentionsOnly,limit:200});
+      return {...res,posts:res.posts.filter(post=>post.kind!=='status')};
+    };
+    const hasInput=status=>status.members.some(member=>member.status!=='retired'&&member.inputRequired===true);
+    const result=(wokeBy,data,status)=>({wokeBy,posts:data.posts,head:data.head,phase:teamPhase(status),
+      status:wokeBy==='timeout'?compactTimeoutStatus(status):status,
       ...(data.hasMore?{hasMore:true}:{})});
     const first=page();
     if (first.posts.length) return result('post',first,initial);
     const initialPhase=teamPhase(initial);
     if (wakePhases.has(initialPhase)) return result('phase',first,initial);
+    if (hasInput(initial)) return result('input',first,initial);
     return new Promise((resolve,reject)=>{
       let phase=initialPhase;
+      let hadInput=false;
       const finish=(error,value)=>{
         clearTimeout(timer);
         unsubscribe();
@@ -1050,9 +1237,12 @@ export class TeamBoard {
         const next=teamPhase(status);
         const changed=next!==phase;
         phase=next;
+        const needsInput=hasInput(status);
         const data=page();
         if (changed&&wakePhases.has(next)) finish(null,result('phase',data,status));
+        else if (needsInput&&!hadInput) finish(null,result('input',data,status));
         else if (data.posts.length) finish(null,result('post',data,status));
+        hadInput=needsInput;
       });
       const timer=setTimeout(()=>finish(null,result('timeout',page(),this.get(id))),duration);
       this.signals.once('close',closed);
@@ -1135,7 +1325,7 @@ export class TeamBoard {
   wakeForMessage(member, addressed) {
     if (member.recoveryRequired) return;
     if (member.status === 'working' || (member.waitFor.length && !addressed)) return;
-    if ((member.status === 'quota' || !isWorker(member)) && !addressed) return;
+    if ((['quota', 'failed'].includes(member.status) || !isWorker(member)) && !addressed) return;
     member.waitFor = [];
     member.status = 'queued';
   }
@@ -1214,7 +1404,7 @@ export class TeamBoard {
     if (this.queueCoordinator(team)) this.save(team);
     const active = team.members.filter(m => m.status === 'working');
     if (active.length >= team.concurrency) return;
-    const sharedWriterActive = active.some(member => member.writable && !member.worktree);
+    const sharedWriterActive = team.parallelWriters !== true && active.some(member => member.writable && !member.worktree);
     const member = team.members.filter(m => m.status === 'queued' && !m.recoveryRequired && (!m.writable || m.worktree || !sharedWriterActive))
       .sort((a, b) => (a.lastTurn ?? 0) - (b.lastTurn ?? 0))[0];
     if (!member) {
@@ -1259,6 +1449,7 @@ export class TeamBoard {
       if (this.closed) return;
       const fresh = this.get(id);
       const current = fresh.members.find(m => m.name === member.name);
+      if (!current || current.lastTurn !== request.lastTurn || current.lastSettledTurn === request.lastTurn) return;
       const patch = typeof details === 'string' ? {threadId: details} : details ? {...details} : null;
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw Error('Invalid member update.');
       if (patch.executionMode !== undefined && patch.executionMode !== null && !executionModes.has(patch.executionMode)) {

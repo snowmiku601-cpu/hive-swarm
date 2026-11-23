@@ -8,7 +8,7 @@ import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { createUpdateChecker } from './core.mjs';
-import { TeamBoard, boardWaitTimeout, childEnvironment, configuredEffort, pendingWaitFor, readSafeScreenshot, stallIssues, teamPhase, visibleChannels } from './engine.mjs';
+import { TeamBoard, boardWaitTimeout, childEnvironment, configuredEffort, memberBlockedReason, pendingWaitFor, readSafeScreenshot, teamAttention, teamPhase, visibleChannels } from './engine.mjs';
 import { openWorktree, removeWorktree, worktreeSource } from './worktrees.mjs';
 
 const boardUri = 'ui://hive-swarm/board.html';
@@ -28,22 +28,23 @@ const strings = {type:'array',items:string};
 const shape = (properties, required = []) => ({type: 'object', properties, required, additionalProperties: false});
 const teamId = {teamId: string};
 const memberForm = shape({
-  name: string, brief: string, taskLabel: string, group: string, model: string, effort: string,
+  name: string, brief: {...string, maxLength: 4000}, taskLabel: string, group: string, thread: string, model: string, effort: string,
   fallbackModel: string, fallbackEffort: {type:['string','null']},
   fork: string,
   writable:boolean,worktree:boolean,waitFor:strings,channels:strings,
   n:{...integer,minimum:2,maximum:8,description:'Spawn N homogeneous shard copies (<name>-1..<name>-N); omit for a single worker.'},
   tasks:{...strings,minItems:2,maxItems:8,description:'Shard this member into N copies (<name>-1..<name>-N), one per slice; omit for a single worker.'},
 }, ['name','brief']);
-const threadForm = shape({id:string,title:string,goal:string,members:strings}, ['id','title','goal']);
+const threadForm = shape({id:string,title:string,goal:{type:['string','null']},members:strings}, ['id','title']);
 const taskUpdateForm = shape({member:string,label:{type:['string','null']}},['member','label']);
 const tools = [
   {
-    name: 'start_team', title: 'Start a team', description: 'Start a user-requested team in a local workspace. Workers wait for their dependencies and mentions. Set writable only for members authorized to edit. Pass fork: "coordinator" on a member to inherit the current conversation. Optionally pass goalLine, member taskLabel, threads (outcome groups), and fallbackModel (quota failover).',
+    name: 'start_team', title: 'Start a team', description: 'Start a user-requested team in a local workspace. Workers wait for their dependencies and mentions. Set writable only for members authorized to edit. Pass fork: "coordinator" on a member to inherit the current conversation. Optionally pass goalLine, member taskLabel, thread / threads (outcome groups), parallelWriters, worktreeMode ("external" or "local"), and fallbackModel (quota failover).',
     inputSchema: shape({title: string, goalLine: string, cwd: string, task: string, model: string, effort: string,
       fallbackModel: string, fallbackEffort: {type:['string','null']},
       threads: {type:'array',items:threadForm}, coordinator:boolean,
-      concurrency: integer, turnLimit: integer, members: {type: 'array', items: memberForm}},
+      parallelWriters: boolean, worktreeMode: {type:'string', enum:['external','local']},
+      concurrency: {...integer, minimum: 1, maximum: 8}, turnLimit: integer, members: {type: 'array', items: memberForm}},
     ['cwd', 'task', 'members']),
   },
   {
@@ -108,8 +109,8 @@ const tools = [
   },
   {
     name: 'retire_member', title: 'Retire a member',
-    description: 'Retire a named member or shard group. A running member retires after its current turn. The saved chat and worktree stay available.',
-    inputSchema: shape({...teamId, member:string}, ['teamId','member']),
+    description: 'Retire a named member or shard group. A running member retires after its current turn. Set dropDependency to remove retired targets from downstream waitFor lists (owner/coordinator only). The saved chat and worktree stay available.',
+    inputSchema: shape({...teamId, member:string, dropDependency:boolean}, ['teamId','member']),
   },
   {
     name: 'set_member_model', title: 'Set a member model',
@@ -143,8 +144,9 @@ const tools = [
 const peerTools = [
   {
     name: 'read_board', title: 'Read the team board',
-    description: 'Read recent public posts or page through new posts after a post number. Check messages and briefs without starting another member.',
-    inputSchema: shape({after:integer,limit:integer,channel:string,mentionsOnly:boolean}), annotations: {readOnlyHint: true},
+    description: 'Read recent public posts, exact post sequence numbers (seqs), or page through new posts after a post number. Check messages and briefs without starting another member.',
+    inputSchema: shape({after:integer,limit:integer,channel:string,mentionsOnly:boolean,
+      seqs:{type:'array',items:{...integer,minimum:1},minItems:1,maxItems:20}}), annotations: {readOnlyHint: true},
   },
   {
     name: 'board_history', title: 'Read saved board history',
@@ -220,13 +222,13 @@ export function extractParentSessionId(meta, env = process.env) {
 function present(team, origin, activity, actor) {
   const {id,title,cwd,task,model,effort,paused,turns,turnLimit,channels} = team;
   const phase=teamPhase(team);
-  const issues=stallIssues(team);
-  const blockers=issues.filter(issue=>['quota','failed','cycle'].includes(issue.kind)||
-    (issue.kind==='dependency'&&!team.members.some(member=>member.name===issue.member&&['working','queued'].includes(member.status))));
+  const attention=teamAttention(team);
   const visible=visibleChannels(actor&&team.members.find(member=>member.name===actor));
   const events=visible?team.events.filter(event=>visible.includes(event.channel??'main')):team.events;
   return {
     id,title,cwd,task,model,effort,paused,turns,turnLimit,channels,activity,phase,
+    parallelWriters:team.parallelWriters===true,
+    worktreeMode:team.worktreeMode==='local'?'local':'external',
     ...(team.goalLine?{goalLine:team.goalLine}:{}),
     ...(team.parentSessionId?{parentSessionId:team.parentSessionId}:{}),
     ...(team.fallbackModel?{fallbackModel:team.fallbackModel,...(team.fallbackEffort!==undefined?{fallbackEffort:team.fallbackEffort}:{})}:{}),
@@ -235,16 +237,18 @@ function present(team, origin, activity, actor) {
       id:shotId,seq,index,author,caption,time,
       url:'/board/'+id+'/screenshot/'+seq+'/'+index,
     }))}:{}),
-    attention:phase==='stalled'?issues:phase==='budget'?
-      [{kind:'budget',text:'Turn limit reached ('+turns+'/'+turnLimit+'). Add 8 turns to continue.'},...blockers]:blockers,
+    attention,
     ...panelLink(team, origin),
     members: team.members.map(member => {
       const {name,role,group,brief,taskLabel,threadId,status,writable,waitFor,retireAfterTurn,worktree,workspace,addedBy,channels,lastTurn,fallbackModel,fallbackEffort,subagentName} = member;
       const executionMode = member.executionMode ?? (threadId ? 'session' : undefined);
-      return {name,role,group,brief,threadId,status,writable,waitFor,retireAfterTurn,worktree,workspace,addedBy,channels,lastTurn,
+      const blockedReason = memberBlockedReason(team, member);
+      return {name,role,group,threadId,status,writable,waitFor,retireAfterTurn,worktree,workspace,addedBy,channels,lastTurn,
+        ...(brief!==undefined?{brief}:{}),
         ...(taskLabel?{taskLabel}:{}),
         ...(executionMode?{executionMode}:{}),
         ...(subagentName?{subagentName}:{}),
+        ...(blockedReason?{blockedReason}:{}),
         ...(fallbackModel?{fallbackModel,...(fallbackEffort!==undefined?{fallbackEffort}:{})}:{}),
         ...(member.recoveryRequired?{recoveryRequired:true}:{}),
         ...(member.inbox?.length?{inboxCount:member.inbox.length}:{}),
@@ -347,7 +351,7 @@ export async function service({dataDirectory = root, listenPort = port, runner, 
     return board.switchModel(args.teamId,args.member,args.model,{resume:args.resume,effort,actor});
   }
   const removeCheckout=(id,name,force)=>board.removeWorktree(id,name,({team,member})=>
-    removeWorktree(dataDirectory,team.worktreeSource,team.id,member.name,member.workspace,{force}));
+    removeWorktree(dataDirectory,team.worktreeSource,team.id,member.name,member.workspace,{force,worktreeMode:team.worktreeMode}));
   const server = createServer(async (req, res) => {
     if (req.headers.host !== host) return send(res, 403, {error: 'Invalid host.'});
     const view = (team,actor) => present(team,origin,board.activityFor(team.id),actor);
@@ -512,7 +516,7 @@ export async function service({dataDirectory = root, listenPort = port, runner, 
         return;
       }
       if (name==='manage_channel') return send(res,200,board.manageChannel(args.teamId,args,actor));
-      if (actor && name === 'read_board') return send(res,200,board.readPosts(args.teamId,{...args,actor}));
+      if (name === 'read_board') return send(res,200,board.readPosts(args.teamId,{...args,actor}));
       if (actor && name === 'post_to_board') return send(res,200,board.postFrom(args.teamId,actor,args.text,args.channel,{wake:args.wake!==false}));
       if (actor && name === 'set_turn_outcome') return send(res,200,board.declareOutcome(args.teamId,actor,args));
       let team;
@@ -552,14 +556,14 @@ export async function service({dataDirectory = root, listenPort = port, runner, 
             ...(member?.fallbackModel ? [{model:member.fallbackModel,effort:member.fallbackEffort ?? undefined}] : []),
           ];
           const [source] = await Promise.all([
-            member?.worktree === true ? current.worktreeSource ?? worktreeSource(current.cwd) : undefined,
+            member?.worktree === true ? worktreeSource(current.cwd) : undefined,
             verifyModels(runner,checks),
           ]);
           if (res.destroyed) return;
           team = board.addMember(args.teamId,member,{replaces:args.replaces,worktreeSource:source,actor,fork:args.fork});
           break;
         }
-        case 'retire_member': team = board.retireMember(args.teamId,args.member,{actor}); break;
+        case 'retire_member': team = board.retireMember(args.teamId,args.member,{actor,dropDependency:args.dropDependency===true}); break;
         case 'set_member_model': {
           team=await changeModel(args,actor,res);
           if (!team) return;
@@ -608,7 +612,7 @@ export async function service({dataDirectory = root, listenPort = port, runner, 
     board = new TeamBoard(join(dataDirectory, 'teams.sqlite'), async request => {
       const {team,member,remember} = request;
       if (member.worktree) {
-        const workspace = await openWorktree(dataDirectory,team.worktreeSource,team.id,member.name,{mustExist:!!member.workspace});
+        const workspace = await openWorktree(dataDirectory,team.worktreeSource,team.id,member.name,{mustExist:!!member.workspace,worktreeMode:team.worktreeMode});
         if (!member.workspace) remember({workspace});
         member.workspace = workspace;
       }

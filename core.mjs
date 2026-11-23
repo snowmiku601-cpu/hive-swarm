@@ -1,7 +1,7 @@
 import {mkdirSync,realpathSync} from 'node:fs';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {TeamBoard,boardWaitTimeout,configuredEffort,pendingWaitFor,readSafeScreenshot,stallIssues,teamPhase,visibleChannels} from './engine.mjs';
+import {TeamBoard,boardWaitTimeout,configuredEffort,memberBlockedReason,pendingWaitFor,readSafeScreenshot,teamAttention,teamPhase,visibleChannels} from './engine.mjs';
 import {openWorktree,removeWorktree,worktreeSource} from './worktrees.mjs';
 
 const reads=new Set(['list_teams','board_status','board_history','read_board','list_models','read_journal','open_swarm_panel','wait_for_board']);
@@ -144,14 +144,7 @@ export function presentTeam(team,{activity={},actor,host=team.host??'codex'}={})
   const visible=visibleChannels(selected);
   const events=visible?team.events.filter(event=>visible.includes(event.channel??'main')):team.events;
   const phase=teamPhase(team);
-  const issues=stallIssues(team);
-  const blockers=issues.filter(issue=>['quota','failed','cycle'].includes(issue.kind)||
-    (issue.kind==='dependency'&&!team.members.some(member=>member.name===issue.member&&['working','queued'].includes(member.status))));
-  const recovery=team.members.filter(m=>m.recoveryRequired).map(m=>({kind:'recovery',member:m.name,text:'@'+m.name+' outcome unconfirmed. Inspect the owned session before continuing.'}));
-  const input=team.members.filter(m=>m.inputRequired).map(m=>({kind:'input',member:m.name,text:'@'+m.name+' needs your permission or input in its owned DSH session.'}));
-  const attention=[...input,...recovery,...(phase==='stalled'?issues:phase==='budget'
-    ?[{kind:'budget',text:'Turn limit reached ('+team.turns+'/'+team.turnLimit+'). Add 8 turns to continue.'},...blockers]
-    :blockers)];
+  const attention=teamAttention(team);
   const screenshots=team.screenshots?.length?team.screenshots.map(({id,seq,index,author,caption,time})=>({
     id,seq,index,author,caption,time,
     url:host==='codex'
@@ -159,6 +152,8 @@ export function presentTeam(team,{activity={},actor,host=team.host??'codex'}={})
       :'/api/hive-swarm/v1/screenshot?teamId='+encodeURIComponent(team.id)+'&seq='+seq+'&index='+index,
   })):undefined;
   return {id:team.id,host,title:team.title,cwd:team.cwd,task:team.task,model:team.model,effort:team.effort,
+    parallelWriters:team.parallelWriters===true,
+    worktreeMode:team.worktreeMode==='local'?'local':'external',
     ...(team.goalLine?{goalLine:team.goalLine}:{}),
     ...(team.parentSessionId?{parentSessionId:team.parentSessionId}:{}),
     ...(team.fallbackModel?{fallbackModel:team.fallbackModel,...(team.fallbackEffort!==undefined?{fallbackEffort:team.fallbackEffort}:{})}:{}),
@@ -168,11 +163,15 @@ export function presentTeam(team,{activity={},actor,host=team.host??'codex'}={})
     attention,events:events.slice(-60),
     members:team.members.map(member=>{
       const executionMode=member.executionMode??(member.threadId?'session':undefined);
-      return {name:member.name,role:member.role,group:member.group,brief:member.brief,
+      const blockedReason=memberBlockedReason(team,member);
+      return {name:member.name,role:member.role,group:member.group,
+        ...(member.brief!==undefined?{brief:member.brief}:{}),
         ...(member.taskLabel?{taskLabel:member.taskLabel}:{}),
         status:member.status,writable:member.writable,threadId:member.threadId,
         ...(executionMode?{executionMode}:{}),
         ...(member.subagentName?{subagentName:member.subagentName}:{}),
+        ...(member.addedBy?{addedBy:member.addedBy}:{}),
+        ...(blockedReason?{blockedReason}:{}),
         session:member.threadId?{host,id:member.threadId}:null,waitFor:member.waitFor,pendingWaitFor:pendingWaitFor(team,member),
         ...(member.inbox?.length?{inboxCount:member.inbox.length}:{}),
         worktree:member.worktree,workspace:member.workspace,channels:member.channels,lastTurn:member.lastTurn,
@@ -183,7 +182,7 @@ export function presentTeam(team,{activity={},actor,host=team.host??'codex'}={})
 }
 
 /** Host-owned application. Wire transports must supply trusted actor metadata separately from args. */
-export function createSwarmApplication({dataDirectory,runner,host='codex',workspaceAllowed,shutdownTimeoutMs=5000}) {
+export function createSwarmApplication({dataDirectory,runner,host='codex',workspaceAllowed,shutdownTimeoutMs=5000,maxWaitTimeoutSec=host==='deepseek-harness'?900:55}) {
   if(typeof dataDirectory!=='string'||!dataDirectory||typeof runner?.run!=='function'||typeof workspaceAllowed!=='function') {
     throw Error('A data directory, runner and workspace scope are required.');
   }
@@ -191,11 +190,11 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
   const inflight=new Map();let closing;let closed=false;
   const board=new TeamBoard(join(dataDirectory,'teams.sqlite'),async request=>{
     if(request.member.worktree) {
-      const workspace=await openWorktree(dataDirectory,request.team.worktreeSource,request.team.id,request.member.name,{mustExist:Boolean(request.member.workspace)});
+      const workspace=await openWorktree(dataDirectory,request.team.worktreeSource,request.team.id,request.member.name,{mustExist:Boolean(request.member.workspace),worktreeMode:request.team.worktreeMode});
       request.remember({workspace});request.member.workspace=workspace;
     }
     return runner.run(request);
-  },{host});
+  },{host,maxWaitTimeoutSec});
   board.db.exec('CREATE TABLE IF NOT EXISTS application_commands (id TEXT PRIMARY KEY, action TEXT NOT NULL, signature TEXT NOT NULL, state TEXT NOT NULL, value TEXT)');
   const find=board.db.prepare('SELECT * FROM application_commands WHERE id=?');
   const reserve=board.db.prepare("INSERT INTO application_commands VALUES (?, ?, ?, 'pending', NULL)");
@@ -273,9 +272,24 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
         return board.declareOutcome(id,actor.member,args);
       case 'pause_team':return view(board.pause(id));
       case 'resume_team':return view(board.resume(id,args.extraTurns));
-      case 'cancel_turn':return view(await board.cancelTurn(id,args.member,{clearInbox:args.clearInbox===true}));
-      case 'resolve_recovery':return view(board.resolveRecovery(id,args.member,{action:args.action}));
-      case 'retire_member':return view(board.retireMember(id,args.member,{actor:actor?.member}));
+      case 'cancel_turn': {
+        const before=team.members.find(entry=>entry.name===args.member);
+        const turn=before?.pendingRun?.turn??before?.lastTurn;
+        const updated=view(await board.cancelTurn(id,args.member,{clearInbox:args.clearInbox===true}),actor?.member);
+        await runner.onRunSettled?.({teamId:id,member:args.member,turn,reason:'Worker turn cancelled.',state:'cancelled'});
+        return updated;
+      }
+      case 'resolve_recovery': {
+        const action=args.action??'dismiss';
+        const before=team.members.find(entry=>entry.name===args.member);
+        const turn=before?.pendingRun?.turn??before?.lastTurn;
+        const updated=view(board.resolveRecovery(id,args.member,{action:args.action}),actor?.member);
+        if(action==='dismiss') {
+          await runner.onRunSettled?.({teamId:id,member:args.member,turn,reason:'Unconfirmed run dismissed.',state:'cancelled'});
+        }
+        return updated;
+      }
+      case 'retire_member':return view(board.retireMember(id,args.member,{actor:actor?.member,dropDependency:args.dropDependency===true}),actor?.member);
       case 'set_team_title':return view(board.setTeamTitle(id,args.title,actor?.member));
       case 'set_team_plan': {
         const plan=Array.isArray(args)?args:{
@@ -292,8 +306,8 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
         const effort=m?.effort===null?undefined:m?.effort??team.effort;
         await selections([model&&(m?.model||m?.effort)?{model,effort}:null,
           m?.fallbackModel?{model:m.fallbackModel,effort:m.fallbackEffort}:null]);
-        const source=m?.worktree?team.worktreeSource??await worktreeSource(team.cwd):undefined;
-        return view(board.addMember(id,m,{replaces:args.replaces,fork:args.fork,actor:actor?.member,worktreeSource:source}));
+        const source=m?.worktree?await worktreeSource(team.cwd):undefined;
+        return view(board.addMember(id,m,{replaces:args.replaces,fork:args.fork,actor:actor?.member,worktreeSource:source}),actor?.member);
       }
       case 'set_member_model': {
         const member=board.liveMember(team,args.member);
@@ -303,7 +317,7 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
         if(effort&&!model.efforts.includes(effort))effort=null;
         return view(board.switchModel(id,args.member,args.model,{resume:args.resume,effort,actor:actor?.member}));
       }
-      case 'remove_worktree':return view(await board.removeWorktree(id,args.member,({team,member})=>removeWorktree(dataDirectory,team.worktreeSource,team.id,member.name,member.workspace,{force:args.force===true})));
+      case 'remove_worktree':return view(await board.removeWorktree(id,args.member,({team,member})=>removeWorktree(dataDirectory,team.worktreeSource,team.id,member.name,member.workspace,{force:args.force===true,worktreeMode:team.worktreeMode})));
       case 'read_journal': {
         const member=team.members.find(m=>m.name===args.member);if(!member?.threadId)throw Error('This member has no owned session yet.');
         return {member:member.name,status:member.status,threadId:member.threadId,
@@ -345,7 +359,7 @@ export function createSwarmApplication({dataDirectory,runner,host='codex',worksp
   async function waitForUpdate({teamId,since=0,revision:previous,timeoutSec=45},context={}) {
     ensureOpen();await ownTeam(teamId,context);const actor=actorOf(context.actor,{teamId});
     if(!Number.isSafeInteger(since)||since<0)throw Error('Invalid update cursor.');
-    const duration=boardWaitTimeout(timeoutSec)*1000;
+    const duration=boardWaitTimeout(timeoutSec,maxWaitTimeoutSec)*1000;
     return new Promise((resolve,reject)=>{
       let done=false,timer;
       const current=reason=>{const page=board.readHistory(teamId,{after:since,limit:100,actor:actor?.member});
