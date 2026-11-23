@@ -239,3 +239,108 @@ test('journal returns the most recent turns in turn order, with a maximum of thi
   assert.deepEqual(page.map(entry => [entry.turn, entry.status]), [[31, 'pending'], [32, 'quota']]);
   assert.throws(() => store.readJournal(identity.sessionId, {limit: 31}), /limit/i);
 });
+
+test('abandon settles cancelled/failed/quota runs cleanly, stays idempotent, and keeps setOutcome strict', t => {
+  const store = open(t);
+  store.begin(identity);
+  assert.throws(() => store.setOutcome(identity, {...outcome, state: 'cancelled'}), /done, waiting, failed, or quota/i);
+  assert.throws(() => store.abandon(identity, {state: 'done'}), /cancelled, failed, or quota/i);
+
+  // Overwrites a previously declared pending outcome when abandoned before settlement.
+  store.setOutcome(identity, outcome);
+  const res = store.abandon(identity, {state: 'cancelled', message: 'Turn cancelled by coordinator.'});
+  assert.equal(res.settled, true);
+  assert.equal(res.run.settled, true);
+  assert.equal(res.run.hostIdle, true);
+  assert.equal(res.run.status, 'cancelled');
+  assert.deepEqual(res.run.outcome, {
+    state: 'cancelled', message: 'Turn cancelled by coordinator.', notify: [], waitFor: [],
+  });
+  assert.deepEqual(store.listPending(), []);
+  assert.deepEqual(store.readJournal(identity.sessionId), [{
+    turn: 4, status: 'cancelled', report: 'Turn cancelled by coordinator.', steps: [],
+  }]);
+
+  // Idempotent on already settled runs.
+  const again = store.abandon(identity, {state: 'failed', message: 'Should not overwrite.'});
+  assert.equal(again.settled, false);
+  assert.deepEqual(again.run, res.run);
+});
+
+test('abandonPendingForMember settles only unsettled runs for the matching team and member', t => {
+  const store = open(t);
+  const id1 = {...identity, turn: 1, requestId: 'req-1'};
+  const id2 = {...identity, turn: 2, requestId: 'req-2'};
+  const settledId = {...identity, turn: 3, requestId: 'req-3'};
+  const otherMember = {...identity, member: 'reviewer', turn: 1, requestId: 'req-rev', sessionId: 'session-rev'};
+
+  store.begin(id1);
+  store.begin(id2);
+  store.begin(settledId);
+  store.setOutcome(settledId, outcome);
+  store.patch(settledId, terminal);
+  store.finish(settledId);
+  store.begin(otherMember);
+
+  const settled = store.abandonPendingForMember(identity.teamId, identity.member, {
+    state: 'failed', message: 'Dismissed stale runs.',
+  });
+  assert.equal(settled.length, 2);
+  assert.deepEqual(settled.map(r => [r.turn, r.status, r.settled]), [
+    [1, 'failed', true],
+    [2, 'failed', true],
+  ]);
+  assert.deepEqual(store.listPending().map(r => r.member), ['reviewer']);
+  assert.deepEqual(store.abandonPendingForMember(identity.teamId, identity.member), []);
+});
+
+test('RunStore safely migrates legacy runs.sqlite tables lacking cancelled settlement CHECK', async t => {
+  const {DatabaseSync} = await import('node:sqlite');
+  const {filename, cleanup} = disk(t);
+  try {
+    const legacy = new DatabaseSync(filename);
+    legacy.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE run_sessions (
+        session_id TEXT PRIMARY KEY NOT NULL,
+        team_id TEXT NOT NULL,
+        member TEXT NOT NULL,
+        UNIQUE (session_id, team_id, member)
+      ) STRICT;
+      CREATE TABLE runs (
+        request_id TEXT PRIMARY KEY NOT NULL,
+        team_id TEXT NOT NULL,
+        member TEXT NOT NULL,
+        turn INTEGER NOT NULL CHECK (turn > 0),
+        session_id TEXT NOT NULL,
+        workspace TEXT NOT NULL,
+        accepted_seq INTEGER NOT NULL DEFAULT 0 CHECK (accepted_seq >= 0),
+        claim_seq INTEGER NOT NULL DEFAULT 0 CHECK (claim_seq >= 0),
+        turn_end_seq INTEGER NOT NULL DEFAULT 0 CHECK (turn_end_seq >= 0),
+        host_idle INTEGER NOT NULL DEFAULT 0 CHECK (host_idle IN (0, 1)),
+        outcome TEXT,
+        steps TEXT NOT NULL DEFAULT '[]',
+        settled INTEGER NOT NULL DEFAULT 0 CHECK (settled IN (0, 1)),
+        UNIQUE (team_id, member, turn),
+        FOREIGN KEY (session_id, team_id, member) REFERENCES run_sessions (session_id, team_id, member),
+        CHECK (settled = 0 OR (outcome IS NOT NULL AND claim_seq > 0 AND turn_end_seq >= claim_seq AND host_idle = 1))
+      ) STRICT;
+      INSERT INTO run_sessions VALUES ('session-1', 'team-1', 'builder');
+      INSERT INTO runs (request_id, team_id, member, turn, session_id, workspace, settled)
+        VALUES ('request-4', 'team-1', 'builder', 4, 'session-1', '/work/project', 0);
+    `);
+    legacy.close();
+
+    const migrated = new RunStore(filename);
+    try {
+      const settled = migrated.abandon(identity, {state: 'cancelled', message: 'Migrated cancel.'});
+      assert.equal(settled.settled, true);
+      assert.equal(settled.run.status, 'cancelled');
+      assert.deepEqual(migrated.listPending(), []);
+    } finally {
+      migrated.close();
+    }
+  } finally {
+    cleanup();
+  }
+});
