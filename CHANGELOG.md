@@ -1,11 +1,13 @@
 # Changelog
 
-## [2.2.0] - 2026-11-23
+## 2.2.0
+
+Verified across **388/388** tests (`npm test`), updating `hive-swarm@2.2.0` (`latest`, 26 files) and `dsh-hive-swarm@2.2.0` (`next`, 10 files, `client/dist.js` = `204,087 B`).
 
 ### Specialized Honeycomb Cells & Replay Parity (`hive-graph.js`, `hive-gif.js`, `board.*`, `packages/dsh-hive-swarm/client/*`)
 - **3-Tier Specialized Honeycomb (`projectHive`):** Groups members exclusively (1 bee = 1 hex) by outcome `threads` → `group` / primary non-`main` `channels` → status buckets (`Working`, `Waiting`, `Needs you`, `Done`), supporting Ring-1 + Ring-2 (18 outer hexes) + Ring-3 fallback with dynamic `hiveMinimumHeight`, wrapped multi-line titles (`wrapHexTitle`), native tooltips (`fullTitle` + `goal`), and Coordinator `X of Y done` subtitles.
-- **Routed Connectors, Self-Loops & GIF Replay (`routeHiveConnector`, `hive-gif.js`):** Routes straight `hexRayExit` lines when clear, quadratic Bézier curves around intermediate/Coordinator hexes when blocked, cubic Bézier self-loops for intra-hex messages, canonical light/dark palette tones, and mid-replay dashed `Waiting on` connectors — forwarded identically into `exportGraphReplayGif`.
-- **UI Focus Dimming & `blockedReason` Badges (`board.*`, `views.jsx`, `style.css`):** Clicking any hex or bee highlights connected hexes and dims unrelated cells/connectors; Overview and Members render explicit `blockedReason` pills (`shared-writer-active`, `concurrency-limit`, `recovery-required`, `waiting-dependencies`); CSS minification in `scripts/build-dsh-client.mjs` keeps `dist.js` well under the `250,000 B` bundle budget.
+- **Routed Connectors, Self-Loops & GIF Replay (`routeHiveConnector`, `hive-gif.js`):** Routes straight `hexRayExit` lines when clear, quadratic Bézier curves around intermediate/Coordinator hexes when blocked, cubic Bézier self-loops for intra-hex messages, canonical light/dark palette tones, software-canvas `textAlign`/`textBaseline` centering, and mid-replay dashed `Waiting on` connectors — forwarded identically into `exportGraphReplayGif`.
+- **UI Focus Dimming & `blockedReason` Badges (`board.*`, `views.jsx`, `style.css`):** Clicking any hex or bee highlights connected hexes and dims unrelated cells/connectors; Overview and Members render explicit `blockedReason` pills (`shared-writer-active`, `concurrency-limit`, `recovery-required`, `waiting-dependencies`); CSS minification in `scripts/build-dsh-client.mjs` keeps `dist.js` at `204,087 B` (well under the `250,000 B` bundle budget).
 
 ### Scheduler, Worktrees & Durable Run Settlement (`engine.mjs`, `core.mjs`, `worktrees.mjs`, `run-store.mjs`, `codex.mjs`, `server.mjs`)
 - **`parallelWriters`, `worktreeMode: 'local'` & `blockedReason`:** Added `parallelWriters: true` (opt-out of shared-checkout writer serialization alongside `concurrency` up to `8`), `worktreeMode: 'local'` placing isolated branches under `<repoRoot>/.hive-swarm-worktrees/<teamId>/<member>` with `.git/info/exclude` registration and `20000ms` `git status` timeout, plus computed `memberBlockedReason` and `teamAttention` (including `recovery` attention).
